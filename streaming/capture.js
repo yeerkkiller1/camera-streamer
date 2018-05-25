@@ -11,11 +11,16 @@ if (cam.configGet().formatName !== "MJPG") {
   process.exit(1);
 }
 
+function clock() {
+    var time = process.hrtime();
+    return time[0]*1000 + time[1]/1000000;
+}
+
 let rollingFrameCount = 30;
 let rollingFrames = [];
 function addFrameTime() {
     
-    rollingFrames.push(performance.now());
+    rollingFrames.push(clock());
     if(rollingFrames.length > rollingFrameCount) {
         rollingFrames.shift();
         let FPmS = rollingFrameCount / (rollingFrames[rollingFrameCount - 1] - rollingFrames[0]);
