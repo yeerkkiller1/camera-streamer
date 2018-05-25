@@ -3,6 +3,7 @@ var crypto = require('crypto');
 var fs = require("fs");
 
 var cam = new v4l2camera.Camera("/dev/video0");
+console.log(cam.formats);
 let format = cam.formats.filter(x => x.formatName === "MJPG")[0];
 //format = cam.formats[cam.formats.length - 1];
 console.log(format);
@@ -36,6 +37,9 @@ var max = 0;
 let lastDigest = "";
 
 let i = 0;
+
+let targetFrameTime = 1000 * format.interval.numerator / format.interval.denominator;
+// Okay... so, sometimes the camera dynamically changes the frame rate.
 
 cam.start();
 
@@ -82,7 +86,7 @@ setInterval(() => {
 
         //cam.capture(onCapture);
     });
-}, 1000 / 30);
+}, targetFrameTime);
 
 setInterval(() => {
     console.log("keep alive");
