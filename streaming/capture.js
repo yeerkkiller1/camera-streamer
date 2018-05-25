@@ -25,8 +25,10 @@ function addFrameTime() {
     if(rollingFrames.length > rollingFrameCount) {
         rollingFrames.shift();
         let FPmS = rollingFrameCount / (rollingFrames[rollingFrameCount - 1] - rollingFrames[0]);
-        console.log("FPS", (FPmS * 1000).toFixed(3));
+        //console.log("FPS", .toFixed(3));
+        return (FPmS * 1000);
     }
+    return 0;
 }
 
 var max = 0;
@@ -44,12 +46,14 @@ cam.capture(function onCapture(success) {
     var frame = cam.frameRaw();
     let buffer = Buffer.from(frame);
 
+    let fps = addFrameTime();;
+
     let hash = crypto.createHash("sha256");
     hash.write(buffer);
     hash.end();
     let digest = hash.digest("base64");
     if(digest === lastDigest) {
-        console.log("repeated frame");
+        console.log(`repeated frame, fps ${fps}`);
     }
     lastDigest = digest;
 
@@ -59,7 +63,6 @@ cam.capture(function onCapture(success) {
     //  (and get a)
 
     //fs.writeFileSync("./result.jpg", buffer);
-    //addFrameTime();
     cam.capture(onCapture);
 });
 
