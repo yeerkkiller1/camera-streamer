@@ -62,7 +62,7 @@ setInterval(() => {
             return;
         }
         capturePending = null;
-        console.log(`Finished ${curCapture}`);
+        //console.log(`Finished ${curCapture}`);
         
         /*
         if(max ++> 100) {
@@ -87,6 +87,8 @@ setInterval(() => {
             console.log(`Writing ${i}, fps ${fps.toFixed(3)}`);
             let count = i % 1000;
             fs.writeFileSync(`./result${count}.jpg`, buffer);
+        } else {
+            console.log(`Frame ${i}, fps ${fps.toFixed(3)}`);
         }
 
         //todonext
