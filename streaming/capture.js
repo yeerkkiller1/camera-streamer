@@ -1,7 +1,7 @@
 var v4l2camera = require("v4l2camera");
 
 var cam = new v4l2camera.Camera("/dev/video0");
-cam.configSet(cam.formats[cam.formats.length - 1]);
+cam.configSet(cam.formats.filter(x => x.formatName === "MJPG")[0]);
 if (cam.configGet().formatName !== "MJPG") {
   console.log("NOTICE: MJPG camera required");
   process.exit(1);
