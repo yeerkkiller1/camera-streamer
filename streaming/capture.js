@@ -4,7 +4,7 @@ var fs = require("fs");
 
 var cam = new v4l2camera.Camera("/dev/video0");
 let format = cam.formats.filter(x => x.formatName === "MJPG")[0];
-format = cam.formats[cam.formats.length - 1];
+//format = cam.formats[cam.formats.length - 1];
 //console.log(cam.formats);
 cam.configSet(format);
 if (cam.configGet().formatName !== "MJPG") {
