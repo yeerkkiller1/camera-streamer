@@ -29,8 +29,14 @@ function addFrameTime() {
     }
 }
 
+var max = 0;
+
 cam.start();
 cam.capture(function onCapture(success) {    
+    if(max ++> 600) {
+        cam.stop();
+        return;
+    }
     var frame = cam.frameRaw();
     let buffer = Buffer.from(frame);
     fs.writeFileSync("./result.jpg", buffer);
