@@ -1,0 +1,4 @@
+*.mp4
+*.avi
+digest.txt
+node_modules

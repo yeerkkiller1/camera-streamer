@@ -1,0 +1,1 @@
+vlc v4l2:///dev/video0 --sout "#transcode{vcodec=wmv1}:std{access=http,mux=asf,dst=0.0.0.0:8080}"
