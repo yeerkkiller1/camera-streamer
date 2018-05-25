@@ -55,7 +55,7 @@ cam.capture(function onCapture(success) {
     hash.end();
     let digest = hash.digest("base64");
     if(digest === lastDigest) {
-        console.log(`repeated frame ${i}, fps ${fps}`);
+        console.log(`repeated frame ${i}, fps ${fps}, ${digest}`);
     }
     lastDigest = digest;
 
