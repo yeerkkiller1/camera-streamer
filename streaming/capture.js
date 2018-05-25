@@ -23,6 +23,7 @@ function addFrameTime() {
 
 cam.start();
 cam.capture(function (success) {
+    addFrameTime();
   /*
   var frame = cam.frameRaw();
   let buffer = Buffer.from(frame);
@@ -30,3 +31,7 @@ cam.capture(function (success) {
   cam.stop();
   */
 });
+
+setInterval(() => {
+    console.log("keep alive");
+}, 1000 * 1000);
