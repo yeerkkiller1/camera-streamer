@@ -1,1 +1,6 @@
-{}
+{
+    "dependencies": {
+      "v4l2camera": "git+https://github.com/yeerkkiller1/node-v4l2camera.git"
+    }
+  }
+  

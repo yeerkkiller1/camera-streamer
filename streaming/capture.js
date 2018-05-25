@@ -10,5 +10,5 @@ cam.start();
 cam.capture(function (success) {
   //var frame = cam.frameRaw();
   //require("fs").createWriteStream("result.jpg").end(new Buffer(frame));
-  cam.stop();
+  //cam.stop();
 });
