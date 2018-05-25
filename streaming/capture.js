@@ -51,8 +51,7 @@ cam.capture(function onCapture(success) {
     let fps = addFrameTime();
 
     let hash = crypto.createHash("sha256");
-    hash.write(buffer);
-    hash.end();
+    hash.update(buffer);
     let digest = hash.digest("base64");
     if(digest === lastDigest) {
         console.log(`repeated frame ${i}, fps ${fps}, ${digest}`);
