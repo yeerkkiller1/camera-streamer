@@ -24,7 +24,7 @@ function addFrameTime() {
     if(rollingFrames.length > rollingFrameCount) {
         rollingFrames.shift();
         let FPmS = rollingFrameCount / (rollingFrames[rollingFrameCount - 1] - rollingFrames[0]);
-        console.log("FPS", (FPmS * 1000).toFixed(3));
+        //console.log("FPS", (FPmS * 1000).toFixed(3));
     }
 }
 
@@ -35,7 +35,15 @@ cam.capture(function onCapture(success) {
     let hash = crypto.createHash("sha256");
     hash.write(buffer);
     hash.end();
-    console.log(hash.digest("base64"));
+    let digest = hash.digest("base64");
+    if(!digest.startsWith("eAAAABE77U")) {
+        console.log("start changed");
+    }
+
+    if(!digest.endsWith("oNsRWnH7k7/BMhUHAP4VBwD8")) {
+        console.log("end changed");
+    }
+    
   
     addFrameTime();
     cam.capture(onCapture);
