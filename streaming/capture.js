@@ -39,42 +39,43 @@ let i = 0;
 
 cam.start();
 
-//setInterval(() => )
-cam.capture(function onCapture(success) {    
-    /*
-    if(max ++> 100) {
-        cam.stop();
-        return;
-    }
-    */
-    var frame = cam.frameRaw();
-    let buffer = Buffer.from(frame);
+setInterval(() => {
+    cam.capture(function onCapture(success) {    
+        /*
+        if(max ++> 100) {
+            cam.stop();
+            return;
+        }
+        */
+        var frame = cam.frameRaw();
+        let buffer = Buffer.from(frame);
 
-    let fps = addFrameTime();
+        let fps = addFrameTime();
 
-    let hash = crypto.createHash("sha256");
-    hash.update(buffer);
-    let digest = hash.digest("base64");
-    if(digest === lastDigest) {
-        console.log(`repeated frame ${i}, fps ${fps}, ${digest}`);
-    }
-    lastDigest = digest;
+        let hash = crypto.createHash("sha256");
+        hash.update(buffer);
+        let digest = hash.digest("base64");
+        if(digest === lastDigest) {
+            console.log(`repeated frame ${i}, fps ${fps}, ${digest}`);
+        }
+        lastDigest = digest;
 
-    if(i % 1000 < 60) {
-        console.log(`Writing ${i}, fps ${fps.toFixed(3)}`);
-        let count = i % 1000;
-        fs.writeFileSync(`./result${count}.jpg`, buffer);
-    }
+        if(i % 1000 < 60) {
+            console.log(`Writing ${i}, fps ${fps.toFixed(3)}`);
+            let count = i % 1000;
+            fs.writeFileSync(`./result${count}.jpg`, buffer);
+        }
 
-    //todonext
-    // Setup websocket server, and stream this image. Hmm... also, maybe timestamp the image?
-    // But then, we have to decide how to do fps. It looks like our camera fps is wrong, and we can poll it faster than 31 fps
-    //  (and get a)
+        //todonext
+        // Setup websocket server, and stream this image. Hmm... also, maybe timestamp the image?
+        // But then, we have to decide how to do fps. It looks like our camera fps is wrong, and we can poll it faster than 31 fps
+        //  (and get a)
 
-    i++;
+        i++;
 
-    cam.capture(onCapture);
-});
+        //cam.capture(onCapture);
+    });
+}, 1000);
 
 setInterval(() => {
     console.log("keep alive");
