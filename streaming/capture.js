@@ -15,7 +15,7 @@ if (cam.configGet().formatName !== "MJPG") {
 
 function clock() {
     var time = process.hrtime();
-    return time[0]*1000 + time[1]/1000000;
+    return time[0]/1000 + time[1] * 1000 * 1000;
 }
 
 let rollingFrameCount = 30;
