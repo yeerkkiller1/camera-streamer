@@ -1,5 +1,6 @@
 var v4l2camera = require("v4l2camera");
 var crypto = require('crypto');
+var fs = require("fs");
 
 var cam = new v4l2camera.Camera("/dev/video0");
 let format = cam.formats.filter(x => x.formatName === "MJPG")[0];
@@ -32,6 +33,7 @@ cam.start();
 cam.capture(function onCapture(success) {    
     var frame = cam.frameRaw();
     let buffer = Buffer.from(frame);
+    fs.writeFileSync("./result.jpg", buffer);
     addFrameTime();
     cam.capture(onCapture);
 });
