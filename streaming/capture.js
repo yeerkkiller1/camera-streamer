@@ -62,6 +62,7 @@ setInterval(() => {
             return;
         }
         capturePending = null;
+        console.log(`Finished ${curCapture}`);
         
         /*
         if(max ++> 100) {
