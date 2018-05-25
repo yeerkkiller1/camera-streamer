@@ -28,7 +28,7 @@ function addFrameTime() {
     }
 }
 
-let firstDigest = "";
+let lastDigest = "";
 let firstChars = 5;
 let lastChars = 10;
 
@@ -40,20 +40,22 @@ cam.capture(function onCapture(success) {
     hash.write(buffer);
     hash.end();
     let digest = hash.digest("base64");
-    firstDigest = firstDigest || digest;
+    lastDigest = lastDigest || digest;
 
-    let startPart = firstDigest.slice(0, firstChars);
-    let endPart = firstDigest.slice(-lastChars);
+    let startPart = lastDigest.slice(0, firstChars);
+    let endPart = lastDigest.slice(-lastChars);
     let mutableDigestPart = digest.slice(firstChars, -lastChars);
 
     if(!digest.startsWith(startPart)) {
         console.log("start changed");
         console.log(digest, mutableDigestPart);
+        lastDigest = digest;
     }
 
     if(!digest.endsWith(endPart)) {
         console.log("end changed");
         console.log(digest);
+        lastDigest = digest;
     }
     
   
