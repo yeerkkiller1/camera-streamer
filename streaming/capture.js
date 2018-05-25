@@ -15,7 +15,7 @@ let rollingFrameCount = 30;
 let rollingFrames = [];
 function addFrameTime() {
     
-    rollingFrames.push(+new Date());
+    rollingFrames.push(performance.now());
     if(rollingFrames.length > rollingFrameCount) {
         rollingFrames.shift();
         let FPmS = rollingFrameCount / (rollingFrames[rollingFrameCount - 1] - rollingFrames[0]);
