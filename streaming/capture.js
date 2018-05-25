@@ -13,11 +13,12 @@ if (cam.configGet().formatName !== "MJPG") {
 let rollingFrameCount = 30;
 let rollingFrames = [];
 function addFrameTime() {
+    
     rollingFrames.push(+new Date());
     if(rollingFrames.length > rollingFrameCount) {
         rollingFrames.shift();
         let FPmS = rollingFrameCount / (rollingFrames[rollingFrameCount - 1] - rollingFrames[0]);
-        console.log("FPS", (FPmS * 100).toFixed(3));
+        console.log("FPS", (FPmS * 1000).toFixed(3));
     }
 }
 
