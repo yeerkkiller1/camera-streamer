@@ -38,10 +38,12 @@ cam.capture(function onCapture(success) {
     let digest = hash.digest("base64");
     if(!digest.startsWith("eAAAABE77U")) {
         console.log("start changed");
+        console.log(digest);
     }
 
     if(!digest.endsWith("oNsRWnH7k7/BMhUHAP4VBwD8")) {
         console.log("end changed");
+        console.log(digest);
     }
     
   
