@@ -22,8 +22,9 @@ function addFrameTime() {
 }
 
 cam.start();
-cam.capture(function (success) {
+cam.capture(function onCapture(success) {
     addFrameTime();
+    cam.capture(onCapture);
   /*
   var frame = cam.frameRaw();
   let buffer = Buffer.from(frame);
