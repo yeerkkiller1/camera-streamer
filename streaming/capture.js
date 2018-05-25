@@ -44,7 +44,7 @@ cam.capture(function onCapture(success) {
     var frame = cam.frameRaw();
     let buffer = Buffer.from(frame);
 
-    crypto.createHash("sha256");
+    let hash = crypto.createHash("sha256");
     hash.write(buffer);
     hash.end();
     let digest = hash.digest("base64");
