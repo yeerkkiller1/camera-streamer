@@ -30,7 +30,7 @@ function addFrameTime() {
 
 let lastDigest = "";
 let firstChars = 5;
-let lastChars = 10;
+let lastChars = 30;
 
 cam.start();
 cam.capture(function onCapture(success) {    
