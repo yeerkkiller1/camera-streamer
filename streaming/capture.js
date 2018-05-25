@@ -63,6 +63,8 @@ cam.capture(function onCapture(success) {
         fs.writeFileSync("./result.jpg", buffer);
     }
 
+    console.log(fps.toFixed(3), digest);
+
     //todonext
     // Setup websocket server, and stream this image. Hmm... also, maybe timestamp the image?
     // But then, we have to decide how to do fps. It looks like our camera fps is wrong, and we can poll it faster than 31 fps
