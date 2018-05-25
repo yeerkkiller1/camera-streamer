@@ -39,8 +39,15 @@ let i = 0;
 
 cam.start();
 
+let capturePending = false;
 setInterval(() => {
-    cam.capture(function onCapture(success) {    
+    if(capturePending) {
+        console.log("Aborted read, last read didn't come back");
+        return;
+    }
+    capturePending = true;
+    cam.capture(function onCapture(success) {
+        capturePending = false;
         /*
         if(max ++> 100) {
             cam.stop();
