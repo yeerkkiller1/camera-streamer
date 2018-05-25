@@ -75,7 +75,7 @@ setInterval(() => {
 
         //cam.capture(onCapture);
     });
-}, 1000);
+}, 1000 / 30);
 
 setInterval(() => {
     console.log("keep alive");
