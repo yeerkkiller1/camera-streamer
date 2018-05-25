@@ -43,15 +43,26 @@ let targetFrameTime = 1000 * format.interval.numerator / format.interval.denomin
 
 cam.start();
 
-let capturePending = false;
+let capturePending = null;
 setInterval(() => {
+    let curCapture = clock();
     if(capturePending) {
-        console.log("Aborted read, last read didn't come back");
-        return;
+        if((curCapture - capturePending) > 1000) {
+            console.log("Last read didn't finish, but it is taking too long. Reading despite missing frame.");
+        } else {
+            console.log("Aborting read, last read still isn't finished");
+            return;
+        }
     }
-    capturePending = true;
+    capturePending = curCapture;
     cam.capture(function onCapture(success) {
-        capturePending = false;
+        if(curCapture !== capturePending) {
+            capturePending = null;
+            console.warn(`Got unexpected capture, ignoring`);
+            return;
+        }
+        capturePending = null;
+        
         /*
         if(max ++> 100) {
             cam.stop();
