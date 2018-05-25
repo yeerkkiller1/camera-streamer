@@ -58,7 +58,7 @@ cam.capture(function onCapture(success) {
     }
     lastDigest = digest;
 
-    if(i % 1000 < 30) {
+    if(i % 1000 < 60) {
         console.log(`Writing ${i}, fps ${fps.toFixed(3)}`);
         let count = i % 1000;
         fs.writeFileSync(`./result${count}.jpg`, buffer);
