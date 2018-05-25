@@ -48,7 +48,7 @@ cam.capture(function onCapture(success) {
     var frame = cam.frameRaw();
     let buffer = Buffer.from(frame);
 
-    let fps = addFrameTime();;
+    let fps = addFrameTime();
 
     let hash = crypto.createHash("sha256");
     hash.write(buffer);
@@ -56,6 +56,7 @@ cam.capture(function onCapture(success) {
     let digest = hash.digest("base64");
     if(digest === lastDigest) {
         console.log(`repeated frame ${i}, fps ${fps}`);
+        fs.writeFileSync("./result.jpg", buffer);
     }
     lastDigest = digest;
 
@@ -66,7 +67,6 @@ cam.capture(function onCapture(success) {
 
     i++;
 
-    //fs.writeFileSync("./result.jpg", buffer);
     cam.capture(onCapture);
 });
 
