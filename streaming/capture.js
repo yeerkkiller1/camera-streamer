@@ -56,9 +56,13 @@ cam.capture(function onCapture(success) {
     let digest = hash.digest("base64");
     if(digest === lastDigest) {
         console.log(`repeated frame ${i}, fps ${fps}`);
-        fs.writeFileSync("./result.jpg", buffer);
     }
     lastDigest = digest;
+
+    if(i % 100 === 0) {
+        console.log(`Writing ${i}`);
+        fs.writeFileSync("./result.jpg", buffer);
+    }
 
     //todonext
     // Setup websocket server, and stream this image. Hmm... also, maybe timestamp the image?
