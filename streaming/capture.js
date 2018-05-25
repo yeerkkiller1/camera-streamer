@@ -35,6 +35,8 @@ var max = 0;
 
 let lastDigest = "";
 
+let i = 0;
+
 cam.start();
 cam.capture(function onCapture(success) {    
     /*
@@ -53,7 +55,7 @@ cam.capture(function onCapture(success) {
     hash.end();
     let digest = hash.digest("base64");
     if(digest === lastDigest) {
-        console.log(`repeated frame, fps ${fps}`);
+        console.log(`repeated frame ${i}, fps ${fps}`);
     }
     lastDigest = digest;
 
@@ -61,6 +63,8 @@ cam.capture(function onCapture(success) {
     // Setup websocket server, and stream this image. Hmm... also, maybe timestamp the image?
     // But then, we have to decide how to do fps. It looks like our camera fps is wrong, and we can poll it faster than 31 fps
     //  (and get a)
+
+    i++;
 
     //fs.writeFileSync("./result.jpg", buffer);
     cam.capture(onCapture);
