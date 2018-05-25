@@ -50,7 +50,7 @@ setInterval(() => {
         if((curCapture - capturePending) > 1000) {
             console.log(`Last read didn't finish, but it is taking too long. Reading despite missing frame. CurCapture ${curCapture}, pending ${capturePending}`);
         } else {
-            console.log(`Aborting read, last read at ${capturePending} still isn't finished, and it is only  ${curCapture}`);
+            //console.log(`Aborting read, last read at ${capturePending} still isn't finished, and it is only  ${curCapture}`);
             return;
         }
     }
