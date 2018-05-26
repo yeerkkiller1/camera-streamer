@@ -25,7 +25,7 @@ function addFrameTime() {
     rollingFrames.push(clock());
     if(rollingFrames.length > rollingFrameCount) {
         rollingFrames.shift();
-        let FPmS = rollingFrameCount / (rollingFrames[rollingFrameCount - 1] - rollingFrames[0]);
+        let FPmS = (rollingFrameCount - 1) / (rollingFrames[rollingFrameCount - 1] - rollingFrames[0]);
         //console.log("FPS", .toFixed(3));
         return (FPmS * 1000);
     }
