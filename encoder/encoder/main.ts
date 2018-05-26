@@ -2,6 +2,7 @@
 //  and put them in a mp4 video file. Like ./raw/test0.mp4 has jpegs inside of it.
 
 import * as fs from "fs";
+import { keyBy } from "./util/misc";
 
 function p2(str: string) {
     while(str.length < 2) {
@@ -48,12 +49,14 @@ function textFromUInt32(num: number) {
 
 for(let fileName of ["./raw/test1.mp4", "./raw/test5.mp4"]) {
     console.log(fileName);
+    ///*
     let buffer = fs.readFileSync(fileName);
     for(let i = 0; i < 8; i++) {
         let byte = buffer.readUInt8(i);
         process.stdout.write(p2(byte.toString(16)) + " ");
     }
     process.stdout.write("\n");
+    //*/
     
 
     // https://github.com/emericg/MiniVideo/blob/348ec21b99f939ca6a0ed65a257042434e8b98ec/minivideo/src/import.cpp
@@ -416,6 +419,7 @@ for(let fileName of ["./raw/test1.mp4", "./raw/test5.mp4"]) {
         return subBoxes;
     }
 
+    ///*
     let pPos: P<number> = {v: 0};
     while(pPos.v < buffer.length) {
         let box = parseBox(buffer, pPos);
@@ -438,9 +442,136 @@ for(let fileName of ["./raw/test1.mp4", "./raw/test5.mp4"]) {
             case "free": break;
         }
     }
+    //*/
 
     //todonext
     // Generic parsing, based off of pseudo language
     // http://l.web.umkc.edu/lizhu/teaching/2016sp.video-communication/ref/mp4.pdf
     // https://github.com/emericg/MiniVideo/blob/master/minivideo/src/demuxer/mp4/mp4.cpp
+
+    {
+        type P<T> = {v: T};
+
+        interface IBox<T extends string> {
+            type: T;
+        }
+        function Box(type: string): { new(): IBox<typeof type> } {
+            return class BoxInner implements IBox<typeof type> {
+                type = type;
+            };
+        }
+
+        interface MP4BoxEntryBase {
+            kind: string;
+            parse(buffer: Buffer, pPos: P<number>, end: number): any;
+        }
+
+
+        class UInt32 implements MP4BoxEntryBase {
+            kind = "UInt32";
+            parse(buffer: Buffer, pPos: P<number>): number {
+                let num = buffer.readUInt32BE(pPos.v);
+                pPos.v += 4;
+                return num;
+            }
+        }
+        class UInt32String implements MP4BoxEntryBase {
+            kind = "UInt32String";
+            parse(buffer: Buffer, pPos: P<number>): string {
+                let num = buffer.readUInt32BE(pPos.v);
+                pPos.v += 4;
+                return textFromUInt32(num);
+            }
+        }
+
+        class ToEnd implements MP4BoxEntryBase {
+            kind = "ToEnd";
+            constructor(private entry: MP4BoxEntryBase) { }
+            parse(buffer: Buffer, pPos: P<number>, end: number): any[] {
+                let result: any[] = [];
+                while(pPos.v < end) {
+                    let obj = this.entry.parse(buffer, pPos, end);
+                    result.push(obj);
+                }
+                return result;
+            }
+        }
+        
+
+        interface MP4Box {
+            [key: string]: MP4BoxEntryBase;
+        }
+
+        new UInt32String
+        class FileTypeBox extends Box("ftyp") {
+            major_brand = new UInt32String();
+            minor_version = new UInt32();
+            compatible_brands = new ToEnd(new UInt32String());
+        }
+
+        let allBoxes = [new FileTypeBox()];
+        let boxesLookup = keyBy(allBoxes, x => x.type);
+
+        function parseBox(buffer: Buffer, pPos: P<number>) {
+            let pos = pPos.v;
+            let start = pos;
+            /*
+                size is an integer that specifies the number of bytes in this box, including all its fields and contained
+                    boxes; if size is 1 then the actual size is in the field largesize; if size is 0, then this box is the last
+                    one in the file, and its contents extend to the end of the file (normally only used for a Media Data Box) 
+            */
+            let size = buffer.readUInt32BE(pos); pos += 4;
+            let type = textFromUInt32(buffer.readUInt32BE(pos)); pos += 4;
+    
+            if(size === 1) {
+                size = readUInt64BE(buffer, pos); pos += 8;
+            } else if(size === 0) {
+                size = buffer.length;
+            }
+    
+            if(type === "uuid") {
+                throw new Error(`Unhandled mp4 box type uuid`);
+            }
+            
+            let contentStart = pos;
+    
+            pPos.v = start + size;
+    
+            return {
+                start,
+                contentStart,
+                size,
+                type
+            };
+        }
+        function parseMP4(buffer: Buffer, pos = 0, end = buffer.length): {}[] {
+            let boxes: {}[] = [];
+
+            let pPos = { v: pos };
+            while(pPos.v < end) {
+                let box = parseBox(buffer, pPos);
+                let boxInfo = boxesLookup[box.type] as any as MP4Box;
+                if(!boxInfo) {
+                    console.warn(`Unknown box type ${box.type}`);
+                    continue;
+                }
+                let boxPos = { v: box.contentStart };
+                for(let key in boxInfo) {
+                    if(key === "type") continue;
+                    let typeInfo = boxInfo[key];
+                    
+                    let value = typeInfo.parse(buffer, boxPos, box.start + box.size);
+                    console.log(key, value);
+                }
+
+                let unaccountedSpace = box.start + box.size - boxPos.v;
+                if(unaccountedSpace > 0) {
+                    console.log(`Unaccounted space in ${box.type}, ${unaccountedSpace} bytes`);
+                }
+            }
+            return boxes;
+        }
+
+        console.log(parseMP4(buffer));
+    }
 }
