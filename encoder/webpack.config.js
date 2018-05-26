@@ -49,8 +49,7 @@ function getConfig (env) {
                 NODE_CONSTANT: node,
                 NODE: node
             }),
-            new Visualizer(),
-            new webpack.HotModuleReplacementPlugin()
+            new Visualizer()
         ],
 
         resolveLoader: {
