@@ -18,7 +18,7 @@ function clock() {
     return time[0]*1000 + time[1] / 1000 / 1000;
 }
 
-let rollingFrameCount = 30;
+let rollingFrameCount = 5;
 let rollingFrames = [];
 function addFrameTime() {
     
