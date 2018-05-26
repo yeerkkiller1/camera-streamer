@@ -1,0 +1,1 @@
+node node_modules/webpack/bin/webpack --progress --watch --env.node --display-error-details
