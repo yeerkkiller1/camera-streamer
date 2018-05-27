@@ -47,7 +47,10 @@ function textFromUInt32(num: number) {
     return String.fromCharCode(d) + String.fromCharCode(c) + String.fromCharCode(b) + String.fromCharCode(a);
 }
 
-for(let fileName of ["./raw/test1.mp4", "./raw/test5.mp4"]) {
+for(let fileName of [
+    //"./raw/test1.mp4",
+    "./raw/test5.mp4"
+]) {
     console.log(fileName);
     ///*
     let buffer = fs.readFileSync(fileName);
@@ -82,380 +85,30 @@ for(let fileName of ["./raw/test1.mp4", "./raw/test5.mp4"]) {
 
     {
         type P<T> = {v: T};
-
-        type Box = {
-            start: number;
-            contentStart: number;
-
-            size: number;
-            type: string;
-        }
-        function parseBox(buffer: Buffer, pPos: P<number>): Box {
-            let pos = pPos.v;
-            let start = pos;
-            /*
-                size is an integer that specifies the number of bytes in this box, including all its fields and contained
-                    boxes; if size is 1 then the actual size is in the field largesize; if size is 0, then this box is the last
-                    one in the file, and its contents extend to the end of the file (normally only used for a Media Data Box) 
-            */
-            let size = buffer.readUInt32BE(pos); pos += 4;
-            let type = textFromUInt32(buffer.readUInt32BE(pos)); pos += 4;
-
-            if(size === 1) {
-                size = readUInt64BE(buffer, pos); pos += 8;
-            } else if(size === 0) {
-                size = buffer.length;
-            }
-
-            if(type === "uuid") {
-                throw new Error(`Unhandled mp4 box type uuid`);
-            }
-            
-            let contentStart = pos;
-
-            pPos.v = start + size;
-
-            return {
-                start,
-                contentStart,
-                size,
-                type
-            };
-        }
-
-        type FTyp = {
-            major_brand: string;
-            minor_version: number;
-            compatible_brands: string[];
-        };
-        function parseBoxFtyp(buffer: Buffer, box: Box): FTyp {
-            let pos = box.contentStart;
-            let major_brand = textFromUInt32(buffer.readInt32BE(pos)); pos += 4;
-            let minor_version = buffer.readInt32BE(pos); pos += 4;
-            let compatible_brands: string[] = [];
-            let end = box.start + box.size;
-            while(pos < end) {
-                compatible_brands.push(textFromUInt32(buffer.readInt32BE(pos))); pos += 4;
-            }
-            return {
-                major_brand,
-                minor_version,
-                compatible_brands
-            };
-        }
-
-        type Elst = ReturnType<typeof parseElst>;
-        function parseElst(buffer: Buffer, box: Box) {
-            let pos = box.contentStart;
-            let version = buffer.readInt8(pos); pos += 1;
-            let flags = buffer.readIntBE(pos, 3); pos += 3;
-
-            let entry_count = buffer.readUInt32BE(pos); pos += 4;
-            type EntryType = {
-                segment_duration: number;
-                media_time: number;
-                media_rate_integer: number;
-                media_rate_fraction: number;
-            };
-            let entries: EntryType[] = [];
-            for(let i = 0; i < entry_count; i++) {
-                let segment_duration;
-                let media_time;
-                if (version==1) {
-                    segment_duration = readUInt64BE(buffer, pos); pos += 8;
-                    // Screw it, I no longer care about negative media_times (this should be reading a signed 64 bit int, but I don't care)
-                    media_time = readUInt64BE(buffer, pos); pos += 8;
-                } else { // version==0
-                    segment_duration = buffer.readUInt32BE(pos); pos += 4;
-                    media_time = buffer.readInt32BE(pos); pos += 4;
-                }
-                let media_rate_integer = buffer.readInt16BE(pos); pos += 2;
-                let media_rate_fraction = buffer.readInt16BE(pos); pos += 2;
-                entries.push({
-                    segment_duration,
-                    media_time,
-                    media_rate_integer,
-                    media_rate_fraction,
-                });
-            }
-            return entries;
-        }
-
-
-        type EdtsBoxTypes = Elst;
-        type Edts = ReturnType<typeof parseEdts>;
-        function parseEdts(buffer: Buffer, box: Box) {
-            let pPos = {v: box.contentStart };
-            let end = box.start + box.size;
-            let subBoxes: EdtsBoxTypes[] = [];
-            while(pPos.v < end) {
-                let subBox = parseBox(buffer, pPos);
-                if(subBox.type === "elst") {
-                    subBoxes.push(parseElst(buffer, subBox));
-                } else {
-                    console.warn(`Unknown trak sub box ${subBox.type}, size ${subBox.size}`);
-                }
-            }
-            return subBoxes;
-        }
-
-        type Tkhd = ReturnType<typeof parseTkhd>;
-        function parseTkhd(buffer: Buffer, box: Box) {
-            let pos = box.contentStart;
-            let version = buffer.readInt8(pos); pos += 1;
-            let flags = buffer.readIntBE(pos, 3); pos += 3;
-
-            let creation_time: number;
-            let modification_time: number;
-            let track_ID: number;
-            let duration: number;
-
-            if(version === 1) {
-                creation_time = readUInt64BE(buffer, pos); pos += 8;
-                modification_time = readUInt64BE(buffer, pos); pos += 8;
-                track_ID = buffer.readInt32BE(pos); pos += 4;
-                let reserved = buffer.readUInt32BE(pos); pos += 4;
-                duration = readUInt64BE(buffer, pos); pos += 8;
-            } else if(version === 0) {
-                creation_time = buffer.readUInt32BE(pos); pos += 4;
-                modification_time = buffer.readUInt32BE(pos); pos += 4;
-                track_ID = buffer.readUInt32BE(pos); pos += 4;
-                let reserved = buffer.readUInt32BE(pos); pos += 4;
-                duration = buffer.readUInt32BE(pos); pos += 4;
-            } else {
-                throw new Error(`Unexpected version ${version}`);
-            }
-
-            let reserved0 = buffer.readUInt32BE(pos); pos += 4;
-            let reserved1 = buffer.readUInt32BE(pos); pos += 4;
-
-            let layer = buffer.readInt16BE(pos); pos += 2;
-            let alternate_group = buffer.readInt16BE(pos); pos += 2;
-            let volume = buffer.readInt16BE(pos) / 0x0100; pos += 2;
-
-            let reserved = buffer.readUInt16BE(pos); pos += 2;        
-
-            let matrix: number[] = [];
-            for(let i = 0 ; i < 9; i++) {
-                matrix.push(buffer.readInt32BE(pos)); pos += 4;
-            }
-            
-            let width = buffer.readInt32BE(pos); pos += 4;
-            let height = buffer.readInt32BE(pos); pos += 4;
-
-            return {
-                creation_time,
-                modification_time,
-                track_ID,
-                duration,
-                layer,
-                alternate_group,
-                volume,
-                matrix,
-                width,
-                height
-            };
-        }
-        
-        // mdhd
-        // hdlr
-        // minf
-        type MdiaBoxTypes = Elst;
-        type Mdia = ReturnType<typeof parseEdts>;
-        function parseMdia(buffer: Buffer, box: Box) {
-            let pPos = {v: box.contentStart };
-            let end = box.start + box.size;
-            let subBoxes: MdiaBoxTypes[] = [];
-            while(pPos.v < end) {
-                let subBox = parseBox(buffer, pPos);
-                if(subBox.type === "") {
-                    
-                } else {
-                    console.warn(`Unknown mdia sub box ${subBox.type}, size ${subBox.size}`);
-                }
-            }
-            return subBoxes;
-        }
-
-
-        // tref
-        type Trak = ReturnType<typeof parseTrak>;
-        type TrackBoxTypes = Box | Tkhd | Edts | Mdia;
-        function parseTrak(buffer: Buffer, box: Box): TrackBoxTypes[] {
-            let pPos = {v: box.contentStart };
-            let end = box.start + box.size;
-            let subBoxes: TrackBoxTypes[] = [];
-            while(pPos.v < end) {
-                let subBox = parseBox(buffer, pPos);
-                if(subBox.type === "tkhd") {
-                    subBoxes.push(parseTkhd(buffer, subBox));
-                } else if(subBox.type === "edts") {
-                    subBoxes.push(parseEdts(buffer, subBox));
-                } else if(subBox.type === "mdia") {
-                    subBoxes.push(parseMdia(buffer, subBox));
-                } else {
-                    console.warn(`Unknown trak sub box ${subBox.type}, size ${subBox.size}`);
-                }
-            }
-            return subBoxes;
-        }
-
-        type Mvhd = ReturnType<typeof parseBoxMvhd>;
-        function parseBoxMvhd(buffer: Buffer, box: Box) {
-            let pos = box.contentStart;
-            let version = buffer.readInt8(pos); pos += 1;
-            let flags = buffer.readIntBE(pos, 3); pos += 3;
-
-            let creation_time: number;
-            let modification_time: number;
-            let timescale: number;
-            let duration: number;
-
-            if(version === 1) {
-                creation_time = readUInt64BE(buffer, pos); pos += 8;
-                modification_time = readUInt64BE(buffer, pos); pos += 8;
-                timescale = buffer.readInt32BE(pos); pos += 4;
-                duration = readUInt64BE(buffer, pos); pos += 8;
-            } else if(version === 0) {
-                creation_time = buffer.readUInt32BE(pos); pos += 4;
-                modification_time = buffer.readUInt32BE(pos); pos += 4;
-                timescale = buffer.readUInt32BE(pos); pos += 4;
-                duration = buffer.readUInt32BE(pos); pos += 4;
-            } else {
-                throw new Error(`Unexpected version ${version}`);
-            }
-
-            let rate = buffer.readInt32BE(pos) / 0x00010000; pos += 4;
-            let volume = buffer.readInt16BE(pos) / 0x0100; pos += 2;
-            let reserved = buffer.readInt16BE(pos); pos += 2;
-            let reserved0 = buffer.readUInt32BE(pos); pos += 4;
-            let reserved1 = buffer.readUInt32BE(pos); pos += 4;
-
-            let matrix: number[] = [];
-            for(let i = 0 ; i < 9; i++) {
-                matrix.push(buffer.readInt32BE(pos)); pos += 4;
-            }
-            
-            for(let i = 0; i < 6; i++) {
-                buffer.readUInt32BE(pos); pos += 4;
-            }
-
-            let next_track_ID = buffer.readUInt32BE(pos); pos += 4;
-
-            return {
-                creation_time,
-                modification_time,
-                timescale,
-                duration,
-                rate,
-                volume,
-                matrix,
-                next_track_ID
-            };
-        }
-
-        type UdtaBox = Box;
-        type UdtaMeta = ReturnType<typeof parseUdtaMeta>;
-        // Hmm... the spec says udta only has a copyright notice defined as a child. But people are writing the meta which is supposed to be
-        //  inside a moov, trak or file in here. So... oh well..
-        function parseUdtaMeta(buffer: Buffer, box: Box) {
-            let pos = box.contentStart;
-            let version = buffer.readInt8(pos); pos += 1;
-            let flags = buffer.readIntBE(pos, 3); pos += 3;
-
-            let pPos = {v: pos };
-            let end = box.start + box.size;
-            let subBoxes: UdtaBox[] = [];
-            while(pPos.v < end) {
-                let subBox = parseBox(buffer, pPos);
-                if(subBox.type === "") {
-                } else {
-                    console.warn(`Unknown udta.meta sub box ${subBox.type}, size ${subBox.size}`);
-                }
-            }
-            return subBoxes;
-        }
-
-
-        type Udta = ReturnType<typeof parseUdta>;
-        type UdtaTypes = UdtaMeta;
-        function parseUdta(buffer: Buffer, box: Box): UdtaTypes[] {
-            let pPos = {v: box.contentStart };
-            let end = box.start + box.size;
-            let subBoxes: UdtaTypes[] = [];
-            while(pPos.v < end) {
-                let subBox = parseBox(buffer, pPos);
-                if(subBox.type === "meta") {
-                    subBoxes.push(parseUdtaMeta(buffer, subBox));
-                } else {
-                    console.warn(`Unknown udta sub box ${subBox.type}, size ${subBox.size}`);
-                }
-            }
-            return subBoxes;
-        }
-        
-        // TODO:
-        // udta
-        // mvex
-        // ipmc
-        type MoovBoxTypes = Mvhd | Trak | Udta;
-        function parseBoxMoov(buffer: Buffer, box: Box): MoovBoxTypes[] {
-            let pPos = {v: box.contentStart };
-            let end = box.start + box.size;
-            let subBoxes: MoovBoxTypes[] = [];
-            while(pPos.v < end) {
-                let subBox = parseBox(buffer, pPos);
-                if(subBox.type === "mvhd") {
-                    subBoxes.push(parseBoxMvhd(buffer, subBox));
-                } else if(subBox.type === "trak") {
-                    subBoxes.push(parseTrak(buffer, subBox));
-                } else if(subBox.type === "udta") {
-                    subBoxes.push(parseUdta(buffer, subBox));
-                } else {
-                    console.warn(`Unknown moov sub box ${subBox.type}, size ${subBox.size}`);
-                }
-            }
-            return subBoxes;
-        }
-
-        ///*
-        let pPos: P<number> = {v: 0};
-        while(pPos.v < buffer.length) {
-            let box = parseBox(buffer, pPos);
-
-            console.log(`${box.type}, size ${box.size}`);
-            
-            switch(box.type) {
-                default: console.warn(`Unknown box type ${box.type}`); break;
-                case "ftyp": {
-                    console.log(parseBoxFtyp(buffer, box));
-                    break;
-                }
-                case "moov": {
-                    let moov = parseBoxMoov(buffer, box);
-                    console.log(JSON.stringify(moov, null, " "));
-                    break;
-                }
-                case "mdat": break;
-                // Ehh... free space is free, so just skip it.
-                case "free": break;
-            }
-        }
-        //*/
-    }
-
-    {
-        type P<T> = {v: T};
         type Ctor<T> = {new(): T};
 
-        interface MP4BoxEntryBase {
-            parse(buffer: Buffer, pPos: P<number>, end: number, debugPath: string[]): any;
+        interface MP4BoxEntryBase<T = any> {
+            parse(buffer: Buffer, pPos: P<number>, end: number, debugPath: string[]): T;
+            write(buffer: Buffer, pos: number, value: T): void;
         }
 
         interface IBox<T extends string> {
             type: T;
             chooseBox?: (buffer: Buffer, pos: number, end: number, debugPath: string[]) => IBox<T>;
         }
+
+        interface MP4Box {
+            [key: string]: MP4BoxEntryBase;
+        }
+
+        interface BoxMetadata {
+            START: number;
+            CONTENT_START: number;
+            SIZE: number;
+            INFO: MP4Box;
+            PROPERTY_OFFSETS: { [propName: string]: number };
+        }
+
         function Box(type: string): { new(): IBox<typeof type> } {
             return class BoxInner implements IBox<typeof type> {
                 type = type;
@@ -489,18 +142,60 @@ for(let fileName of ["./raw/test1.mp4", "./raw/test5.mp4"]) {
         }
         
 
-        interface MP4Box {
-            [key: string]: MP4BoxEntryBase;
-        }
-
         class FileTypeBox extends Box("ftyp") {
             major_brand = new UInt32String();
             minor_version = new UInt32();
             compatible_brands = new ToEndEntry(new UInt32String());
         }
         class MoovTypeBox extends Box("moov") {
-            boxes = new BoxEntryToEnd(new TrakTypeBox());
+            boxes = new BoxEntryToEnd(new TrakTypeBox(), new MvhdTypeBox());
         }
+        class FreeBox extends Box("free") {
+            data = new ToEndEntry(new UInt8());
+        }
+
+        class MdatBox extends Box("mdat") {
+            data = new ToEndEntry(new UInt8());
+        }
+
+        class MvhdTypeBox0 extends FullBox("mvhd") {
+            creation_time = new UInt32();
+            modification_time = new UInt32();
+            timescale = new UInt32();
+            duration = new UInt32();
+
+            rate = new NumberShifted(new Int32(), 0x00010000);
+            volume = new NumberShifted(new Int16(), 0x0100);
+
+            reserved = new UInt16();
+            reserved0 = new UInt32();
+            reserved1 = new UInt32();
+
+            matrix = new NArray(new Int32(), 9);
+            pre_defined = new NArray(new UInt32(), 6);
+
+            next_track_ID = new Int32();
+        }
+        class MvhdTypeBox1 extends FullBox("mvhd") {
+            creation_time = new UInt64();
+            modification_time = new UInt64();
+            timescale = new UInt32();
+            duration = new UInt64();
+
+            rate = new NumberShifted(new Int32(), 0x00010000);
+            volume = new NumberShifted(new Int16(), 0x0100);
+
+            reserved = new UInt16();
+            reserved0 = new UInt32();
+            reserved1 = new UInt32();
+
+            matrix = new NArray(new Int32(), 9);
+            pre_defined = new NArray(new UInt32(), 6);
+
+            next_track_ID = new Int32();
+        }
+        const MvhdTypeBox = FullBoxVersionSplit("mvhd", MvhdTypeBox0, MvhdTypeBox1);
+
         class TrakTypeBox extends Box("trak") {
             boxes = new BoxEntryToEnd(new TkhdTypeBox());
         }
@@ -510,50 +205,137 @@ for(let fileName of ["./raw/test1.mp4", "./raw/test5.mp4"]) {
             track_ID = new UInt32();
             reserved = new UInt32();
             duration = new UInt32();
-            // ...
+
+            reserved0 = new UInt32();
+            reserved1 = new UInt32();
+
+            layer = new Int16();
+            alternate_group = new Int16();
+            volume = new Int16();
+            reversed2 = new UInt16();
+
+            matrix = new NArray(new Int32(), 9);
+
+            width = new UInt32();
+            height = new UInt32();
         }
         class TkhdTypeBox1 extends FullBox("tkhd") {
             creation_time = new UInt64();
             modification_time = new UInt64();
-            // ...
+            track_ID = new UInt32();
+            reserved = new UInt32();
+            duration = new UInt64();
+
+            reserved0 = new UInt32();
+            reserved1 = new UInt32();
+
+            layer = new Int16();
+            alternate_group = new Int16();
+            volume = new Int16();
+            reversed2 = new UInt16();
+
+            matrix = new NArray(new Int32(), 9);
+
+            width = new UInt32();
+            height = new UInt32();
         }
         const TkhdTypeBox = FullBoxVersionSplit("tkhd", TkhdTypeBox0, TkhdTypeBox1);
 
+        // #region Primitives
 
+        function IntN(bytes: number, signed: boolean): { new(): MP4BoxEntryBase<number> } {
+            if(bytes > 8 || bytes <= 0) {
+                throw new Error(`Invalid number of bytes ${bytes}`);
+            }
+            return class {
+                parse(buffer: Buffer, pPos: P<number>): number {
+                    let num: number;
+                    if(bytes > 6) {
+                        let extraBytes = bytes - 6;
+                        if(signed) {
+                            let first2Bytes = buffer.readIntBE(pPos.v, extraBytes);
+                            if(first2Bytes < 0) {
+                                throw new Error(`Signed > 6 bytes negative not implemented yet`);
+                            }
+                        }
+                        let first2Bytes = buffer.readUIntBE(pPos.v, extraBytes);
+                        if(first2Bytes != 0) {
+                            throw new Error(`64 bit integer with bits in first 2 bytes. This means it cannot be a javascript number, and this is not supported yet.`);
+                        }
+                        num = buffer.readUIntBE(pPos.v + extraBytes, bytes - extraBytes);
+                    } else {
+                        if(signed) {
+                            num = buffer.readIntBE(pPos.v, bytes);
+                        } else {
+                            num = buffer.readUIntBE(pPos.v, bytes);
+                        }
+                    }
+                    pPos.v += bytes;
+                    return num;
+                }
+                write(buffer: Buffer, pos: number, value: number): void {
+                    if(value > Number.MAX_SAFE_INTEGER || value < Number.MIN_SAFE_INTEGER) {
+                        throw new Error(`Cannot write number, as it is too large. ${value}`);
+                    }
+                    if(value % 1 !== 0) {
+                        throw new Error(`Cannot write number, as it is a decimal. ${value}`);
+                    }
+                    if(bytes > 6) {
+                        let extraBytes = bytes - 6;
+                        buffer.writeUIntBE(value, pos + extraBytes, bytes);
+                    } else {
+                        if(signed) {
+                            buffer.writeIntBE(value, pos, bytes);
+                        } else {
+                            buffer.writeUIntBE(value, pos, bytes);
+                        }
+                    }
+                }
+            };
+        }
 
-        class UInt8 implements MP4BoxEntryBase {
-            parse(buffer: Buffer, pPos: P<number>): number {
-                let num = buffer.readInt8(pPos.v);
-                pPos.v += 1;
-                return num;
-            }
+        function MapBoxEntryBase<T, N>(
+            Ctor: { new(): MP4BoxEntryBase<T> },
+            parseMap: (value: T) => N,
+            writeMap: (value: N) => T,
+        ) {
+            let entry = new Ctor();
+            return class {
+                parse(buffer: Buffer, pPos: P<number>, end: number, debugPath: string[]): N {
+                    let t = entry.parse(buffer, pPos, end, debugPath);
+                    return parseMap(t);
+                }
+                write(buffer: Buffer, pos: number, value: N): void {
+                    let t = writeMap(value);
+                    entry.write(buffer, pos, t);
+                }
+            };
         }
-        class UInt24 implements MP4BoxEntryBase {
-            parse(buffer: Buffer, pPos: P<number>): number {
-                let num = buffer.readIntBE(pPos.v, 3);
-                pPos.v += 3;
-                return num;
+
+        const UInt8 = IntN(1, false);
+        const UInt16 = IntN(2, false);
+        const UInt24 = IntN(3, false);
+        const UInt32 = IntN(4, false);
+        const UInt64 = IntN(8, false);
+
+        const Int16 = IntN(2, true);
+        const Int32 = IntN(4, true);
+
+        const UInt32String = MapBoxEntryBase(
+            UInt32,
+            textFromUInt32,
+            textToUInt32
+        );
+
+        class NumberShifted implements MP4BoxEntryBase {
+            constructor(private baseNum: MP4BoxEntryBase<number>, private shiftDivisor: number) { }
+            parse(buffer: Buffer, pPos: P<number>, end: number, debugPath: string[]): number {
+                return this.baseNum.parse(buffer, pPos, end, debugPath) / this.shiftDivisor;
             }
-        }
-        class UInt32 implements MP4BoxEntryBase {
-            parse(buffer: Buffer, pPos: P<number>): number {
-                let num = buffer.readUInt32BE(pPos.v);
-                pPos.v += 4;
-                return num;
-            }
-        }
-        class UInt64 implements MP4BoxEntryBase {
-            parse(buffer: Buffer, pPos: P<number>): number {
-                let num = readUInt64BE(buffer, pPos.v);
-                pPos.v += 8;
-                return num;
-            }
-        }
-        class UInt32String implements MP4BoxEntryBase {
-            parse(buffer: Buffer, pPos: P<number>): string {
-                let num = buffer.readUInt32BE(pPos.v);
-                pPos.v += 4;
-                return textFromUInt32(num);
+            write(buffer: Buffer, pos: number, value: number) {
+                value *= this.shiftDivisor;
+                value = Math.round(value);
+                this.baseNum.write(buffer, pos, value);
             }
         }
 
@@ -569,6 +351,7 @@ for(let fileName of ["./raw/test1.mp4", "./raw/test5.mp4"]) {
 
                 return arr;
             }
+            write() { throw new Error(`BoxEntryToEnd.parse not implemented`); }
         }
 
         class ToEndEntry implements MP4BoxEntryBase {
@@ -581,11 +364,35 @@ for(let fileName of ["./raw/test1.mp4", "./raw/test5.mp4"]) {
                 }
                 return result;
             }
+
+            write() { throw new Error(`ToEndEntry.parse not implemented`); }
         }
 
+        class NArray implements MP4BoxEntryBase {
+            constructor(private entry: MP4BoxEntryBase, private count: number) { }
+            parse(buffer: Buffer, pPos: P<number>, end: number, debugPath: string[]): any[] {
+                let result: any[] = [];
+                for(let i = 0; i < this.count; i++) {
+                    let obj = this.entry.parse(buffer, pPos, end, debugPath);
+                    result.push(obj);
+                    if(pPos.v >= end) {
+                        throw new Error(`Overflowed end of box while parsing array. ${debugPath.join(".")}`);
+                    }
+                }
+                return result;
+            }
 
-        //todonext
-        // Arrays of const count
+            write() { throw new Error(`ToEndEntry.parse not implemented`); }
+        }
+
+        // #endregion
+
+        const RootBox = new BoxEntryToEnd(
+            new FileTypeBox(),
+            new MoovTypeBox(),
+            new FreeBox(),
+            new MdatBox(),
+        );
 
         function parseBoxInfo(boxes: IBox<any>[], buffer: Buffer, pPos: P<number>, debugPath: string[], isBoxComplete = true) {
             let boxesLookup = keyBy(boxes, x => x.type);
@@ -637,9 +444,16 @@ for(let fileName of ["./raw/test1.mp4", "./raw/test5.mp4"]) {
             }
             let boxInfo = boxInfoClass as any as MP4Box;
             let boxPos = { v: box.contentStart };
-            let boxResult: { [key: string]: {} } = {};
-            boxResult["START"] = box.start;
-            boxResult["SIZE"] = box.size;
+            let PROPERTY_OFFSETS: { [propName: string]: number } = {};
+            let boxMetadata: BoxMetadata = {
+                START: box.start,
+                CONTENT_START: box.contentStart,
+                SIZE: box.size,
+                INFO: boxInfo,
+                PROPERTY_OFFSETS,
+            };
+            let boxResult: { [key: string]: {} } = { ...boxMetadata };
+            
             for(let key in boxInfo) {
                 if(key === "type") {
                     boxResult[key] = boxInfo[key];
@@ -647,6 +461,7 @@ for(let fileName of ["./raw/test1.mp4", "./raw/test5.mp4"]) {
                 }
                 let typeInfo = boxInfo[key];
                 
+                PROPERTY_OFFSETS[key] = boxPos.v;
                 let value = typeInfo.parse(buffer, boxPos, end, curDebugPath);
                 boxResult[key] = value;
             }
@@ -672,12 +487,37 @@ for(let fileName of ["./raw/test1.mp4", "./raw/test5.mp4"]) {
             return results;
         }
 
-        let boxes = new BoxEntryToEnd(
+        function writePrimitiveToVariable(buffer: Buffer, boxResult: BoxMetadata, propName: string, newValue: Types.Primitive) {
+            let pos = boxResult.PROPERTY_OFFSETS[propName];
+            let boxEntry = boxResult.INFO[propName];
+            (boxResult as any)[propName] = newValue;
+            boxEntry.write(buffer, pos, newValue);
+        }
+
+        //todonext
+        // mvhd, and then change the rate and write it back to a new file
+        // Arrays of const count
+
+        let boxes = RootBox.parse(buffer, {v: 0}, buffer.length, []) as any;
+        //console.log(boxes[3].boxes);
+
+        //let newBuffer = new Buffer(buffer);
+        //let box = (boxes as any)[1].boxes[0];
+        //writePrimitiveToVariable(buffer, box, "duration", 1000);
+        //console.log(box);
+
+        /*
+        let boxes2 = new BoxEntryToEnd(
             new FileTypeBox(),
             new MoovTypeBox(),
-        ).parse(buffer, {v: 0}, buffer.length, [])
+        ).parse(newBuffer, {v: 0}, newBuffer.length, []);
+        let box2 = (boxes as any)[1].boxes[0];
+        console.log(box2);
+        */
 
-        console.log(JSON.stringify(boxes, null, "  "));
+        //writePrimitiveToVariable(newBuffer, box)
+
+        //fs.writeFileSync("test.mp4", newBuffer);
     }
 
     // Generic parsing, based off of pseudo language
