@@ -197,8 +197,88 @@ for(let fileName of [
         const MvhdTypeBox = FullBoxVersionSplit("mvhd", MvhdTypeBox0, MvhdTypeBox1);
 
         class TrakTypeBox extends Box("trak") {
-            boxes = new BoxEntryToEnd(new TkhdTypeBox());
+            boxes = new BoxEntryToEnd(new TkhdTypeBox(), new EdtsBox());
         }
+
+        class EdtsBox extends Box("edts") {
+            boxes = new BoxEntryToEnd(new ElstBox());
+        }
+        class ElstBox extends Box("elst") {
+            entries = new ElstEntry();
+        }
+        interface ElstEntryArrayValue {
+            segment_duration: number;
+            media_time: number;
+            media_rate_integer: number;
+            media_rate_fraction: number;
+        };
+        class ElstEntry implements MP4BoxEntryBase {
+            constructor() { }
+            parse(buffer: Buffer, pPos: P<number>, end: number, debugPath: string[]) {
+                let version = buffer.readUInt8(pPos.v);
+                pPos.v += 1;
+                let flags = buffer.readUIntBE(pPos.v, 3);
+                pPos.v += 3;
+
+                let entries: ElstEntryArrayValue[] = [];
+
+                let entry_count = (new (IntN(4, false))).parse(buffer, pPos, end, debugPath);
+                for(let i = 0; i < entry_count; i++) {
+                    let segment_duration: number;
+                    let media_time: number;
+                    if(version === 0) {
+                        segment_duration = (new (IntN(4, false))).parse(buffer, pPos, end, debugPath);
+                        media_time = (new (IntN(4, true))).parse(buffer, pPos, end, debugPath);
+                    } else if(version === 1) {
+                        segment_duration = (new (IntN(8, false))).parse(buffer, pPos, end, debugPath);
+                        media_time = (new (IntN(8, true))).parse(buffer, pPos, end, debugPath);
+                    } else {
+                        throw new Error(`Unexpected version ${version}`);
+                    }
+
+                    let media_rate_integer = (new (IntN(2, true))).parse(buffer, pPos, end, debugPath);
+                    let media_rate_fraction = (new (IntN(2, true))).parse(buffer, pPos, end, debugPath);
+
+                    entries.push({ segment_duration, media_time, media_rate_integer, media_rate_fraction });
+                }
+
+                return {entries, version};
+            }
+
+            // They better not change the entry count. We only allow changing values
+            write(buffer: Buffer, pos: number, obj: {version: number, entries: ElstEntryArrayValue[]}) {
+                // version
+                pos += 1;
+                // flags
+                pos += 3;
+
+                // entry_count
+                pos += 4;
+
+                let {version, entries} = obj;
+                for(let i = 0; i < entries.length; i++) {
+                    let entry = entries[i];
+                    if(version === 0) {
+                        (new (IntN(4, false))).write(buffer, pos, entry.segment_duration);
+                        pos += 4;
+                        (new (IntN(4, true))).write(buffer, pos, entry.media_time);
+                        pos += 4;
+                    } else if(version === 1) {
+                        (new (IntN(8, false))).write(buffer, pos, entry.segment_duration);
+                        pos += 8;
+                        (new (IntN(8, true))).write(buffer, pos, entry.media_time);
+                        pos += 8;
+                    } else {
+                        throw new Error(`Unexpected version ${version}`);
+                    }
+
+                    (new (IntN(2, true))).write(buffer, pos, entry.media_rate_integer);
+                    (new (IntN(2, true))).write(buffer, pos, entry.media_rate_fraction);
+                }
+            }
+        }
+
+
         class TkhdTypeBox0 extends FullBox("tkhd") {
             creation_time = new UInt32();
             modification_time = new UInt32();
@@ -351,7 +431,7 @@ for(let fileName of [
 
                 return arr;
             }
-            write() { throw new Error(`BoxEntryToEnd.parse not implemented`); }
+            write() { throw new Error(`BoxEntryToEnd.write not implemented`); }
         }
 
         class ToEndEntry implements MP4BoxEntryBase {
@@ -365,7 +445,7 @@ for(let fileName of [
                 return result;
             }
 
-            write() { throw new Error(`ToEndEntry.parse not implemented`); }
+            write() { throw new Error(`ToEndEntry.write not implemented`); }
         }
 
         class NArray implements MP4BoxEntryBase {
@@ -435,7 +515,7 @@ for(let fileName of [
             let end = box.start + box.size;
             let boxInfoClass = boxesLookup[box.type];
             if(!boxInfoClass) {
-                console.warn(`Unknown box type ${curDebugPath.join(".")}`);
+                console.warn(`Unknown box type ${curDebugPath.join(".")}, size ${box.size}`);
                 boxes.push({ type: box.type });
                 return;
             }
@@ -469,7 +549,7 @@ for(let fileName of [
             if(isBoxComplete) {
                 let unaccountedSpace = end - boxPos.v;
                 if(unaccountedSpace > 0) {
-                    console.log(`Unaccounted space in ${curDebugPath.join(".")}, ${unaccountedSpace} bytes`);
+                    console.log(`Unaccounted space in ${curDebugPath.join(".")}, ${unaccountedSpace} bytes. Total size should be ${box.size}`);
                 }
             }
 
@@ -499,9 +579,14 @@ for(let fileName of [
         // Arrays of const count
 
         let boxes = RootBox.parse(buffer, {v: 0}, buffer.length, []) as any;
-        //console.log(boxes[3].boxes);
 
-        //let newBuffer = new Buffer(buffer);
+        let newBuffer = new Buffer(buffer);
+
+        //let elst = boxes[3].boxes[1].boxes[1].boxes[0];
+        //elst.entries.entries[0].media_rate_integer = 10;
+        //writePrimitiveToVariable(buffer, elst, "entries", elst.entries);
+        //console.log(elst.entries.entries);
+        
         //let box = (boxes as any)[1].boxes[0];
         //writePrimitiveToVariable(buffer, box, "duration", 1000);
         //console.log(box);
@@ -511,11 +596,9 @@ for(let fileName of [
             new FileTypeBox(),
             new MoovTypeBox(),
         ).parse(newBuffer, {v: 0}, newBuffer.length, []);
-        let box2 = (boxes as any)[1].boxes[0];
-        console.log(box2);
-        */
-
-        //writePrimitiveToVariable(newBuffer, box)
+        let b2 = (boxes as any);
+        console.log(b2[3].boxes[1].boxes[1].boxes[0].entries.entries);
+        //*/
 
         //fs.writeFileSync("test.mp4", newBuffer);
     }
