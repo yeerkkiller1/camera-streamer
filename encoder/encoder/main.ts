@@ -22,13 +22,21 @@ function readUInt64BE(buffer: Buffer, pos: number) {
     }
     return result;
 }
+function writeUInt64BE(buffer: Buffer, pos: number, value: number): void {
+    if(value > Number.MAX_SAFE_INTEGER || value < 0) {
+        throw new Error(`Write int64 value outside of valid range javascript can represent. Write ${value}, it must be under ${Number.MAX_SAFE_INTEGER}.`);
+    }
+
+    buffer.writeUInt16BE(0, 0);
+    buffer.writeUIntBE(value, pos + 2, 6);
+}
 
 function textToUInt32(text: string) {
     if(text.length !== 4) {
         throw new Error(`Expected text of length 4. Received ${text}`);
     }
 
-    return text.charCodeAt(0) + text.charCodeAt(1) * 256 + text.charCodeAt(2) * 256 * 256 + text.charCodeAt(3) * 256 * 256 * 256;
+    return text.charCodeAt(3) + text.charCodeAt(2) * 256 + text.charCodeAt(1) * 256 * 256 + text.charCodeAt(0) * 256 * 256 * 256;
 }
 function textFromUInt32(num: number) {
     num = num | 0;
@@ -148,14 +156,26 @@ for(let filePath of [
         }
         class MoovBox extends Box("moov") {
             boxes = new BoxEntryToEnd(
-                new TrakBox(), new MvhdBox(), new UdtaBox()
+                new MvhdBox(),
+                new TrakBox(),
+                new UdtaBox(),
             );
         }
         class FreeBox extends Box("free") {
             data = new ArrayToEnd(new UInt8());
         }
         class MdatBox extends Box("mdat") {
-            data = new ArrayToEnd(new UInt8());
+            data = new MdatEntry();
+        }
+        class MdatEntry implements MP4BoxEntryBase {
+            parse(buffer: Buffer, pPos: P<number>, end: number, debugPath: string[], parents: BoxMetadata[], addArrayValue: (value: any) => void): Uint8Array {
+                let bytes = buffer.slice(pPos.v, end);
+                pPos.v = end;
+                return bytes;
+            }
+            write(bytes: Uint8Array): Buffer[] {
+                return [new Buffer(bytes)];
+            }
         }
 
         class UdtaBox extends Box("udta") {
@@ -301,8 +321,15 @@ for(let filePath of [
                 }
                 return chunk_offsets;
             }
-            write(): Buffer[] {
-                throw new Error(`stco.write not implemented`);
+            write(values: number[]): Buffer[] {
+                let buffer = new Buffer(4 + values.length * 4);
+                buffer.writeUInt32BE(values.length, 0);
+
+                for(let i = 0; i < values.length; i++) {
+                    buffer.writeUInt32BE(values[0], 4 + i * 4);
+                }
+
+                return [buffer];
             }
         }
 
@@ -311,9 +338,9 @@ for(let filePath of [
         }
         class StszEntry implements MP4BoxEntryBase {
             parse(buffer: Buffer, pPos: P<number>, end: number, debugPath: string[], parents: BoxMetadata[], addArrayValue: (value: any) => void): number|number[] {
-                let sample_size = buffer.readInt32BE(pPos.v);
+                let sample_size = buffer.readUInt32BE(pPos.v);
                 pPos.v += 4;
-                let sample_count = buffer.readInt32BE(pPos.v);
+                let sample_count = buffer.readUInt32BE(pPos.v);
                 pPos.v += 4;
                 if(sample_size !== 0) {
                     return sample_size;
@@ -328,7 +355,21 @@ for(let filePath of [
                 return sample_sizes;
             }
             write(value: number|number[]): Buffer[] {
-                throw new Error(`stsz.write not implemented`);
+                if(typeof value === "number") {
+                    let buffer = new Buffer(8);
+                    buffer.writeUInt32BE(value, 0);
+                    buffer.writeUInt32BE(0, 4);
+                    return [buffer];
+                } else {
+                    let buffer = new Buffer(8 + value.length * 4);
+                    buffer.writeUInt32BE(0, 0);
+                    buffer.writeUInt32BE(value.length, 4);
+
+                    for(let i = 0; i < value.length; i++) {
+                        buffer.writeUInt32BE(value[i], 8 + i * 4);
+                    }
+                    return [buffer];
+                }
             }
         }
 
@@ -362,7 +403,7 @@ for(let filePath of [
                 let entryBoxes = new UInt32().write(boxes.length);
                 return (
                     entryBoxes.concat(
-                        flatten(boxes.map(x => writeBox(x)))
+                        flatten(boxes.map(x => writeBox(x, undefined, true)))
                     )
                 );
             }
@@ -502,7 +543,14 @@ for(let filePath of [
 
             // They better not change the entry count. We only allow changing values
             write(entries: BoxMetadata[]): Buffer[] {
-                return flatten(entries.map(x => writeBox(x)));
+                let headerBuffers = (new (IntN(4, false))).write(entries.length);
+                for(let buffer of headerBuffers) {
+                    testAddBuffer(buffer, `Stsd, header`);
+                }
+                
+                let entryBuffers = flatten(entries.map((x, i) => writeBox(x, `stsd[${i}]`)));
+
+                return headerBuffers.concat(entryBuffers);
             }
         }
         
@@ -914,9 +962,9 @@ for(let filePath of [
 
         const RootBox = new BoxEntryToEnd(
             new FileBox(),
-            new MoovBox(),
             new FreeBox(),
             new MdatBox(),
+            new MoovBox(),
         );
 
         type RawBox = ReturnType<typeof parseBoxRaw>;
@@ -1075,21 +1123,76 @@ for(let filePath of [
             }
         }
 
-        function writeBox(boxResult: BoxMetadata): Buffer[] {
-            let buffers: Buffer[] = [];
-            for(let key in boxResult._info) {
-                if(key === "type") {
-                    // Copy the type directly
-                    let typeStr = boxResult._properties[key];
-                    if(typeof typeStr !== "string") {
-                        throw new Error(`Unexpected type of type, ${typeStr}`);
-                    }
-                    let num = textToUInt32(typeStr);
-                    let numBytes = new Buffer(4);
-                    numBytes.writeUInt32BE(num, 0);
-                    buffers.push(numBytes);
-                    continue;
+        
+        function getContext(buffer: Buffer, pos: number, contextSize = 24): string {
+            let end = Math.min(pos + contextSize, buffer.length);
+            let output = "";
+
+            for(let i = pos; i < end; i++) {
+                let byte = buffer.readInt8(i);
+                if(byte === 0) {
+                    output += "\\0";
+                } else {
+                    output += String.fromCharCode(byte);
                 }
+            }
+            return output;
+        }
+
+        let curTestPos = 0;
+        let curCorrectBuffer: Buffer|null = null;
+        // Set up global state to compare any buffers we add immediately to the correct buffer. This let's us get context for errors.
+        function setupTestBuffer(correctBuffer: Buffer, code: () => void) {
+            curCorrectBuffer = correctBuffer;
+            curTestPos = 0;
+            try {
+                code();
+            } finally {
+                curCorrectBuffer = null;
+            }
+        }
+        function testAddBuffer(buffer: Buffer, context: string) {
+            if(curCorrectBuffer === null) return;
+            if((buffer as any)["added"]) return;
+            (buffer as any)["added"] = true;
+            for(let i = 0; i < buffer.length; i++) {
+                let newCh = buffer.readUInt8(i);
+                let corCh = curCorrectBuffer.readUInt8(curTestPos++);
+                if(newCh !== corCh) {
+                    curTestPos--;
+                    throw Error(`(${context}) Incorrect character at position ${curTestPos}, (local ${i}). Should be ${corCh}, was ${newCh}. Correct context: '${getContext(curCorrectBuffer, curTestPos)}', wrote: '${getContext(buffer, i)}'`);
+                }
+            }
+        }
+
+        function writeBox(boxResult: BoxMetadata, context = "", delayTestAdd = false): Buffer[] {
+            let buffers: Buffer[] = [];
+
+            let box = boxResult._box;
+            // Otherwise it has no header, and it just an object
+            if(box)  {
+                let { headerSize, size, type } = box;
+
+                let headerBuffer = new Buffer(headerSize);
+                if(headerSize === 8) {
+                    headerBuffer.writeUInt32BE(size, 0);
+                    headerBuffer.writeUInt32BE(textToUInt32(type), 4);
+                } else if(headerSize === 16) {
+                    headerBuffer.writeUInt32BE(1, 0);
+                    headerBuffer.writeUInt32BE(textToUInt32(type), 4);
+                    writeUInt64BE(headerBuffer, 8, size);
+                } else {
+                    throw new Error(`Invalid headerSize ${headerSize}`);
+                }
+
+                if(!delayTestAdd) {
+                    testAddBuffer(headerBuffer, `${context}, Box: ${boxResult._box && boxResult._box.type}, header, path ${boxResult.nicePath}`);
+                }
+                buffers.push(headerBuffer);
+            }
+
+            for(let key in boxResult._info) {
+                if(key === "type") continue;
                 let entry = boxResult._info[key];
                 // Skip entries used for other things (that are not MP4BoxEntries)
                 if(typeof entry !== "object") {
@@ -1097,18 +1200,25 @@ for(let filePath of [
                 }
                 let value = boxResult._properties[key];
                 let buffer = entry.write(value);
-                for(let subSuffer of buffer) {
-                    buffers.push(subSuffer);
+                for(let subBuffer of buffer) {
+                    if(!delayTestAdd) {
+                        testAddBuffer(subBuffer, `Box: ${boxResult._box && boxResult._box.type}, key ${key}, path ${boxResult.nicePath}`);
+                    }
+                    buffers.push(subBuffer);
                 }
             }
+
             return buffers;
         }
         function writeBoxArr(boxResults: BoxMetadata[]): Buffer {
             let buffers: Buffer[] = [];
             for(let boxResult of boxResults) {
                 let buffer = writeBox(boxResult);
+                let subBufferIndex = 0;
                 for(let subBuffer of buffer) {
+                    testAddBuffer(subBuffer, `Box: ${boxResult._box && boxResult._box.type}, sub buffer ${subBufferIndex}`);
                     buffers.push(subBuffer);
+                    subBufferIndex++;
                 }
             }
 
@@ -1127,6 +1237,7 @@ for(let filePath of [
 
                 return buffer;
             }
+            console.log(`Buffer count ${buffers.length}`)
             return combineBuffers(buffers);
         }
 
@@ -1223,7 +1334,7 @@ for(let filePath of [
         // I should probably just read the jpegs out of the mdat, then make something which generates a file from those,
         //  and work on that output until it is bit identical to the original test5.mp4
 
-        ///*
+        /*
         let dataFileOffset: number = getAllFirstOfTypeUnsafe(boxes, "stco")[0].obj[0];
         let sampleSizes: number[] = getAllFirstOfTypeUnsafe(boxes, "stsz")[0].obj;
 
@@ -1299,7 +1410,10 @@ for(let filePath of [
         fs.writeFileSync(filePath.split("/").slice(-1)[0] + ".json",  text);
         
 
-        let newBuffer = writeBoxArr(boxes);
+        let newBuffer!: Buffer;
+        setupTestBuffer(buffer, () => {
+            newBuffer = writeBoxArr(boxes);
+        });
 
         let minLength = Math.min(buffer.length, newBuffer.length);
         for(let i = 0; i < minLength; i++) {
@@ -1307,11 +1421,24 @@ for(let filePath of [
             let chNew = newBuffer.readUInt8(i);
 
             if(chSource !== chNew) {
-                throw new Error(`Byte is wrong at index ${i}, should be ${chSource}, was ${chNew}`);
+                throw new Error(`Byte is wrong at index ${i}, should be ${chSource}, was ${chNew}, correct context '${getContext(buffer, i)}', received '${getContext(newBuffer, i)}'`);
             }
         }
         if(buffer.length !== newBuffer.length) {
             throw new Error(`newBuffer wrong size. Should be ${buffer.length}, was ${newBuffer.length}`);
+        }
+
+        {
+            let timeMultiplier = 2;
+
+            let stts = getAllFirstOfType(boxes, "stts")[0];
+            (stts._properties.obj as any)[0].sample_delta = 512 * timeMultiplier;
+
+            getAllFirstOfType(boxes, "mvhd")[0]._properties["duration"] = 3320 * timeMultiplier;
+            getAllFirstOfType(boxes, "tkhd")[0]._properties["duration"] = 3320 * timeMultiplier;
+
+            let newBuffer = writeBoxArr(boxes);
+            fs.writeFileSync(fileName + ".new2.mp4", newBuffer);
         }
 
 
