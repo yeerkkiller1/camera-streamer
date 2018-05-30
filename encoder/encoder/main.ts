@@ -2,7 +2,7 @@
 //  and put them in a mp4 video file. Like ./raw/test0.mp4 has jpegs inside of it.
 
 import * as fs from "fs";
-import { keyBy, arrayEqual, flatten } from "./util/misc";
+import { keyBy, arrayEqual, flatten, repeat } from "./util/misc";
 import { isArray } from "util";
 import { sum } from "./util/math";
 
@@ -109,7 +109,7 @@ for(let filePath of [
             _box: RawBox;
             _info: MP4Box;
             _property_offsets: { [propName: string]: number };
-            _properties: { [name: string]: Types.Primitive|BoxMetadata[] };
+            _properties: { [name: string]: Types.Primitive|Buffer|BoxMetadata[] };
             nicePath: string;
         }
 
@@ -1152,6 +1152,7 @@ for(let filePath of [
             }
         }
         function testAddBuffer(buffer: Buffer, context: string) {
+            /*
             if(curCorrectBuffer === null) return;
             if((buffer as any)["added"]) return;
             (buffer as any)["added"] = true;
@@ -1163,33 +1164,11 @@ for(let filePath of [
                     throw Error(`(${context}) Incorrect character at position ${curTestPos}, (local ${i}). Should be ${corCh}, was ${newCh}. Correct context: '${getContext(curCorrectBuffer, curTestPos)}', wrote: '${getContext(buffer, i)}'`);
                 }
             }
+            */
         }
 
         function writeBox(boxResult: BoxMetadata, context = "", delayTestAdd = false): Buffer[] {
             let buffers: Buffer[] = [];
-
-            let box = boxResult._box;
-            // Otherwise it has no header, and it just an object
-            if(box)  {
-                let { headerSize, size, type } = box;
-
-                let headerBuffer = new Buffer(headerSize);
-                if(headerSize === 8) {
-                    headerBuffer.writeUInt32BE(size, 0);
-                    headerBuffer.writeUInt32BE(textToUInt32(type), 4);
-                } else if(headerSize === 16) {
-                    headerBuffer.writeUInt32BE(1, 0);
-                    headerBuffer.writeUInt32BE(textToUInt32(type), 4);
-                    writeUInt64BE(headerBuffer, 8, size);
-                } else {
-                    throw new Error(`Invalid headerSize ${headerSize}`);
-                }
-
-                if(!delayTestAdd) {
-                    testAddBuffer(headerBuffer, `${context}, Box: ${boxResult._box && boxResult._box.type}, header, path ${boxResult.nicePath}`);
-                }
-                buffers.push(headerBuffer);
-            }
 
             for(let key in boxResult._info) {
                 if(key === "type") continue;
@@ -1208,6 +1187,37 @@ for(let filePath of [
                 }
             }
 
+            // Do header last, as before we do the contents we can't know the size of the header
+            let box = boxResult._box;
+            // Otherwise it has no header, and it just an object
+            if(box) {
+                let { type } = box;
+
+                let size = sum(buffers.map(x => x.length)) + 8;
+
+                let maxUInt32 = Math.pow(2, 32) - 1;
+                let headerSize = size > maxUInt32 ? 16 : 8;
+
+                let headerBuffer = new Buffer(headerSize);
+                if(headerSize === 8) {
+                    headerBuffer.writeUInt32BE(size, 0);
+                    headerBuffer.writeUInt32BE(textToUInt32(type), 4);
+                } else if(headerSize === 16) {
+                    size += 8;
+                    headerBuffer.writeUInt32BE(1, 0);
+                    headerBuffer.writeUInt32BE(textToUInt32(type), 4);
+                    writeUInt64BE(headerBuffer, 8, size);
+                } else {
+                    throw new Error(`Invalid headerSize ${headerSize}`);
+                }
+
+                if(!delayTestAdd) {
+                    testAddBuffer(headerBuffer, `${context}, Box: ${boxResult._box && boxResult._box.type}, header, path ${boxResult.nicePath}`);
+                }
+
+                buffers.unshift(headerBuffer);
+            }
+
             return buffers;
         }
         function writeBoxArr(boxResults: BoxMetadata[]): Buffer {
@@ -1222,23 +1232,8 @@ for(let filePath of [
                 }
             }
 
-            function combineBuffers(buffers: Buffer[]): Buffer {
-                let size = 0;
-                for(let buf of buffers) {
-                    size += buf.length;
-                }
-
-                let buffer = new Buffer(size);
-                let pos = 0;
-                for(let buf of buffers) {
-                    buf.copy(buffer, pos);
-                    pos += buf.length;
-                }
-
-                return buffer;
-            }
             console.log(`Buffer count ${buffers.length}`)
-            return combineBuffers(buffers);
+            return Buffer.concat(buffers);
         }
 
         function getAllFirstOfTypeUnsafe(boxes: BoxMetadata[], type: string): any[] {
@@ -1272,76 +1267,21 @@ for(let filePath of [
             return results;
         }
 
+        function parseBoxes(buffer: Buffer): BoxMetadata[] {
+            return RootBox.parse(buffer, {v: 0}, buffer.length, [], [], () => {}) as BoxMetadata[];
+        }
+
         //todonext
         // mvhd, and then change the rate and write it back to a new file
         // Arrays of const count
 
         let fileName = filePath.split("/").slice(-1)[0];
-        let boxes = RootBox.parse(buffer, {v: 0}, buffer.length, [], [], () => {}) as any;
-
-        //stsz is very interesting. It gives the size of each sample inside our data, which let's us read out the raw (encoded) video frames.
-        //console.log((getAllFirstOfType(boxes, "stsz") as any));
-
-        // Hmm... so decoding time, is just the linear time assumed from the frame order? And sample number...
-        //  is used elsewhere.
-
-        //let newBuffer = new Buffer(buffer);
-
-
-
-        /*
-        // Every moov.trak has a .mdia.minf.stbl, which from the spec:
-        //    The sample table contains all the time and data indexing of the media samples in a track. Using the tables
-        //       here, it is possible to locate samples in time, determine their type (e.g. I-frame or not), and determine their
-        //       size, container, and offset into that container.
         
-        // moov.trak.mdia.minf.stbl.stts
-        // So... we create a temporary "decode time". Which is useless. It is just the sum of decode delta before that sample.
-        //  Then... we add composition offset to get the real composition time.
-        
-        */
+        let boxes = parseBoxes(buffer);
 
-        // Gives time of each frame, in mvhd timescale time.
-        //console.log(getAllFirstOfType(boxes, "stts")[0]);
-
-        // ctts gives offsets, but is optional, and if it doesn't exist all offsets are 0.
-        //console.log(getAllFirstOfType(boxes, "ctts"));
-
-        // Encoding information?
-        //console.log(getAllFirstOfType(boxes, "stsd")[0]);
-
-        // Gives the byte sizes of each sample (frame). I guess they start at 0, and go from there?
-        //let frameSize = sum((getAllFirstOfType(boxes, "stsz") as any)[0].obj);
-        //let mdatSize = (getAllFirstOfType(boxes, "mdat") as any)[0].data.length;
-
-        // Gives information on the chunks in the data. Has an index which matches data_reference_index in the stsd array.
-        //  Basically just says the samples per chunk... which when used with stsd lets us store frames with different information
-        //  (like width/height) in the same data set?
-        //console.log(getAllFirstOfType(boxes, "stsc")[0]);
-
-        // Gives offsets of the chunks into the file. I guess this is parallel to stts?
-        //console.log(getAllFirstOfType(boxes, "stco")[0]);
-
-        //moov.trak.mdia.mhdh gives us the timescale to divide our sample times by to get presentation times.
-        // So... this is part of slowing the video down, or speeding it up.
-        // mvhd.duration, tkhd.duration, mhdh.duration
-
-        //todonext
-        // - Create custom jpeg mp4s with frames that give exact frame info.
-        // - See what ffmpeg creates out of these files when h264 encoded. If/when they are off, get h264 mp4 decoding working
-        //      and then get h264 frame decoding (or just encoding) working, so we can create our own files.
-
-        // I should probably just read the jpegs out of the mdat, then make something which generates a file from those,
-        //  and work on that output until it is bit identical to the original test5.mp4
-
-        /*
+        ///*
         let dataFileOffset: number = getAllFirstOfTypeUnsafe(boxes, "stco")[0].obj[0];
         let sampleSizes: number[] = getAllFirstOfTypeUnsafe(boxes, "stsz")[0].obj;
-
-        let size = sampleSizes[0];
-        let end = dataFileOffset + size;
-
-        let jpegBuffer = buffer.slice(dataFileOffset, end);
 
         let jpegs: Buffer[] = [];
         let curOffset = dataFileOffset;
@@ -1397,17 +1337,18 @@ for(let filePath of [
         */
 
         
-        let text = JSON.stringify(boxes, (k, v) => {
-            if(k.startsWith("_")) return undefined;
-            if(isArray(v) && v.length > 10) {
-                return v.slice(0, 10).concat("...");
-            }
-            return v;
-        }, " ");
-
-
+        function serializeBoxes(boxes: BoxMetadata[]) {
+            return JSON.stringify(boxes, (k, v) => {
+                if(k.startsWith("_")) return undefined;
+                if(isArray(v) && v.length > 10) {
+                    return v.slice(0, 10).concat("...");
+                }
+                return v;
+            }, " ");
+        }
         
-        fs.writeFileSync(filePath.split("/").slice(-1)[0] + ".json",  text);
+
+        fs.writeFileSync(fileName + ".json",  serializeBoxes(boxes));
         
 
         let newBuffer!: Buffer;
@@ -1428,19 +1369,64 @@ for(let filePath of [
             throw new Error(`newBuffer wrong size. Should be ${buffer.length}, was ${newBuffer.length}`);
         }
 
-        {
+
+        createVideoOutOfJpegs(flatten(repeat(jpegs.slice(50, 60), 10)), 10);
+        function createVideoOutOfJpegs(jpegs: Buffer[], framePerSecond: number) {
             let timeMultiplier = 2;
 
-            let stts = getAllFirstOfType(boxes, "stts")[0];
-            (stts._properties.obj as any)[0].sample_delta = 512 * timeMultiplier;
+            // Might as well go in file order.
+            
+            //mdat is just the raw jpegs, side by side
+            let rawData = Buffer.concat(jpegs);
+            // data
+            getAllFirstOfType(boxes, "mdat")[0]._properties["data"] = Buffer.concat(jpegs);
 
-            getAllFirstOfType(boxes, "mvhd")[0]._properties["duration"] = 3320 * timeMultiplier;
-            getAllFirstOfType(boxes, "tkhd")[0]._properties["duration"] = 3320 * timeMultiplier;
+
+            let mvhd = getAllFirstOfType(boxes, "mvhd")[0];
+            // timescale. The number of increments per second. Will need to be the least common multiple of all the framerates
+            let timescale = mvhd._properties["timescale"] = framePerSecond;
+            // Technically the duration of the longest trak. But we should only have 1, so...
+            let timescaleDuration = mvhd._properties["duration"] = jpegs.length;
+
+            // Only 1 track
+            let tkhd = getAllFirstOfType(boxes, "tkhd")[0];
+            tkhd._properties["duration"] = timescaleDuration;
+
+            // TODO: Oh, pass in width/height of jpegs, and put that here.
+
+            let elst = getAllFirstOfTypeUnsafe(boxes, "elst")[0];
+            // Just one segment
+            elst.entries.entries[0].segment_duration = timescaleDuration;
+
+
+            let mdhd = getAllFirstOfType(boxes, "mdhd")[0];
+
+            // mdhd has a timescale too?
+            mdhd._properties.timescale = timescale;
+            mdhd._properties.duration = timescaleDuration;
+
+            let stts = getAllFirstOfTypeUnsafe(boxes, "stts")[0];
+            stts.obj[0].sample_delta = 1;
+            stts.obj[0].sample_count = jpegs.length;
+
+            let stsc = getAllFirstOfTypeUnsafe(boxes, "stsc")[0];
+            stsc.obj[0].samples_per_chunk = jpegs.length;
+
+            let stsz = getAllFirstOfTypeUnsafe(boxes, "stsz")[0];
+            stsz.obj = jpegs.map(x => x.length);
+
+            // Position of mdat in file as a whole. So... anything before mdat has to have a constant size, or else this will be wrong,
+            //  or I will need to start calculating it.
+            let stco = getAllFirstOfTypeUnsafe(boxes, "stco")[0];
 
             let newBuffer = writeBoxArr(boxes);
             fs.writeFileSync(fileName + ".new2.mp4", newBuffer);
-        }
 
+            fs.writeFileSync(fileName + ".new2.mp4" + ".json",  serializeBoxes(boxes));
+
+            let newBoxes = parseBoxes(newBuffer);
+            fs.writeFileSync(fileName + ".new3.mp4" + ".json",  serializeBoxes(newBoxes));
+        }
 
 
         //let newBuffer = new Buffer(buffer);

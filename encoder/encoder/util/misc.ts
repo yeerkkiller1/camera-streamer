@@ -14,6 +14,14 @@ export function firstKey<T>(obj: {[key: string]: T}): string|undefined {
     return undefined; 
 }
 
+export function repeat<T>(value: T, count: number): T[] {
+    let arr: T[] = [];
+    for(let i = 0; i < count; i++) {
+        arr.push(value);
+    }
+    return arr;
+}
+
 let UID = Math.random();
 let nextId = 0;
 export function randomUID(prefix = "UID") {
