@@ -6,6 +6,8 @@ import { keyBy, arrayEqual, flatten, repeat } from "./util/misc";
 import { isArray } from "util";
 import { sum } from "./util/math";
 
+import * as Jimp from "jimp";
+
 function p2(str: string) {
     while(str.length < 2) {
         str = "0" + str;
@@ -1370,8 +1372,66 @@ for(let filePath of [
         }
 
 
-        createVideoOutOfJpegs(flatten(repeat(jpegs.slice(50, 60), 10)), 10);
-        function createVideoOutOfJpegs(jpegs: Buffer[], framePerSecond: number) {
+        // Okay... now create jpegs in code, and test if that works. And that will also let us test variable width/height,
+        //  as vlc seems to be ignoring our width/height
+        
+        // It doesn't look like vlc is using the matrixes. So... we are going to have to bake the writing into the mpegs.
+
+        async function loadFont(type: string): Promise<any> {
+            return new Promise((resolve, reject) => {
+                let jimpAny = Jimp as any;    
+                jimpAny.loadFont(type, (err: any, font: any) => {
+                    if(err) {
+                        reject(err);
+                    } else {
+                        resolve(font);
+                    }
+                });
+            });
+        }
+
+        test();
+        async function test() {
+            let jimpAny = Jimp as any;    
+            let width = 600;
+            let height = 400;
+            //let image = new jimpAny(width, height, 0xFF0000FF, () => {});
+            
+            let image: any;
+            Jimp.read(jpegs[0], (err: any, x: any) => {
+                if(err) throw new Error(`Error ${err}`);
+                image = x;
+            });
+            image.resize(width, height);
+            console.log("test3");
+
+            let path = "./node_modules/jimp/fonts/open-sans/open-sans-64-white/open-sans-64-white.fnt";
+            let font = await loadFont(path);
+            image.print(font, 0, 0, "test test2 test3", width);
+
+            let jpegBuffer!: Buffer;
+            image.quality(100).getBuffer(Jimp.MIME_JPEG, (err: any, buffer: Buffer) => {
+                if(err) throw err;
+                jpegBuffer = buffer;
+            });
+
+            createVideoOutOfJpegs(
+                {
+                    framePerSecond: 10,
+                    width,
+                    height,
+                },
+                flatten(repeat(
+                    //jpegs.slice(50, 60),
+                    [jpegBuffer],
+                    100
+                ))
+            );
+        }
+        
+        function createVideoOutOfJpegs(info: { framePerSecond: number, width: number, height: number }, jpegs: Buffer[]) {
+            let { framePerSecond, width, height } = info;
+
             let timeMultiplier = 2;
 
             // Might as well go in file order.
@@ -1379,20 +1439,21 @@ for(let filePath of [
             //mdat is just the raw jpegs, side by side
             let rawData = Buffer.concat(jpegs);
             // data
-            getAllFirstOfType(boxes, "mdat")[0]._properties["data"] = Buffer.concat(jpegs);
+            getAllFirstOfType(boxes, "mdat")[0]._properties.data = Buffer.concat(jpegs);
 
 
-            let mvhd = getAllFirstOfType(boxes, "mvhd")[0];
+            let mvhd = getAllFirstOfTypeUnsafe(boxes, "mvhd")[0];
             // timescale. The number of increments per second. Will need to be the least common multiple of all the framerates
-            let timescale = mvhd._properties["timescale"] = framePerSecond;
+            let timescale = mvhd._properties.timescale = framePerSecond;
             // Technically the duration of the longest trak. But we should only have 1, so...
-            let timescaleDuration = mvhd._properties["duration"] = jpegs.length;
+            let timescaleDuration = mvhd._properties.duration = jpegs.length;
 
             // Only 1 track
-            let tkhd = getAllFirstOfType(boxes, "tkhd")[0];
-            tkhd._properties["duration"] = timescaleDuration;
-
-            // TODO: Oh, pass in width/height of jpegs, and put that here.
+            let tkhd = getAllFirstOfTypeUnsafe(boxes, "tkhd")[0];
+            tkhd._properties.duration = timescaleDuration;
+           
+            tkhd._properties.width = width;
+            tkhd._properties.height = height;
 
             let elst = getAllFirstOfTypeUnsafe(boxes, "elst")[0];
             // Just one segment
@@ -1404,6 +1465,12 @@ for(let filePath of [
             // mdhd has a timescale too?
             mdhd._properties.timescale = timescale;
             mdhd._properties.duration = timescaleDuration;
+
+
+            let stsd = getAllFirstOfTypeUnsafe(boxes, "stsd")[0];
+            stsd.obj[0].width = width;
+            stsd.obj[0].height = height;
+
 
             let stts = getAllFirstOfTypeUnsafe(boxes, "stts")[0];
             stts.obj[0].sample_delta = 1;
