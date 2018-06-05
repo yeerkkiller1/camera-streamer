@@ -1,0 +1,53 @@
+<video id="vid" width="400" height="400"></video>
+<script>
+    test();
+    async function test() {
+        //todonext
+        // Test rewriting the test.h264.mp4 file with forced profile_compatiblity, and then just forced AVCProfileIndication,
+        //  to see if the browser will take it.
+
+        // TODO:
+        //  - Uh... figure out how to calculate the start time
+        //      - start time should be from baseMediaDecodeTime (moof.traf.tfdt)
+        //  - Test appendBuffering test.h264.mp4, and whether or not it works, calculate the codec from the stsd.avc1.avcC data (to make sure we can)
+        //      and then use it with test.h264.mp4, and test2.mp4 (to see how much the codec matters).
+        //  - Create segments h264.mp4 files, and make sure they work.
+        //let result = await fetch("./test2.mp4");
+        let result;
+        if(document.location.search.includes("youtube")) {
+            result = await fetch("./youtubeNEW.mp4");
+        } else {
+            todonext
+            // Okay, this should work if we use all the metadata containers from youtube.mp4. It looks like we need to have
+            //  certain boxes to trigger an initialization of the video.
+            result = await fetch("./test.h264.mp4");
+        }
+
+         
+        //let result = await fetch("./test.h264.mp4");
+        let raw = await result.arrayBuffer()
+        var push = new MediaSource();
+        vid.src = URL.createObjectURL(push);
+        push.addEventListener("sourceopen", () => {
+
+            //var buf = push.addSourceBuffer('video/mp4; codecs="avc1.4d401e"');
+
+            // ffmpeg -y -i test.mp4 -c libx264 -pix_fmt yuv420p -profile:v main -level:v 3.0 test.h264.mp4
+            var buf = push.addSourceBuffer('video/mp4; codecs="avc1.4d401e"');
+
+            //var buf = push.addSourceBuffer('video/mp4; codecs="avc1.42c01e"');
+            //var buf = push.addSourceBuffer('video/mp4;codecs="avc1.4D4001"');
+            buf.addEventListener("updateend", () => {
+                //vid.currentTime = (778184112 / 90000);
+                //vid.currentTime = 114 * 60 * 60 + 50 * 60 + 13;
+                vid.currentTime = 38417946360 / 90000;
+                //vid.currentTime = 0;
+                vid.play();
+
+                console.log(buf.videoTracks);
+            });
+            
+            buf.appendBuffer(raw);
+        });
+    }
+</script>

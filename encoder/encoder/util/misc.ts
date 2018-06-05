@@ -178,6 +178,17 @@ export function mapObjectValues<A, B>(
     return result;
 }
 
+export function mapObjectValuesKeyof<A, B, T extends { [key: string]: A }>(
+    object: T,
+    map: (value: A, key: string) => B
+): { [key in keyof T]: B } {
+    let result: { [key in keyof T]: B } = {} as any;
+    for(let key in object) {
+        result[key] = map(object[key], key);
+    }
+    return result;
+}
+
 
 export function filterObjectValues<A>(
     object: { [key: string]: A },
