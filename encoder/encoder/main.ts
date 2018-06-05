@@ -364,13 +364,14 @@ class VmhdBox extends FullBox("vmhd") {
     opcolor = new ArrayEntry(new UInt16(), 3);
 }
 class DinfBox extends Box("dinf") {
-    boxes = ArrayBoxNew(new DrefBox());
+    boxes = new ArrayEntry(CreateObjectEntry(DrefBox()));
 }
 
-class DrefBox extends FullBox("dref") {
-    entry_count = new UInt32();
-    boxes = new ArrayEntry(CreateObjectEntry(Url_BoxEntry()));
-}
+const DrefBox: () => MP4Box = () => ({
+    type: FullBoxHeader("dref"),
+    entry_count: new UInt32(),
+    boxes: new ArrayEntry(CreateObjectEntry(Url_BoxEntry())),
+});
 
 const Url_BoxEntry = () => ({
     type: FullBoxHeader("url ")

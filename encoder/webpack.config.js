@@ -4,7 +4,8 @@ var UglifyJsPlugin = require("uglifyjs-webpack-plugin");
 var Visualizer = require('webpack-visualizer-plugin');
 
 var entryPoints = {
-    main: "./encoder/main.ts"
+    main: "./encoder/main.ts",
+    main2: "./encoder/main2.ts"
 };
 
 console.log(entryPoints);
