@@ -78,6 +78,10 @@ export class LargeBuffer {
         return buf;
     }
 
+    public getLength() {
+        return this.bufferStarts[this.bufferStarts.length - 1];
+    }
+
     public readIntBE: typeof Buffer.prototype.readIntBE = (offset, byteLength) => {
         return this.getSmallBuffer(offset, byteLength).readIntBE(0, byteLength);
     };
