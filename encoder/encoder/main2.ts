@@ -1,11 +1,19 @@
 import { textFromUInt32, readUInt64BE, textToUInt32, writeUInt64BE } from "./util/serialExtension";
+import { LargeBuffer, MaxUInt32 } from "./LargeBuffer";
+import { isArray } from "./util/type";
 
-const RepeatAllInfinite = Symbol();
-type RepeatAllInfinite = typeof RepeatAllInfinite;
-
-const maxUInt32 = Math.pow(2, 32) - 1;
+const ArrayInfiniteSymbol = Symbol();
+function RepeatInfinite<T extends SerialObjectChild>(value: T): T[] {
+    let arr = [value];
+    (arr as any)[ArrayInfiniteSymbol] = true;
+    return arr;
+}
+function IsArrayInfinite(arr: SerialObjectChild[]): boolean {
+    return ArrayInfiniteSymbol in arr;
+}
 
 type P<T> = { v: T };
+type R<T> = { key: string; parent: { [key: string]: T } };
 
 interface SerialObject<CurObject = void> {
     [key: string]: (
@@ -16,14 +24,12 @@ interface SerialObject<CurObject = void> {
         | undefined
     );
 }
-type SerialObjectTerminal<CurObject = void> = RepeatAllInfinite | SerialObjectPrimitive | SerialObjectChoose<CurObject>;
+type SerialObjectTerminal<CurObject = void> = SerialObjectPrimitive | SerialObjectChoose<CurObject>;
 type SerialObjectChildBase<CurObject = void> = SerialObject<CurObject> | SerialObjectTerminal<CurObject>;
 type SerialObjectChild<CurObject = void> = SerialObjectChildBase<CurObject> | SerialObjectChildBase<CurObject>[];
 
 interface ReadContext {
-    todonext
-    // Figure out a nice interface for an array of Buffers, so we can read from very large files.
-    buffer: Buffer;
+    buffer: LargeBuffer;
     pPos: P<number>;
 }
 interface WriteContext<T> {
@@ -37,19 +43,15 @@ interface WriteContext<T> {
 }
 interface SerialObjectPrimitive<T = Types.AnyAll> {
     read(context: ReadContext): T;
-    write(context: WriteContext<T>): Buffer[];
+    write(context: WriteContext<T>): LargeBuffer;
 }
 
 interface ChooseContext<CurObject> {
     // Has the values parsed in the keys before us. Use ChooseInfer to populate this properly.
     curObject: CurObject;
 
-    buffer: Buffer;
+    buffer: LargeBuffer;
     pos: number;
-    // Might just be buffer.length. We should definitely not read beyond this.
-    end: number;
-
-    debugPath: string[];
 }
 type SerialObjectChoose<CurObject> = (context: ChooseContext<CurObject>) => SerialObjectChild<CurObject>;
 
@@ -63,7 +65,6 @@ type SerialObjectChooseToOutput<T extends SerialObjectChoose<void>> = never ;//S
 type SerialObjectPrimitiveToOutput<T extends SerialObjectPrimitive> = ReturnType<T["read"]>;
 
 type SerializeTerminalToOutput<T extends SerialObjectTerminal> = (
-    T extends RepeatAllInfinite ? T :
     T extends SerialObjectChoose<void> ? SerialObjectChooseToOutput<T> :
     T extends SerialObjectPrimitive ? SerialObjectPrimitiveToOutput<T> :
     never
@@ -94,14 +95,14 @@ type SerialObjectOutput<T extends SerialObject> = {
     [key in keyof T]: SerialObjectChildMap<T[key]>;
 };
 
+// #endregion
+
 interface MultiStageContinue<CurSerialObject extends SerialObject> {
     (): SerialObjectOutput<CurSerialObject>;
     <NextSerialObject extends SerialObject<SerialObjectOutput<CurSerialObject>>>(
         next: NextSerialObject
     ): MultiStageContinue<CurSerialObject & NextSerialObject>;
 }
-
-// #endregion
 
 /**
     ChooseInfer()
@@ -126,17 +127,14 @@ function ChooseInfer(): MultiStageContinue<{}> {
 }
 
 
-function isPrimitive(child: SerialObjectChildBase): child is SerialObjectPrimitive {
+function isSerialPrimitive(child: SerialObjectChildBase): child is SerialObjectPrimitive {
     return child && typeof child === "object" && typeof (child as any).read === "function";
 }
-function isChoose(child: SerialObjectChildBase): child is SerialObjectChoose<Types.AnyAll> {
+function isSerialChoose(child: SerialObjectChildBase): child is SerialObjectChoose<void> {
     return child && typeof child === "function";
 }
-function isSerialSymbol(child: SerialObjectChildBase): child is RepeatAllInfinite {
-    return child === RepeatAllInfinite;
-}
 function isSerialObject(child: SerialObjectChildBase): child is SerialObject {
-    return !isPrimitive(child) && !isChoose(child);
+    return !isSerialPrimitive(child) && !isSerialChoose(child);
 }
 
 
@@ -192,7 +190,7 @@ function IntN(bytes: number, signed: boolean): SerialObjectPrimitive<number> {
                 }
             }
 
-            return [buffer];
+            return new LargeBuffer([buffer]);
         }
     };
 }
@@ -211,8 +209,10 @@ const UInt32String: SerialObjectPrimitive<string> = {
     write: (context) => UInt32.write({ ...context, value: textToUInt32(context.value)}),  
 };
 
+const BoxSymbol = Symbol();
 const Box: (type: string|null) => SerialObjectPrimitive<{ size: number, type: string }> =
-    (typeIn: string|null): SerialObjectPrimitive<{ size: number, type: string }> => ({
+    (typeIn: string|null) => ({
+        [BoxSymbol]: typeIn,
         read(context) {
             let { buffer, pPos } = context;
             /*
@@ -237,7 +237,7 @@ const Box: (type: string|null) => SerialObjectPrimitive<{ size: number, type: st
                     type
                 }
             } else {
-                size = readUInt64BE(buffer, pPos.v); pPos.v += 8;
+                size = buffer.readUInt64BE(pPos.v); pPos.v += 8;
                 return {
                     size,
                     type
@@ -250,34 +250,146 @@ const Box: (type: string|null) => SerialObjectPrimitive<{ size: number, type: st
             let contentSize = context.getSizeAfter();
             let size = contentSize + 8;
             
-            if(size <= maxUInt32) {
+            if(size <= MaxUInt32) {
                 let size = contentSize + 8;
                 let buffer = new Buffer(8);
                 buffer.writeUInt32BE(size, 0);
                 buffer.writeUInt32BE(textToUInt32(type), 4);
-                return [buffer];
+                return new LargeBuffer([buffer]);
             } else {
                 let buffer = new Buffer(16);
                 size += 8;
                 buffer.writeUInt32BE(1, 0);
                 buffer.writeUInt32BE(textToUInt32(type), 4);
                 writeUInt64BE(buffer, 8, size);
-                return [buffer];
+                return new LargeBuffer([buffer]);
             }
         }
     }
 );
 
 
-const FileBox: SerialObject = {
+// All the boxes have to be SerialObjects... but... we want to keep the underlying types too, so SerialObjectOutput works.
+
+const FileBox = {
     header: Box("ftyp")
 };
-const RootBox: SerialObject = {
-    boxes: [RepeatAllInfinite, FileBox]
+const RootBox = {
+    boxes: RepeatInfinite(FileBox)
 };
 
 
+function testYoutube() {
+    let buf = LargeBuffer.FromFile("./youtube.mp4");
+    let output = parseBytes(buf, RootBox);
+    console.log(output);
+}
 
-function parseBytes(buffers: Buffer, objectInfo: SerialObject) {
+function cleanup(codeAfter: () => void, code: () => void) {
+    try {
+        code();
+    } finally {
+        codeAfter();
+    }
+}
 
+/*
+interface SerialObject<CurObject = void> {
+    [key: string]: (
+        SerialObjectChild<CurObject>
+        // Undefined, as apparent if we have a function that sometimes returns a parameter, it is inferred to be
+        //  in the returned object, but as optional and undefined. So adding undefined here makes chooseBox infinitely
+        //  more useful (as it means it doesn't have to specify it's return type every time we have a chooseBox).
+        | undefined
+    );
+}
+type SerialObjectTerminal<CurObject = void> = SerialObjectPrimitive | SerialObjectChoose<CurObject>;
+type SerialObjectChildBase<CurObject = void> = SerialObject<CurObject> | SerialObjectTerminal<CurObject>;
+type SerialObjectChild<CurObject = void> = SerialObjectChildBase<CurObject> | SerialObjectChildBase<CurObject>[];
+*/
+function parseBytes<T extends SerialObject>(buffer: LargeBuffer, rootObjectInfo: T): SerialObjectOutput<T> {
+    let debugPath: string[] = [];
+    let pPos: P<number> = { v: 0 };
+
+    let output: R<SerialObjectOutput<T>> = { key: "v", parent: {v: null as any} };
+    parseObject(rootObjectInfo, output);
+    return output.parent.v;
+
+    function fatalError(message: string) {
+        return new Error(`${message} in path ${debugPath.join(".")} at position ${pPos.v}`);
+    }
+
+    function parseObject(object: SerialObject, output: R<SerialObjectOutput<SerialObject>>): void {
+        let outputObject: SerialObjectOutput<SerialObject> = {} as any;
+        output.parent[output.key] = outputObject;
+       
+        for(let key in object) {
+            debugPath.push(key);
+            cleanup(() => { debugPath.pop(); }, () => {
+                let child: SerialObject[""] = object[key];
+
+                if(child === undefined) {
+                    throw fatalError(`Child is undefined.`);
+                }
+
+                parseChild(child, { key, parent: outputObject });
+            });
+        }
+
+        function parseChildBase(child: SerialObjectChildBase<void>, output: R<SerialObjectChildBaseToOutput<SerialObjectChildBase<void>>>): void {
+            if(isSerialChoose(child)) {
+                let chooseContext: ChooseContext<void> = {
+                    curObject: outputObject as any,
+                    buffer: buffer,
+                    pos: pPos.v,
+                };
+                let choosenChild = child(chooseContext);
+                parseChild(choosenChild, output);
+            }
+            else if(isSerialPrimitive(child)) {
+                // TODO: After we parse the value, change the last key to use the type from the box, instead of the property key.
+                // TODO: Use the size info from the box info to warn when we don't completely parse the children.
+                if(BoxSymbol in child) { }
+
+                child
+
+                throw new Error('');
+            }
+            else if(isSerialObject(child)) {
+                // Eh... I don't know. We have to any cast, as the output of parseObject doesn't work with parseChildBase. But it should.
+                return parseObject(child, output as any);
+            }
+            else {
+                let childIsFinished: never = child;
+                throw new Error(`Cannot handle child ${child}`);
+            }    
+        }
+
+        function parseChild(child: SerialObjectChild<void>, output: R<SerialObjectChildToOutput<SerialObjectChild>>): void {
+            if(isArray(child)) {
+                let arr: SerialObjectChildBaseToOutput<SerialObjectChildBase<void>>[] = [];
+                output.parent[output.key] = arr;
+
+                if(IsArrayInfinite(child)) {
+                    // Not really an array. Just a set of children that may exist, infinitely.
+                    todonext
+                    // We need to verify all children have BoxSymbol, and then use the value of that to determine which parser to use
+                    //  Unless a parser has a type null. Then it matches everything (and it should be the only parser).
+                } else {
+                    // Fixed size arrays
+                    for(let i = 0; i < child.length; i++) {
+                        debugPath.push(i.toString());
+
+                        // Any cast the arr, as it is okay to treat an array like an object in this context.
+                        parseChildBase(child[i], { key: i.toString(), parent: arr as any });
+
+                        debugPath.pop();
+                    }
+                }
+            }
+            else {
+                parseChildBase(child, output);
+            }
+        }
+    }
 }
