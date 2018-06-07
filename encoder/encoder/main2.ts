@@ -80,7 +80,7 @@ type SerialPrimitiveMark = typeof SerialPrimitiveMark;
 type SerialObjectPrimitiveToOutput<T extends SerialObjectPrimitive> = {
     primitive: T;
     value: ReturnType<T["read"]>;
-    mark: SerialPrimitiveMark;
+    [SerialPrimitiveMark]: true
 };
 function isIntermediatePrimitive<T extends SerialObjectPrimitive>(obj: SerialObjectChildBaseToOutput<any>): obj is SerialObjectPrimitiveToOutput<T> {
     return SerialPrimitiveMark in obj;
@@ -314,16 +314,6 @@ const Box: <T extends string>(type: T) => SerialObjectPrimitive<{ size: number, 
     }
 );
 
-
-// All the boxes have to be SerialObjects... but... we want to keep the underlying types too, so SerialObjectOutput works.
-
-const FileBox = {
-    header: Box("ftyp")
-};
-const RootBox = {
-    boxes: BoxLookup(FileBox)
-};
-
 {
     function typeTest() {
         type y = SerialObjectOutput<typeof RootBox>;
@@ -337,21 +327,6 @@ const RootBox = {
         k.boxes[0].header.size;
         k.boxes[0].header.type;
     }
-}
-
-/*
-y.boxes
-y = {
-    boxes: [{ header: {primitive: Box("ftyp"), value: {type: "ftyp", size: 0}}, test: { primitive: UInt32, value: 5 } }]
-};
-*/
-
-testYoutube();
-
-function testYoutube() {
-    let buf = LargeBuffer.FromFile("./youtube.mp4");
-    let output = parseBytes(buf, RootBox);
-    console.log(output);
 }
 
 function cleanup(codeAfter: () => void, code: () => void) {
@@ -480,7 +455,7 @@ function parseBytes<T extends SerialObject>(buffer: LargeBuffer, rootObjectInfo:
                 let outputValue: SerialObjectPrimitiveToOutput<typeof child> = {
                     primitive: child,
                     value: null as any,
-                    mark: SerialPrimitiveMark
+                    [SerialPrimitiveMark]: true
                 };
 
                 let context: ReadContext = {
@@ -567,6 +542,7 @@ function parseBytes<T extends SerialObject>(buffer: LargeBuffer, rootObjectInfo:
                     let index = 0;
                     while(pPos.v < end) {
                         let type: string;
+                        let boxEnd: number;
                         {
                             // All boxes should have their box type as their first child. So we can parse the box type easily, without calling anything on the children.
                             let context: ReadContext = {
@@ -576,6 +552,8 @@ function parseBytes<T extends SerialObject>(buffer: LargeBuffer, rootObjectInfo:
                             };
                             let boxObj = Box(BoxAnyType).read(context);
                             type = boxObj.type as string;
+
+                            boxEnd = pPos.v + boxObj.size;
                         }
 
                         if(!(type in boxLookup) && BoxAnyType in boxLookup) {
@@ -583,11 +561,12 @@ function parseBytes<T extends SerialObject>(buffer: LargeBuffer, rootObjectInfo:
                         }
 
                         if(!(type in boxLookup)) {
-                            throw debugError(`Unexpected box type ${type}. Expected one of ${Object.keys(boxLookup).join(", ")}`);
+                            console.warn(debugError(`Unexpected box type ${type}. Expected one of ${Object.keys(boxLookup).join(", ")}`).message);
+                            pPos.v = boxEnd;
+                        } else {
+                            let box = boxLookup[type];
+                            parseChildBase(box, { key: index as any as string, parent: arr as any });
                         }
-
-                        let box = boxLookup[type];
-                        parseChildBase(box, { key: index as any as string, parent: arr as any });
                         index++;
                     }
 
@@ -608,4 +587,35 @@ function parseBytes<T extends SerialObject>(buffer: LargeBuffer, rootObjectInfo:
             }
         }
     }
+}
+
+
+
+// All the boxes have to be SerialObjects... but... we want to keep the underlying types too, so SerialObjectOutput works.
+// #region Boxes
+const FileBox = {
+    header: Box("ftyp")
+};
+const RootBox = {
+    boxes: BoxLookup(FileBox)
+};
+
+todonext
+// Add all boxes
+// Then add a writeIntermediate function, and make sure it writes the same bytes it reads (with smart instrumentation inside
+//  of it, to give detailed errors as soon as a byte is wrong, and not just at the root object that has an incorrect size).
+
+// #endregion
+
+
+
+
+testYoutube();
+
+function testYoutube() {
+    let buf = LargeBuffer.FromFile("./youtube.mp4");
+    let output = parseBytes(buf, RootBox);
+    //console.log(output.boxes[0].header);
+    let finalOutput = getFinalOutput(output);
+    //console.log(JSON.stringify(finalOutput, null, "  "));
 }
