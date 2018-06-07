@@ -1,6 +1,7 @@
 import { textFromUInt32, readUInt64BE, textToUInt32, writeUInt64BE } from "./util/serialExtension";
 import { LargeBuffer, MaxUInt32 } from "./LargeBuffer";
 import { isArray } from "./util/type";
+import { keyBy, mapObjectValues } from "./util/misc";
 
 const BoxLookupSymbol = Symbol();
 type S = SerialObjectChild;
@@ -49,7 +50,10 @@ interface WriteContext<T> {
     //  this should be sufficient.
     getSizeAfter(): number;
 }
+
+const BoxSymbol = Symbol();
 interface SerialObjectPrimitive<T = Types.AnyAll> {
+    [BoxSymbol]?: string;
     read(context: ReadContext): T;
     write(context: WriteContext<T>): LargeBuffer;
 }
@@ -72,6 +76,7 @@ type SerialObjectChooseToOutput<T extends SerialObjectChoose<void>> = never;//Se
 
 const SerialPrimitiveMark = Symbol();
 type SerialPrimitiveMark = typeof SerialPrimitiveMark;
+
 type SerialObjectPrimitiveToOutput<T extends SerialObjectPrimitive> = {
     primitive: T;
     value: ReturnType<T["read"]>;
@@ -168,14 +173,14 @@ function ChooseInfer(): MultiStageContinue<{}> {
 }
 
 
-function isSerialPrimitive(child: SerialObjectChildBase): child is SerialObjectPrimitive {
-    return child && typeof child === "object" && typeof (child as any).read === "function";
+function isSerialPrimitive(child: SerialObject[""]): child is SerialObjectPrimitive {
+    return child !== undefined && !isArray(child) && typeof child === "object" && typeof (child as any).read === "function";
 }
-function isSerialChoose(child: SerialObjectChildBase): child is SerialObjectChoose<void> {
-    return child && typeof child === "function";
+function isSerialChoose(child: SerialObject[""]): child is SerialObjectChoose<void> {
+    return child !== undefined && !isArray(child) && typeof child === "function";
 }
-function isSerialObject(child: SerialObjectChildBase): child is SerialObject {
-    return !isSerialPrimitive(child) && !isSerialChoose(child);
+function isSerialObject(child: SerialObject[""]): child is SerialObject {
+    return child !== undefined && !isArray(child) && !isSerialPrimitive(child) && !isSerialChoose(child);
 }
 
 
@@ -250,10 +255,9 @@ const UInt32String: SerialObjectPrimitive<string> = {
     write: (context) => UInt32.write({ ...context, value: textToUInt32(context.value)}),  
 };
 
-const BoxAnyType = "";
-const BoxSymbol = Symbol();
+const BoxAnyType = "any";
 const Box: <T extends string>(type: T) => SerialObjectPrimitive<{ size: number, type: T }> =
-    <T extends string>(typeIn: T) => ({
+    <T extends string>(typeIn: T): SerialObjectPrimitive<{ size: number, type: T }> => ({
         [BoxSymbol]: typeIn,
         read(context) {
             let { buffer, pPos } = context;
@@ -269,7 +273,7 @@ const Box: <T extends string>(type: T) => SerialObjectPrimitive<{ size: number, 
                 throw new Error(`Unhandled mp4 box type uuid`);
             }
 
-            if(type !== typeIn) {
+            if(typeIn !== BoxAnyType && type !== typeIn) {
                 throw new Error(`Unexpected box type ${type}. Expected ${typeIn}`);
             }
 
@@ -320,21 +324,20 @@ const RootBox = {
     boxes: BoxLookup(FileBox)
 };
 
-//todonext
-// Make SerialObjectOutput map primitives to a form with a value and primitive. That way we can easily make that intermediate format
-// Make Box keep the type of the string (and not let it become just a string).
-// Make RepeatInfinite properly make a union of the input types, so that the input types must have the right properties per type when creating the intermediate format.
+{
+    function typeTest() {
+        type y = SerialObjectOutput<typeof RootBox>;
 
-type y = SerialObjectOutput<typeof RootBox>;
+        let y!: y;
+        y.boxes[0].header.primitive.read
 
-let y!: y;
-y.boxes[0].header.primitive.read
+        type x = SerialIntermediateToFinal<y>;
 
-type x = SerialIntermediateToFinal<y>;
-
-let k!: x;
-k.boxes[0].header.size;
-k.boxes[0].header.type;
+        let k!: x;
+        k.boxes[0].header.size;
+        k.boxes[0].header.type;
+    }
+}
 
 /*
 y.boxes
@@ -343,6 +346,7 @@ y = {
 };
 */
 
+testYoutube();
 
 function testYoutube() {
     let buf = LargeBuffer.FromFile("./youtube.mp4");
@@ -405,6 +409,7 @@ type SerialObjectTerminal<CurObject = void> = SerialObjectPrimitive | SerialObje
 type SerialObjectChildBase<CurObject = void> = SerialObject<CurObject> | SerialObjectTerminal<CurObject>;
 type SerialObjectChild<CurObject = void> = SerialObjectChildBase<CurObject> | SerialObjectChildBase<CurObject>[];
 */
+
 function parseBytes<T extends SerialObject>(buffer: LargeBuffer, rootObjectInfo: T): SerialObjectOutput<T> {
     let debugPath: string[] = [];
     let pPos: P<number> = { v: 0 };
@@ -413,8 +418,8 @@ function parseBytes<T extends SerialObject>(buffer: LargeBuffer, rootObjectInfo:
     parseObject(rootObjectInfo, output, buffer.getLength());
     return output.parent.v;
 
-    function fatalError(message: string) {
-        return new Error(`${message} in path ${debugPath.join(".")} at position ${pPos.v}`);
+    function debugError(message: string) {
+        return new Error(`${JSON.stringify(String(message))} in path ${debugPath.join(".")} at position ${pPos.v}`);
     }
 
     function parseObject(object: SerialObject, output: R<SerialObjectOutput<SerialObject>>, end: number): void {
@@ -423,22 +428,40 @@ function parseBytes<T extends SerialObject>(buffer: LargeBuffer, rootObjectInfo:
         let outputObject: SerialObjectOutput<SerialObject> = {} as any;
         output.parent[output.key] = outputObject;
 
+        let startPos = pPos.v;
+
         let ourKeyIndex = debugPath.length - 1;
         function setOurKey(ourKey: string) {
             debugPath[ourKeyIndex] = ourKey;
         }
        
+        let isLastKey = false;
+        let lastKey: string;
+        {
+            let keys = Object.keys(object);
+            lastKey = keys[keys.length - 1];
+        }
         for(let key in object) {
+            if(key === lastKey) {
+                isLastKey = true;
+            }
             debugPath.push(key);
             cleanup(() => { debugPath.pop(); }, () => {
                 let child: SerialObject[""] = object[key];
 
                 if(child === undefined) {
-                    throw fatalError(`Child is undefined.`);
+                    throw debugError(`Child is undefined.`);
                 }
 
                 parseChild(child, { key, parent: outputObject });
             });
+        }
+
+        if(isEndSelf) {
+            if(pPos.v < end) {
+                console.warn(debugError(`Did not read all box bytes. Read ${pPos.v - startPos}, should have read ${end - startPos}`).message);
+                pPos.v = end;
+            }
         }
 
         function parseChildBase(child: SerialObjectChildBase<void>, output: R<SerialObjectChildBaseToOutput<SerialObjectChildBase<void>>>): void {
@@ -467,7 +490,7 @@ function parseBytes<T extends SerialObject>(buffer: LargeBuffer, rootObjectInfo:
                 try {
                     outputValue.value = child.read(context);
                 } catch(e) {
-                    fatalError(e);
+                    throw debugError(e);
                 }
 
                 // TODO: After we parse the value, change the last key to use the type from the box, instead of the property key.
@@ -490,8 +513,8 @@ function parseBytes<T extends SerialObject>(buffer: LargeBuffer, rootObjectInfo:
             }
             else {
                 let childIsFinished: never = child;
-                throw new Error(`Cannot handle child ${child}`);
-            }    
+                throw debugError(`Cannot handle child ${child}`);
+            }
         }
 
         function parseChild(child: SerialObjectChild<void>, output: R<SerialObjectChildToOutput<SerialObjectChild>>): void {
@@ -500,18 +523,81 @@ function parseBytes<T extends SerialObject>(buffer: LargeBuffer, rootObjectInfo:
                 output.parent[output.key] = arr;
 
                 if(IsBoxLookup(child)) {
+                    if(!isEndSelf) {
+                        throw debugError(`Key says to read until end of box, but we found no box header. So... this won't work, we don't know where to stop reading.`);
+                    }
+                    if(!isLastKey) {
+                        throw debugError(`Key says to read until end of box, but we there are keys after this key, so when will we read them? Other keys: ${Object.keys(object).join(", ")}`);
+                    }
+
                     // Not really an array. Just a set of children that may exist, infinitely.
 
-                    todonext
-                    // We need to verify all children have BoxSymbol, and then use the value of that to determine which parser to use
+                    // We need to verify all children have a property that is BoxSymbol, and then use the value of that to determine which parser to use
                     //  Unless a parser has a type BoxAnyType. Then it matches everything (and it should be the only parser).
+
+                    let childObjects = child.filter(isSerialObject);
+                    if(childObjects.length !== child.length) {
+                        throw debugError(`Array is marked as lookup, but has some children that are not objects.`);
+                    }
+
+                    let childTypes = childObjects.map(childObject => {
+                        let firstChild = Object.values(childObject)[0];
+                        if(!isSerialPrimitive(firstChild)) {
+                            throw debugError(`Object in BoxLookup doesn't have a box type as a first child. All objects in BoxLookup should have a box type as their first child.`);
+                        }
+                        
+                        let boxType = firstChild && firstChild[BoxSymbol] || undefined;
+                        if(boxType === undefined) {
+                            throw debugError(`First child in Object in BoxLookup doesn't have a box type.`);
+                        }
+                        return {
+                            boxType,
+                            childObject
+                        };
+                    });
+
+                    let boxLookup = mapObjectValues(keyBy(childTypes, x => x.boxType), x => x.childObject);
+
+                    if(BoxAnyType in boxLookup) {
+                        if(Object.keys(boxLookup).length > 1) {
+                            throw debugError(`Box lookup has a box that matches any type, BUT also has boxes that match types. This won't work, which one do you want to match? Box types: ${Object.keys(boxLookup).join(", ")}`);
+                        }
+                    }
+
+                    let index = 0;
+                    while(pPos.v < end) {
+                        let type: string;
+                        {
+                            // All boxes should have their box type as their first child. So we can parse the box type easily, without calling anything on the children.
+                            let context: ReadContext = {
+                                buffer,
+                                // Copy pPos, as this read is just to get the box, and shouldn't advance the position.
+                                pPos: { ... pPos }
+                            };
+                            let boxObj = Box(BoxAnyType).read(context);
+                            type = boxObj.type as string;
+                        }
+
+                        if(!(type in boxLookup) && BoxAnyType in boxLookup) {
+                            type = BoxAnyType;
+                        }
+
+                        if(!(type in boxLookup)) {
+                            throw debugError(`Unexpected box type ${type}. Expected one of ${Object.keys(boxLookup).join(", ")}`);
+                        }
+
+                        let box = boxLookup[type];
+                        parseChildBase(box, { key: index as any as string, parent: arr as any });
+                        index++;
+                    }
+
                 } else {
                     // Fixed size arrays
                     for(let i = 0; i < child.length; i++) {
                         debugPath.push(i.toString());
 
                         // Any cast the arr, as it is okay to treat an array like an object in this context.
-                        parseChildBase(child[i], { key: i.toString(), parent: arr as any });
+                        parseChildBase(child[i], { key: i as any as string, parent: arr as any });
 
                         debugPath.pop();
                     }
