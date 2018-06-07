@@ -1,24 +1,61 @@
+// Generic parsing, based off of pseudo language
+// This is an ISOBMFF parser (https://en.wikipedia.org/wiki/ISO_base_media_file_format)
+// http://l.web.umkc.edu/lizhu/teaching/2016sp.video-communication/ref/mp4.pdf
+// https://github.com/emericg/MiniVideo/blob/master/minivideo/src/demuxer/mp4/mp4.cpp
+// https://tools.ietf.org/html/draft-pantos-hls-rfc8216bis-00#page-9
+// https://developer.apple.com/streaming/HLS-WWDC-2017-Preliminary-Spec.pdf
+// https://mpeg.chiariglione.org/standards/mpeg-4/iso-base-media-file-format/text-isoiec-14496-12-5th-edition
+// https://mpeg.chiariglione.org/standards/mpeg-4/carriage-nal-unit-structured-video-iso-base-media-file-format/text-isoiec-14496-1
+// https://stackoverflow.com/questions/16363167/html5-video-tag-codecs-attribute
+
+// Hmm... another example of an implementation: https://github.com/madebyhiro/codem-isoboxer
+
 import { textFromUInt32, readUInt64BE, textToUInt32, writeUInt64BE } from "./util/serialExtension";
 import { LargeBuffer, MaxUInt32 } from "./LargeBuffer";
-import { isArray } from "./util/type";
-import { keyBy, mapObjectValues } from "./util/misc";
+import { isArray, throwValue } from "./util/type";
+import { keyBy, mapObjectValues, repeat } from "./util/misc";
+import { writeFileSync } from "fs";
+import { basename } from "path";
+import { decodeUTF8BytesToString, encodeAsUTF8Bytes } from "./util/UTF8";
 
 const BoxLookupSymbol = Symbol();
-type S = SerialObjectChild;
-function BoxLookup<T1 extends S, T2 extends S, T3 extends S, T4 extends S, T5 extends S, T6 extends S, T7 extends S, T8 extends S>(v1: T1, v2: T2, v3: T3, v4: T4, v5: T5, v6: T6, v7: T7, v8: T8): (T1|T2|T3|T4|T5|T6|T7|T8)[];
-function BoxLookup<T1 extends S, T2 extends S, T3 extends S, T4 extends S, T5 extends S, T6 extends S, T7 extends S>(v1: T1, v2: T2, v3: T3, v4: T4, v5: T5, v6: T6, v7: T7): (T1|T2|T3|T4|T5|T6|T7)[];
-function BoxLookup<T1 extends S, T2 extends S, T3 extends S, T4 extends S, T5 extends S, T6 extends S>(v1: T1, v2: T2, v3: T3, v4: T4, v5: T5, v6: T6): (T1|T2|T3|T4|T5|T6)[];
-function BoxLookup<T1 extends S, T2 extends S, T3 extends S, T4 extends S, T5 extends S>(v1: T1, v2: T2, v3: T3, v4: T4, v5: T5): (T1|T2|T3|T4|T5)[];
-function BoxLookup<T1 extends S, T2 extends S, T3 extends S, T4 extends S>(v1: T1, v2: T2, v3: T3, v4: T4): (T1|T2|T3|T4)[];
-function BoxLookup<T1 extends S, T2 extends S, T3 extends S>(v1: T1, v2: T2, v3: T3): (T1|T2|T3)[];
-function BoxLookup<T1 extends S, T2 extends S>(v1: T1, v2: T2): (T1|T2)[];
-function BoxLookup<T1 extends S>(v1: T1): T1[];
+type S = SerialObject;
+function BoxLookup<T1 extends S, T2 extends S, T3 extends S, T4 extends S, T5 extends S, T6 extends S, T7 extends S, T8 extends S>(v1: T1, v2: T2, v3: T3, v4: T4, v5: T5, v6: T6, v7: T7, v8: T8, count?: number): (T1|T2|T3|T4|T5|T6|T7|T8)[];
+function BoxLookup<T1 extends S, T2 extends S, T3 extends S, T4 extends S, T5 extends S, T6 extends S, T7 extends S>(v1: T1, v2: T2, v3: T3, v4: T4, v5: T5, v6: T6, v7: T7, count?: number): (T1|T2|T3|T4|T5|T6|T7)[];
+function BoxLookup<T1 extends S, T2 extends S, T3 extends S, T4 extends S, T5 extends S, T6 extends S>(v1: T1, v2: T2, v3: T3, v4: T4, v5: T5, v6: T6, count?: number): (T1|T2|T3|T4|T5|T6)[];
+function BoxLookup<T1 extends S, T2 extends S, T3 extends S, T4 extends S, T5 extends S>(v1: T1, v2: T2, v3: T3, v4: T4, v5: T5, count?: number): (T1|T2|T3|T4|T5)[];
+function BoxLookup<T1 extends S, T2 extends S, T3 extends S, T4 extends S>(v1: T1, v2: T2, v3: T3, v4: T4, count?: number): (T1|T2|T3|T4)[];
+function BoxLookup<T1 extends S, T2 extends S, T3 extends S>(v1: T1, v2: T2, v3: T3, count?: number): (T1|T2|T3)[];
+function BoxLookup<T1 extends S, T2 extends S>(v1: T1, v2: T2, count?: number): (T1|T2)[];
+function BoxLookup<T1 extends S>(v1: T1, count?: number): T1[];
+function BoxLookup(count?: number): never[];
 function BoxLookup(...arr: any[]): any[] {
-    (arr as any)[BoxLookupSymbol] = true;
+    let count: number|undefined = undefined;
+    if(arr.length > 0) {
+        let arrCount = arr[arr.length - 1];
+        if(typeof arrCount === "number") {
+            count = arrCount;
+            arr = arr.slice(0, -1);
+        }
+    }
+    (arr as any)[BoxLookupSymbol] = count;
     return arr;
 }
 function IsBoxLookup(arr: SerialObjectChild[]): boolean {
     return BoxLookupSymbol in arr;
+}
+function GetBoxCount(arr: SerialObjectChild[]): number|undefined {
+    return (arr as any)[BoxLookupSymbol];
+}
+
+const ArrayInfiniteSymbol = Symbol();
+function ArrayInfinite<T extends SerialObjectChild>(element: T): T[] {
+    let arr = [element];
+    (arr as any)[ArrayInfiniteSymbol] = ArrayInfiniteSymbol;
+    return arr;
+}
+function IsArrayInfinite(arr: SerialObjectChild[]): boolean {
+    return ArrayInfiniteSymbol in arr;
 }
 
 type P<T> = { v: T };
@@ -58,6 +95,8 @@ interface SerialObjectPrimitive<T = Types.AnyAll> {
     write(context: WriteContext<T>): LargeBuffer;
 }
 
+type ChooseContext<CurObject> = CurObject;
+/*
 interface ChooseContext<CurObject> {
     // Has the values parsed in the keys before us. Use ChooseInfer to populate this properly.
     curObject: CurObject;
@@ -65,6 +104,7 @@ interface ChooseContext<CurObject> {
     buffer: LargeBuffer;
     pos: number;
 }
+*/
 type SerialObjectChoose<CurObject> = (context: ChooseContext<CurObject>) => SerialObjectChild<CurObject>;
 
 // #region ChooseInfer types
@@ -113,7 +153,7 @@ type SerialObjectChildToOutput<T extends SerialObjectChild> = (
     never
 );
 
-type SerialObjectOutput<T extends SerialObject> = {
+type SerialObjectOutput<T extends SerialObject<any>> = {
     [key in keyof T]: SerialObjectChildMap<T[key]>;
 };
 
@@ -143,11 +183,11 @@ type SerialIntermediateToFinal<T extends SerialObjectOutput<SerialObject>> = {
 
 // #endregion
 
-interface MultiStageContinue<CurSerialObject extends SerialObject> {
-    (): SerialObjectOutput<CurSerialObject>;
-    <NextSerialObject extends SerialObject<SerialObjectOutput<CurSerialObject>>>(
+interface MultiStageContinue<CurSerialObject extends SerialObject, CurSerialOutput> {
+    (): CurSerialObject;
+    <NextSerialObject extends SerialObject<CurSerialOutput>>(
         next: NextSerialObject
-    ): MultiStageContinue<CurSerialObject & NextSerialObject>;
+    ): MultiStageContinue<CurSerialObject & NextSerialObject, CurSerialOutput & SerialIntermediateToFinal<SerialObjectOutput<NextSerialObject>>>;
 }
 
 /**
@@ -156,17 +196,29 @@ interface MultiStageContinue<CurSerialObject extends SerialObject> {
     ({ y: UInt32String })
     ({
         k: (t) => {
-            t.curObject.x;
+            if(t.curObject.x === 0) {
+                return { k: UInt32 };
+            } else {
+                return { y: UInt64 };
+            }
             t.curObject.y;
             return null as any;
         }
     });
 */
-function ChooseInfer(): MultiStageContinue<{}> {
+function ChooseInfer(): MultiStageContinue<{}, {}> {
+    let curObject = {};
+
     function multiStageContinue(): SerialObject;
-    function multiStageContinue(next: SerialObject): MultiStageContinue<any>;
-    function multiStageContinue(next?: SerialObject): MultiStageContinue<any>|SerialObject {
-        return null as any;
+    function multiStageContinue(next: SerialObject): MultiStageContinue<any, any>;
+    function multiStageContinue(next?: SerialObject): MultiStageContinue<any, any>|SerialObject {
+        if(next === undefined) {
+            return curObject;
+        }
+
+        Object.assign(curObject, next);
+        
+        return multiStageContinue;
     }
 
     return multiStageContinue;
@@ -249,15 +301,67 @@ const UInt64 = IntN(8, false);
 
 const Int16 = IntN(2, true);
 const Int32 = IntN(4, true);
+const Int64 = IntN(8, true);
+
+function NumberShifted(primitive: SerialObjectPrimitive<number>, shiftAmount: number): SerialObjectPrimitive<number> {
+    return {
+        read(context) {
+            return primitive.read(context) / shiftAmount;
+        },
+        write(context) {
+            let value = Math.round(context.value * shiftAmount);
+            return primitive.write({ ... context, value });
+        }
+    };
+}
 
 const UInt32String: SerialObjectPrimitive<string> = {
     read: (context) => textFromUInt32(UInt32.read(context)),
     write: (context) => UInt32.write({ ...context, value: textToUInt32(context.value)}),  
 };
 
+function RawData(size: number): SerialObjectPrimitive<LargeBuffer> {
+    return {
+        read(context) {
+            let buf = context.buffer.slice(context.pPos.v, context.pPos.v + size);
+            context.pPos.v += size;
+            return buf;
+        },
+        write(context) {
+            return context.value;
+        }
+    };
+}
+
+const CString: SerialObjectPrimitive<string> = {
+    read({pPos, buffer}) {
+        let bytes: number[] = [];
+        while(true) {
+            let b = buffer.readUIntBE(pPos.v, 1);
+            pPos.v++;
+            if(b === 0) break;
+            bytes.push(b);
+        }
+
+        return decodeUTF8BytesToString(bytes);
+    },
+    write(context) {
+        let value = context.value;
+        let unicodeBytes = encodeAsUTF8Bytes(value);
+
+        let output = new Buffer(unicodeBytes.length + 1);
+        for(let i = 0; i < unicodeBytes.length; i++) {
+            let byte = unicodeBytes[i];
+            output.writeUInt8(byte, i);
+        }
+
+        return new LargeBuffer([output]);
+    }
+};
+
 const BoxAnyType = "any";
-const Box: <T extends string>(type: T) => SerialObjectPrimitive<{ size: number, type: T }> =
-    <T extends string>(typeIn: T): SerialObjectPrimitive<{ size: number, type: T }> => ({
+const Box: <T extends string>(type: T) => SerialObjectPrimitive<{ size: number, type: T, headerSize: number }> =
+    <T extends string>(typeIn: T) => ({
         [BoxSymbol]: typeIn,
         read(context) {
             let { buffer, pPos } = context;
@@ -280,13 +384,15 @@ const Box: <T extends string>(type: T) => SerialObjectPrimitive<{ size: number, 
             if(size !== 1) {
                 return {
                     size,
-                    type
+                    type,
+                    headerSize: 8,
                 }
             } else {
                 size = buffer.readUInt64BE(pPos.v); pPos.v += 8;
                 return {
                     size,
-                    type
+                    type,
+                    headerSize: 16,
                 };
             }
         },
@@ -314,19 +420,12 @@ const Box: <T extends string>(type: T) => SerialObjectPrimitive<{ size: number, 
     }
 );
 
-{
-    function typeTest() {
-        type y = SerialObjectOutput<typeof RootBox>;
-
-        let y!: y;
-        y.boxes[0].header.primitive.read
-
-        type x = SerialIntermediateToFinal<y>;
-
-        let k!: x;
-        k.boxes[0].header.size;
-        k.boxes[0].header.type;
-    }
+function FullBox<T extends string>(type: T) {
+    return {
+        header: Box(type),
+        version: UInt8,
+        flags: UInt24,
+    };
 }
 
 function cleanup(codeAfter: () => void, code: () => void) {
@@ -386,10 +485,12 @@ type SerialObjectChild<CurObject = void> = SerialObjectChildBase<CurObject> | Se
 */
 
 function parseBytes<T extends SerialObject>(buffer: LargeBuffer, rootObjectInfo: T): SerialObjectOutput<T> {
+    let isRoot = true;
+
     let debugPath: string[] = [];
     let pPos: P<number> = { v: 0 };
 
-    let output: R<SerialObjectOutput<T>> = { key: "v", parent: {v: null as any} };
+    let output: R<SerialObjectOutput<T>> = { key: "v", parent: {v: {} as any} };
     parseObject(rootObjectInfo, output, buffer.getLength());
     return output.parent.v;
 
@@ -399,7 +500,13 @@ function parseBytes<T extends SerialObject>(buffer: LargeBuffer, rootObjectInfo:
 
     function parseObject(object: SerialObject, output: R<SerialObjectOutput<SerialObject>>, end: number): void {
         /** True if our end should end our own object (so we should warn if we didn't read enough bytes). */
-        let isEndSelf = true;
+        let isEndSelf = false;
+
+        if(isRoot) {
+            isRoot = false;
+            isEndSelf = true;
+        }
+
         let outputObject: SerialObjectOutput<SerialObject> = {} as any;
         output.parent[output.key] = outputObject;
 
@@ -437,10 +544,15 @@ function parseBytes<T extends SerialObject>(buffer: LargeBuffer, rootObjectInfo:
                 console.warn(debugError(`Did not read all box bytes. Read ${pPos.v - startPos}, should have read ${end - startPos}`).message);
                 pPos.v = end;
             }
+            if(pPos.v > end) {
+                console.warn(debugError(`Read too far. Read ${pPos.v - startPos}, should have read ${end - startPos}`).message);
+            }
         }
 
         function parseChildBase(child: SerialObjectChildBase<void>, output: R<SerialObjectChildBaseToOutput<SerialObjectChildBase<void>>>): void {
             if(isSerialChoose(child)) {
+                let chooseContext: ChooseContext<void> = getFinalOutput(outputObject) as any as void;
+                /*
                 let chooseContext: ChooseContext<void> = {
                     // Hmm... this isn't efficient... but we should have that many chooses, right? Or at least, not chooses too close to the root,
                     //  so hopefully this doesn't become exponential.
@@ -448,13 +560,14 @@ function parseBytes<T extends SerialObject>(buffer: LargeBuffer, rootObjectInfo:
                     buffer: buffer,
                     pos: pPos.v,
                 };
+                */
                 let choosenChild = child(chooseContext);
                 parseChild(choosenChild, output);
             }
             else if(isSerialPrimitive(child)) {
                 let outputValue: SerialObjectPrimitiveToOutput<typeof child> = {
                     primitive: child,
-                    value: null as any,
+                    value: {} as any,
                     [SerialPrimitiveMark]: true
                 };
 
@@ -475,8 +588,7 @@ function parseBytes<T extends SerialObject>(buffer: LargeBuffer, rootObjectInfo:
                 if(BoxSymbol in child) {
                     let boxInfo = outputValue.value as { size: number; type: string; };
                     isEndSelf = true;
-                    end = boxInfo.size;
-
+                    end = startPos + boxInfo.size;
                     setOurKey(boxInfo.type);
                 }
 
@@ -497,11 +609,41 @@ function parseBytes<T extends SerialObject>(buffer: LargeBuffer, rootObjectInfo:
                 let arr: SerialObjectChildBaseToOutput<SerialObjectChildBase<void>>[] = [];
                 output.parent[output.key] = arr;
 
-                if(IsBoxLookup(child)) {
+                if(IsArrayInfinite(child)) {
+
                     if(!isEndSelf) {
                         throw debugError(`Key says to read until end of box, but we found no box header. So... this won't work, we don't know where to stop reading.`);
                     }
                     if(!isLastKey) {
+                        throw debugError(`Key says to read until end of box, but we there are keys after this key, so when will we read them? Other keys: ${Object.keys(object).join(", ")}`);
+                    }
+
+                    if(child.length !== 1) {
+                        throw new Error(`Can only repeat array with 1 entry, received ${child.length} entries`);
+                    }
+
+                    let element = child[0];
+
+                    let time = +new Date();
+                    let index = 0;
+                    while(pPos.v < end) {
+                        parseChildBase(element, { key: index as any as string, parent: arr as any });
+                        index++;
+                    }
+
+                    time = +new Date() - time;
+                    if(time > 100) {
+                        console.warn(debugError(`Parse took ${time}ms`));
+                    }
+                }
+                else if(IsBoxLookup(child)) {
+
+                    let count = GetBoxCount(child);
+
+                    if(count === undefined && !isEndSelf) {
+                        throw debugError(`Key says to read until end of box, but we found no box header. So... this won't work, we don't know where to stop reading.`);
+                    }
+                    if(count === undefined && !isLastKey) {
                         throw debugError(`Key says to read until end of box, but we there are keys after this key, so when will we read them? Other keys: ${Object.keys(object).join(", ")}`);
                     }
 
@@ -539,8 +681,12 @@ function parseBytes<T extends SerialObject>(buffer: LargeBuffer, rootObjectInfo:
                         }
                     }
 
+                    count = count !== undefined ? count : Number.MAX_SAFE_INTEGER;
+
                     let index = 0;
-                    while(pPos.v < end) {
+                    while(pPos.v < end && count --> 0) {
+                        debugPath.push(index.toString());
+
                         let type: string;
                         let boxEnd: number;
                         {
@@ -553,6 +699,10 @@ function parseBytes<T extends SerialObject>(buffer: LargeBuffer, rootObjectInfo:
                             let boxObj = Box(BoxAnyType).read(context);
                             type = boxObj.type as string;
 
+                            if(boxObj.size === 0) {
+                                throw debugError(`Definitely invalid box of size 0.`)
+                            }
+
                             boxEnd = pPos.v + boxObj.size;
                         }
 
@@ -562,12 +712,16 @@ function parseBytes<T extends SerialObject>(buffer: LargeBuffer, rootObjectInfo:
 
                         if(!(type in boxLookup)) {
                             console.warn(debugError(`Unexpected box type ${type}. Expected one of ${Object.keys(boxLookup).join(", ")}`).message);
+                            // Fill the entry with something, so we don't throw later.
+                            arr[index] = {};
                             pPos.v = boxEnd;
                         } else {
                             let box = boxLookup[type];
                             parseChildBase(box, { key: index as any as string, parent: arr as any });
                         }
                         index++;
+
+                        debugPath.pop();
                     }
 
                 } else {
@@ -594,13 +748,294 @@ function parseBytes<T extends SerialObject>(buffer: LargeBuffer, rootObjectInfo:
 // All the boxes have to be SerialObjects... but... we want to keep the underlying types too, so SerialObjectOutput works.
 // #region Boxes
 const FileBox = {
-    header: Box("ftyp")
-};
-const RootBox = {
-    boxes: BoxLookup(FileBox)
+    header: Box("ftyp"),
+    major_brand: UInt32String,
+    minor_version: UInt32,
+    compatible_brands: ArrayInfinite(UInt32String),
 };
 
-todonext
+const MvhdBoxTest = ChooseInfer()({header: FullBox("ftyp")})();
+
+const MvhdBox = ChooseInfer()({ ...FullBox("mvhd") })({
+    times: ({version}) => {
+        if(version === 0) {
+            return {
+                creation_time: UInt32,
+                modification_time: UInt32,
+                timescale: UInt32,
+                duration: UInt32,
+            };
+        } else if(version === 1) {
+            return {
+                creation_time: UInt64,
+                modification_time: UInt64,
+                timescale: UInt32,
+                duration: UInt64,
+            };
+        } else {
+            throw new Error(`Invalid version ${version}`);
+        }
+    }
+})({
+    rate: NumberShifted(Int32, 0x00010000),
+    volume: NumberShifted(Int16, 0x0100),
+
+    reserved: UInt16,
+    reserved0: UInt32,
+    reserved1: UInt32,
+
+    matrix: repeat(Int32, 9),
+    pre_defined: repeat(Int32, 6),
+
+    next_track_ID: Int32,
+})();
+
+const TkhdBox = ChooseInfer()({ ...FullBox("tkhd") })({
+    times: ({version}) => {
+        if(version === 0) {
+            return {
+                creation_time: UInt32,
+                modification_time: UInt32,
+                track_ID: UInt32,
+                reserved: UInt32,
+                duration: UInt32,
+            };
+        } else if(version === 1) {
+            return {
+                creation_time: UInt64,
+                modification_time: UInt64,
+                track_ID: UInt32,
+                reserved: UInt32,
+                duration: UInt64,
+            };
+        } else {
+            throw new Error(`Invalid version ${version}`)
+        }
+    }
+})({
+    reserved0: UInt32,
+    reserved1: UInt32,
+
+    layer: Int16,
+    alternate_group: Int16,
+    volume: Int16,
+    reversed2: UInt16,
+
+    matrix: repeat(Int32, 9),
+
+    width: NumberShifted(UInt32, 1 << 16),
+    height: NumberShifted(UInt32, 1 << 16),
+})
+();
+
+const ElstBox = ChooseInfer()({
+    ... FullBox("elst"),
+    entry_count: UInt32,
+})({
+    entries: ({entry_count, version}) => {
+        if(version === 0) {
+            return repeat({
+                segment_duration: UInt32,
+                media_time: Int32,
+                media_rate_integer: Int16,
+                media_rate_fraction: Int16
+            }, entry_count);
+        } else if(version === 1) {
+            return repeat({
+                segment_duration: UInt64,
+                media_time: Int64,
+                media_rate_integer: Int16,
+                media_rate_fraction: Int16
+            }, entry_count);
+        } else {
+            throw new Error(`Invalid version ${version}`);
+        }
+    }
+})
+();
+
+const EdtsBox = {
+    header: Box("edts"),
+    boxes: BoxLookup(ElstBox),
+};
+
+const MdhdBox = ChooseInfer()({
+    ... FullBox("mdhd")
+})({
+    times: ({version}) => (
+        version === 0 ? {
+            creation_time: UInt32,
+            modification_time: UInt32,
+            timescale: UInt32,
+            duration: UInt32,
+        } :
+        version === 1 ? {
+            creation_time: UInt64,
+            modification_time: UInt64,
+            timescale: UInt32,
+            duration: UInt64,
+        } :
+        throwValue(`Invalid versio n${version}`)
+    )
+})({
+    padPlusLanguage: UInt16,
+    pre_defined: UInt16,
+})
+();
+
+const HdlrBox = {
+    ... FullBox("hdlr"),
+
+    pre_defined: UInt32,
+    handler_type: UInt32String,
+    reversed: repeat(UInt32, 3),
+
+    name: CString,
+};
+
+const VmhdBox = {
+    ... FullBox("vmhd"),
+    graphicsmode: UInt16,
+    opcolor: repeat(UInt16, 3),
+};
+
+const UrlBox = {
+    ... FullBox("url ")
+};
+const DrefBox = {
+    ... FullBox("dref"),
+    entry_count: UInt32,
+    boxes: BoxLookup(
+        UrlBox
+    ),
+};
+
+const DinfBox = {
+    header: Box("dinf"),
+    boxes: BoxLookup(
+        DrefBox
+    ),
+};
+
+const EsdsBox = {
+    header: Box("esds"),
+    iHaveNoIdeaAndReallyDontCare: ArrayInfinite(UInt8),
+};
+
+const Mp4vBox = {
+    header: Box("mp4v"),
+    reserved: repeat(UInt8, 6),
+    data_reference_index: UInt16,
+
+    pre_defined: UInt16,
+    reserved1: UInt16,
+    pre_defined1: repeat(UInt32, 3),
+    width: UInt16,
+    height: UInt16,
+
+    horizresolution: UInt32,
+    vertresolution: UInt32,
+
+    reserved2: UInt32,
+
+    frame_count: UInt16,
+
+    compressorname: repeat(UInt8, 32),
+    depth: UInt16,
+    pre_defined2: Int16,
+
+    config: BoxLookup(
+        EsdsBox,
+        1,
+    ),
+
+    notImportant: ArrayInfinite(UInt8),
+};
+
+const StsdBox = ChooseInfer()({
+    ... FullBox("stsd"),
+    entry_count: UInt32,
+})({
+    boxes: ({entry_count}) => BoxLookup(
+        Mp4vBox,
+        entry_count
+    ),
+})
+();
+
+const SttsBox = {
+    header: Box("stts"),
+};
+
+const StblBox = {
+    header: Box("stbl"),
+    boxes: BoxLookup(
+        StsdBox,
+        SttsBox
+    ),
+};
+
+const MinfBox = {
+    header: Box("minf"),
+    boxes: BoxLookup(
+        VmhdBox,
+        DinfBox,
+        StblBox,
+    ),
+};
+
+const MdiaBox = {
+    header: Box("mdia"),
+    boxes: BoxLookup(
+        MdhdBox,
+        HdlrBox,
+        MinfBox,
+    ),
+};
+
+const TrakBox = {
+    header: Box("trak"),
+    boxes: BoxLookup(
+        TkhdBox,
+        EdtsBox,
+        MdiaBox,
+    ),
+};
+
+const MoovBox = {
+    header: Box("moov"),
+    boxes: BoxLookup(
+        MvhdBox,
+        TrakBox,
+        //UdtaBox,
+        //MvexBox,
+    ),
+};
+
+const MdatBox = ChooseInfer()({
+    header: Box("mdat"),
+})({
+    bytes: ({header}) => RawData(header.size - header.headerSize)
+})
+();
+
+const FreeBox = ChooseInfer()({
+    header: Box("free"),
+})({
+    bytes: ({header}) => RawData(header.size - header.headerSize)
+})
+();
+
+const RootBox = {
+    boxes: BoxLookup(
+        FileBox,
+        MoovBox,
+        MdatBox,
+        FreeBox,
+    )
+};
+
+//todonext
 // Add all boxes
 // Then add a writeIntermediate function, and make sure it writes the same bytes it reads (with smart instrumentation inside
 //  of it, to give detailed errors as soon as a byte is wrong, and not just at the root object that has an incorrect size).
@@ -610,12 +1045,22 @@ todonext
 
 
 
-testYoutube();
+//testYoutube();
 
-function testYoutube() {
-    let buf = LargeBuffer.FromFile("./youtube.mp4");
+testFile("./raw/test5.mp4");
+//testFile("./youtube.mp4");
+
+function testFile(path: string) {
+    let buf = LargeBuffer.FromFile(path);
     let output = parseBytes(buf, RootBox);
-    //console.log(output.boxes[0].header);
     let finalOutput = getFinalOutput(output);
-    //console.log(JSON.stringify(finalOutput, null, "  "));
+
+    function cleanOutput(key: string, value: any) {
+        if(value && value instanceof LargeBuffer) {
+            return `LargeBuffer(${value.getLength()})`
+        }
+        return value;
+    }
+
+    writeFileSync(basename(path) + ".json", JSON.stringify(finalOutput, cleanOutput, "  "))
 }

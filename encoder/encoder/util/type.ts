@@ -24,3 +24,7 @@ export function canHaveChildren(value: Types.AnyAll): value is Types.Dictionary 
 export function isArray(obj: Types.AnyAll): obj is Types.Arr {
     return obj instanceof Array;
 }
+
+export function throwValue(message: string): any {
+    throw new Error(message);
+}

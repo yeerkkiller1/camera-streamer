@@ -51,7 +51,11 @@ export class LargeBuffer {
         this.bufferStarts.push(pos);
     }
 
-    private getBuffer(pos: number): { bufferPos: number; buffer: Buffer; } {
+    private getBuffer(pos: number): {
+        // Gets the position within the buffer of the position requested
+        bufferPos: number;
+        buffer: Buffer;
+    } {
         // Eh... we shouldn't need a binary search here. Although... maybe...
         let after = this.bufferStarts.findIndex(end => end > pos);
         if(after < 0) {
@@ -97,5 +101,27 @@ export class LargeBuffer {
     public readUInt64BE(offset: number) {
         let buf = this.getSmallBuffer(offset, 8);
         return readUInt64BE(buf, 0);
+    }
+
+    public slice(start: number, end: number): LargeBuffer {
+        let subBuffers: Buffer[] = [];
+        let pos = start;
+        while (pos < end) {
+            let bufObj = this.getBuffer(pos);
+            let bufEnd = bufObj.buffer.length - bufObj.bufferPos + pos;
+
+            if(bufObj.bufferPos !== 0 || bufEnd >= end) {
+                // If the buffer goes before or after our range, slice it
+                let ourEndInBuffer = Math.min(bufObj.buffer.length, bufObj.buffer.length - (bufEnd - end));
+                subBuffers.push(bufObj.buffer.slice(bufObj.bufferPos, ourEndInBuffer));
+            } else {
+                // Just add it raw
+                subBuffers.push(bufObj.buffer);
+            }
+
+            pos = bufEnd;
+        }
+
+        return new LargeBuffer(subBuffers);
     }
 }
