@@ -94,6 +94,10 @@ export class LargeBuffer {
         return this.getSmallBuffer(offset, byteLength).readUIntBE(0, byteLength);
     };
 
+    public readUInt8: typeof Buffer.prototype.readUInt8 = (offset) => {
+        return this.getSmallBuffer(offset, 1).readUInt8(0);
+    };
+
     public readUInt32BE: typeof Buffer.prototype.readUInt32BE = (offset) => {
         return this.getSmallBuffer(offset, 4).readUInt32BE(0);
     };
@@ -123,5 +127,13 @@ export class LargeBuffer {
         }
 
         return new LargeBuffer(subBuffers);
+    }
+
+    public getInternalBuffer(pos: number): Readonly<Buffer> {
+        return this.getBuffer(pos).buffer;
+    }
+    // Eh... please don't mutate this list. I would make it readonly... but my flatten is dumb and doesn't understand that.
+    public getInternalBufferList(): Buffer[] {
+        return this.buffers;
     }
 }
