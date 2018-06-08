@@ -59,6 +59,19 @@ function textFromUInt32(num: number) {
     return String.fromCharCode(d) + String.fromCharCode(c) + String.fromCharCode(b) + String.fromCharCode(a);
 }
 
+async function loadFont(type: string): Promise<any> {
+    return new Promise((resolve, reject) => {
+        let jimpAny = Jimp as any;    
+        jimpAny.loadFont(type, (err: any, font: any) => {
+            if(err) {
+                reject(err);
+            } else {
+                resolve(font);
+            }
+        });
+    });
+}
+
 
 
 // https://github.com/emericg/MiniVideo/blob/348ec21b99f939ca6a0ed65a257042434e8b98ec/minivideo/src/import.cpp
@@ -2122,18 +2135,7 @@ function testWrite() {
 
 // It doesn't look like vlc is using the matrixes. So... we are going to have to bake the writing into the mpegs.
 
-async function loadFont(type: string): Promise<any> {
-    return new Promise((resolve, reject) => {
-        let jimpAny = Jimp as any;    
-        jimpAny.loadFont(type, (err: any, font: any) => {
-            if(err) {
-                reject(err);
-            } else {
-                resolve(font);
-            }
-        });
-    });
-}
+
 
 // ffmpeg -y -i large.mp4 -preset ultrafast -c h264 large.h264.mp4
 

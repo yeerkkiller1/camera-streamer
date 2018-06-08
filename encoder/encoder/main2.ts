@@ -19,6 +19,8 @@ import { basename } from "path";
 import { decodeUTF8BytesToString, encodeAsUTF8Bytes } from "./util/UTF8";
 import { sum } from "./util/math";
 
+import * as Jimp from "jimp";
+
 // #region Serial types
 const BoxLookupSymbol = Symbol();
 type S = SerialObject;
@@ -63,7 +65,7 @@ function IsArrayInfinite(arr: SerialObjectChild[]): boolean {
 type P<T> = { v: T };
 type R<T> = { key: string; parent: { [key: string]: T } };
 
-interface SerialObject<CurObject = void> {
+interface SerialObject<CurObject = any> {
     [key: string]: (
         SerialObjectChild<CurObject>
         // Undefined, as apparent if we have a function that sometimes returns a parameter, it is inferred to be
@@ -72,9 +74,9 @@ interface SerialObject<CurObject = void> {
         | undefined
     );
 }
-type SerialObjectTerminal<CurObject = void> = SerialObjectPrimitive | SerialObjectChoose<CurObject>;
-type SerialObjectChildBase<CurObject = void> = SerialObject<CurObject> | SerialObjectTerminal<CurObject>;
-type SerialObjectChild<CurObject = void> = SerialObjectChildBase<CurObject> | SerialObjectChildBase<CurObject>[];
+type SerialObjectTerminal<CurObject = any> = SerialObjectPrimitive | SerialObjectChoose<CurObject>;
+type SerialObjectChildBase<CurObject = any> = SerialObject<CurObject> | SerialObjectTerminal<CurObject>;
+type SerialObjectChild<CurObject = any> = SerialObjectChildBase<CurObject> | SerialObjectChildBase<CurObject>[];
 
 interface ReadContext {
     buffer: LargeBuffer;
@@ -107,14 +109,19 @@ interface ChooseContext<CurObject> {
     pos: number;
 }
 */
-type SerialObjectChoose<CurObject = void> = (context: ChooseContext<CurObject>) => SerialObjectChild<CurObject>;
+type SerialObjectChoose<CurObject = any> = (context: ChooseContext<CurObject>) => SerialObjectChild<CurObject>;
 
 // #region ChooseInfer types
 
 // Eh... the choose function causes problem. It says it is recursive. I could probably fix this with manual recursion (just spitting out the
 //  recursive path a lot of times, and then ending the final entry with never), but... let's try without that, and maybe I'll think of a way
 //  to get this to work without that.
-type SerialObjectChooseToOutput<T extends SerialObjectChoose> = never;//SerialObjectChildToOutput<ReturnType<T>>;
+//  - Actually, at least map primitives to output
+//never;//SerialObjectChildToOutput<ReturnType<T>>;
+type SerialObjectChooseToOutput<T extends SerialObjectChoose> = (
+    ReturnType<T> extends SerialObjectPrimitive ? SerialObjectPrimitiveToOutput<ReturnType<T>> :
+    never
+);
 
 const SerialPrimitiveMark = Symbol();
 type SerialPrimitiveMark = typeof SerialPrimitiveMark;
@@ -139,7 +146,7 @@ type SerialObjectChildMap<T extends SerialObject[""]> = (
 );
 
 type SerialObjectChildBaseToOutput<T extends SerialObjectChildBase = SerialObjectChildBase> = (
-    T extends SerialObjectTerminal<void> ? SerializeTerminalToOutput<T> :
+    T extends SerialObjectTerminal ? SerializeTerminalToOutput<T> :
     T extends SerialObject ? { [key in keyof T]: SerialObjectChildMap<T[key]> } :
     never
 );
@@ -230,7 +237,7 @@ function ChooseInfer(): MultiStageContinue<{}, {}> {
 function isSerialPrimitive(child: SerialObject[""]): child is SerialObjectPrimitive {
     return child !== undefined && !isArray(child) && typeof child === "object" && typeof (child as any).read === "function";
 }
-function isSerialChoose(child: SerialObject[""]): child is SerialObjectChoose<void> {
+function isSerialChoose(child: SerialObject[""]): child is SerialObjectChoose {
     return child !== undefined && !isArray(child) && typeof child === "function";
 }
 function isSerialObject(child: SerialObject[""]): child is SerialObject {
@@ -328,7 +335,7 @@ function parseBytes<T extends SerialObject>(buffer: LargeBuffer, rootObjectInfo:
             }
         }
 
-        function parseChildBase(child: SerialObjectChildBase<void>, output: R<SerialObjectChildBaseToOutput<SerialObjectChildBase<void>>>): void {
+        function parseChildBase(child: SerialObjectChildBase, output: R<SerialObjectChildBaseToOutput>): void {
             if(isSerialChoose(child)) {
                 let chooseContext: ChooseContext<void> = getFinalOutput(outputObject) as any as void;
                 /*
@@ -444,6 +451,7 @@ function parseBytes<T extends SerialObject>(buffer: LargeBuffer, rootObjectInfo:
                         
                         let boxType = firstChild && firstChild[BoxSymbol] || undefined;
                         if(boxType === undefined) {
+                            console.error(firstChild);
                             throw debugError(`First child in Object in BoxLookup doesn't have a box type.`);
                         }
                         return {
@@ -475,7 +483,7 @@ function parseBytes<T extends SerialObject>(buffer: LargeBuffer, rootObjectInfo:
                                 // Copy pPos, as this read is just to get the box, and shouldn't advance the position.
                                 pPos: { ... pPos }
                             };
-                            let boxObj = Box(BoxAnyType).read(context);
+                            let boxObj = Box(BoxAnyType).header.read(context);
                             type = boxObj.type as string;
 
                             if(boxObj.size === 0) {
@@ -553,15 +561,22 @@ function getFinalOutput<T extends SerialObjectOutput>(output: T): SerialIntermed
     }
 }
 
-const writeContextSymbol = Symbol();
+const WriteContextSymbol = Symbol();
 function getBufferWriteContext(buffer: Readonly<Buffer>): string {
-    return "";
+    return (buffer as any)[WriteContextSymbol];
 }
-function setBufferWriteContext(buffer: LargeBuffer, context: string) {
-
+function setBufferWriteContext(buffer: LargeBuffer, context: string): void {
+    for(let buf of buffer.getInternalBufferList()) {
+        (buf as any)[WriteContextSymbol] = context;
+    }
 }
-function copyBufferWriteContext(oldBuffer: LargeBuffer, newBuf: LargeBuffer) {
+function copyBufferWriteContext(oldBuf: LargeBuffer, newBuf: LargeBuffer): void {
+    let olds = oldBuf.getInternalBufferList();
+    let news = newBuf.getInternalBufferList();
 
+    for(let i = 0; i < news.length; i++) {
+        (news[i] as any)[WriteContextSymbol] = (olds[i] as any)[WriteContextSymbol];
+    }
 }
 
 function writeIntermediate<T extends SerialObjectOutput>(intermediate: T): LargeBuffer {
@@ -796,9 +811,22 @@ const CString: SerialObjectPrimitive<string> = {
     }
 };
 
+/** A string that exists in our code, but doesn't get written back to disk. Useful to adding values to the
+ *      object data for intermediate parsing.
+ */
+const CodeOnlyString: <T extends string>(type: T) => SerialObjectPrimitive<T> = <T extends string>(text: T) => ({
+    read({pPos, buffer}) {
+        return text;
+    },
+    write(context) {
+        return new LargeBuffer([]);
+    }
+});
+
 const BoxAnyType = "any";
-const Box: <T extends string>(type: T) => SerialObjectPrimitive<{ size: number, type: T, headerSize: number }> =
-    <T extends string>(typeIn: T) => ({
+const Box: <T extends string>(type: T) => { header: SerialObjectPrimitive<{ size: number, type: T, headerSize: number }>; type: SerialObjectPrimitive<T>; } =
+<T extends string>(typeIn: T) => ({
+    header: {
         [BoxSymbol]: typeIn,
         read(context) {
             let { buffer, pPos } = context;
@@ -854,12 +882,13 @@ const Box: <T extends string>(type: T) => SerialObjectPrimitive<{ size: number, 
                 return new LargeBuffer([buffer]);
             }
         }
-    }
-);
+    },
+    type: CodeOnlyString(typeIn),
+});
 
 function FullBox<T extends string>(type: T) {
     return {
-        header: Box(type),
+        ... Box(type),
         version: UInt8,
         flags: UInt24,
     };
@@ -869,7 +898,7 @@ function FullBox<T extends string>(type: T) {
 // All the boxes have to be SerialObjects... but... we want to keep the underlying types too, so SerialObjectOutput works.
 // #region Boxes
 const FileBox = {
-    header: Box("ftyp"),
+    ... Box("ftyp"),
     major_brand: UInt32String,
     minor_version: UInt32,
     compatible_brands: ArrayInfinite(UInt32String),
@@ -976,7 +1005,7 @@ const ElstBox = ChooseInfer()({
 ();
 
 const EdtsBox = {
-    header: Box("edts"),
+    ... Box("edts"),
     boxes: BoxLookup(ElstBox),
 };
 
@@ -1032,19 +1061,19 @@ const DrefBox = {
 };
 
 const DinfBox = {
-    header: Box("dinf"),
+    ... Box("dinf"),
     boxes: BoxLookup(
         DrefBox
     ),
 };
 
 const EsdsBox = {
-    header: Box("esds"),
+    ... Box("esds"),
     iHaveNoIdeaAndReallyDontCare: ArrayInfinite(UInt8),
 };
 
 const Mp4vBox = {
-    header: Box("mp4v"),
+    ... Box("mp4v"),
     reserved: repeat(UInt8, 6),
     data_reference_index: UInt16,
 
@@ -1133,7 +1162,7 @@ const StcoBox = ChooseInfer()({
 
 /*
 const StssBox = ChooseInfer()({
-    header: Box("stss"),
+    ... Box("stss"),
     entry_count: UInt32
 })({
     samples: ({entry_count}) => repeat(UInt32, entry_count)
@@ -1143,7 +1172,7 @@ const StssBox = ChooseInfer()({
 
 
 const StblBox = {
-    header: Box("stbl"),
+    ... Box("stbl"),
     boxes: BoxLookup(
         StsdBox,
         SttsBox,
@@ -1156,7 +1185,7 @@ const StblBox = {
 };
 
 const MinfBox = {
-    header: Box("minf"),
+    ... Box("minf"),
     boxes: BoxLookup(
         VmhdBox,
         DinfBox,
@@ -1165,7 +1194,7 @@ const MinfBox = {
 };
 
 const MdiaBox = {
-    header: Box("mdia"),
+    ... Box("mdia"),
     boxes: BoxLookup(
         MdhdBox,
         HdlrBox,
@@ -1174,7 +1203,7 @@ const MdiaBox = {
 };
 
 const TrakBox = {
-    header: Box("trak"),
+    ... Box("trak"),
     boxes: BoxLookup(
         TkhdBox,
         EdtsBox,
@@ -1183,14 +1212,14 @@ const TrakBox = {
 };
 
 const UdtaBox = ChooseInfer()({
-    header: Box("udta"),
+    ... Box("udta"),
 })({
     bytes: ({header}) => RawData(header.size - header.headerSize)
 })
 ();
 
 const MoovBox = {
-    header: Box("moov"),
+    ... Box("moov"),
     boxes: BoxLookup(
         MvhdBox,
         TrakBox,
@@ -1200,14 +1229,14 @@ const MoovBox = {
 };
 
 const MdatBox = ChooseInfer()({
-    header: Box("mdat"),
+    ... Box("mdat"),
 })({
     bytes: ({header}) => RawData(header.size - header.headerSize)
 })
 ();
 
 const FreeBox = ChooseInfer()({
-    header: Box("free"),
+    ... Box("free"),
 })({
     bytes: ({header}) => RawData(header.size - header.headerSize)
 })
@@ -1224,15 +1253,6 @@ const RootBox = {
 
 // #endregion
 
-
-
-//testYoutube();
-
-//testReadFile("./raw/test5.mp4");
-
-testWriteFile("./raw/test5.mp4");
-
-//testFile("./youtube.mp4");
 
 function testReadFile(path: string) {
     let buf = LargeBuffer.FromFile(path);
@@ -1270,7 +1290,7 @@ function testWriteFile(path: string) {
             let newBuffer = newBuf.getInternalBuffer(i);
             let newContext = getBufferWriteContext(newBuffer);
 
-            throw new Error(`Bytes is wrong at position ${i}. Should be ${oldByte}, was ${newByte}. Old context ${getContext(oldBuf, i)}, new context ${getContext(newBuf, i)}`);
+            throw new Error(`Bytes is wrong at position ${i}. Should be ${oldByte}, was ${newByte}. Write context ${newContext}. Old context ${getContext(oldBuf, i)}, new context ${getContext(newBuf, i)}`);
         }
     }
 
@@ -1312,9 +1332,192 @@ function testWriteFile(path: string) {
     }
 }
 
+async function testRewriteMjpeg() {
+    async function loadFont(type: string): Promise<any> {
+        return new Promise((resolve, reject) => {
+            let jimpAny = Jimp as any;    
+            jimpAny.loadFont(type, (err: any, font: any) => {
+                if(err) {
+                    reject(err);
+                } else {
+                    resolve(font);
+                }
+            });
+        });
+    }
+
+    let jimpAny = Jimp as any;    
+    let width = 600;
+    let height = 400;
+    //let image = new jimpAny(width, height, 0xFF0000FF, () => {});
+    
+    //Jimp.read(jpegs[0], (err: any, x: any) => {
+    //    if(err) throw new Error(`Error ${err}`);
+    //    image = x;
+    //});
+    async function getFrame(i: number): Promise<Buffer> {
+        let image: any;
+        image = new jimpAny(width, height, 0xFF00FFFF, () => {});
+        
+        image.resize(width, height);
+
+        let data: Buffer = image.bitmap.data;
+        let frameNumber = i;
+        for(let i = 0; i < width * height; i++) {
+            let k = i * 4;
+            let seed = (frameNumber + 1) * i;
+            data[k] = seed % 256;
+            data[k + 1] = (seed * 67) % 256;
+            data[k + 2] = (seed * 679) % 256;
+            data[k + 3] = 255;
+        }
+
+        let imageColor = new jimpAny(width, 64, 0x000000AF, () => {});
+        image.composite(imageColor, 0, 0);
+
+        let path = "./node_modules/jimp/fonts/open-sans/open-sans-64-white/open-sans-64-white.fnt";
+        let font = await loadFont(path);
+        image.print(font, 0, 0, `frame ${i} NEW`, width);
+
+        console.log(`Created frame ${i}`);
+        
+        let jpegBuffer!: Buffer;
+        image.quality(75).getBuffer(Jimp.MIME_JPEG, (err: any, buffer: Buffer) => {
+            if(err) throw err;
+            jpegBuffer = buffer;
+        });
+
+        return jpegBuffer;
+    }
+
+    let fps = 1;
+    let totalFrameCount = fps * 1;
+    let frames: Buffer[] = [];
+    let frameCount = totalFrameCount;
+    for(let i = 0; i < frameCount; i++) {
+        let buf = await getFrame(i);
+        frames.push(buf);
+    }
+
+    createVideoOutOfJpegs(
+        {
+            fileName: "test.mp4",
+            framePerSecond: fps,
+            width,
+            height,
+        },
+        flatten(repeat(frames, totalFrameCount / frames.length))
+    );
+
+    function createVideoOutOfJpegs(info: { fileName: string, framePerSecond: number, width: number, height: number }, jpegs: Buffer[]) {
+        let { fileName, framePerSecond, width, height } = info;
+    
+        let templateMp4 = "./raw/test5.mp4";
+
+        let buf = LargeBuffer.FromFile(templateMp4);
+        let output = parseBytes(buf, RootBox);
+
+        function filterBox<
+            T extends string,
+            Box extends (SerialObject & ReturnType<typeof Box>),
+            Other extends (SerialObject & ReturnType<typeof Box>),
+        >(
+            type: T,
+            box: Box,
+            arr: ((SerialObjectOutput<Box> | SerialObjectOutput<Other>))[]
+        ): SerialObjectOutput<Box>[] {
+            return arr.filter((x): x is (SerialObjectOutput<Box>) => x.type.value === type);
+        }
+
+   
+        let timeMultiplier = 2;
+    
+        // Might as well go in file order.
+
+        
+        //mdat is just the raw jpegs, side by side
+        // data
+        let mdat = filterBox("mdat", MdatBox, output.boxes)[0];
+        mdat.bytes.value = new LargeBuffer(jpegs);
+    
+    
+        let mvhd = getAllFirstOfTypeUnsafe(boxes, "mvhd")[0];
+        // timescale. The number of increments per second. Will need to be the least common multiple of all the framerates
+        let timescale = mvhd._properties.timescale = framePerSecond;
+        // Technically the duration of the longest trak. But we should only have 1, so...
+        let timescaleDuration = mvhd._properties.duration = jpegs.length;
+    
+        // Only 1 track
+        let tkhd = getAllFirstOfTypeUnsafe(boxes, "tkhd")[0];
+        tkhd._properties.duration = timescaleDuration;
+        
+        tkhd._properties.width = width;
+        tkhd._properties.height = height;
+    
+        let elst = getAllFirstOfTypeUnsafe(boxes, "elst")[0];
+        // Just one segment
+        elst.entries.entries[0].segment_duration = timescaleDuration;
+    
+    
+        let mdhd = getAllFirstOfType(boxes, "mdhd")[0];
+    
+        // mdhd has a timescale too?
+        mdhd._properties.timescale = timescale;
+        mdhd._properties.duration = timescaleDuration;
+    
+    
+        let stsd = getAllFirstOfTypeUnsafe(boxes, "stsd")[0];
+        stsd.obj[0].width = width;
+        stsd.obj[0].height = height;
+    
+    
+        let stts = getAllFirstOfTypeUnsafe(boxes, "stts")[0];
+        stts.obj[0].sample_delta = 1;
+        stts.obj[0].sample_count = jpegs.length;
+    
+        let stsc = getAllFirstOfTypeUnsafe(boxes, "stsc")[0];
+        stsc.obj[0].samples_per_chunk = jpegs.length;
+    
+        let stsz = getAllFirstOfTypeUnsafe(boxes, "stsz")[0];
+        stsz.obj = jpegs.map(x => x.length);
+    
+        // Position of mdat in file as a whole. So... anything before mdat has to have a constant size, or else this will be wrong,
+        //  or I will need to start calculating it.
+        let stco = getAllFirstOfTypeUnsafe(boxes, "stco")[0];
+        
+        // Okay, time for hacks. So... if mdat switches to a larger header, it's data will be offset. So... deal with that here
+        // maxUInt32
+        let mdatSize = 8 + sum(jpegs.map(x => x.length));
+        if(mdatSize > maxUInt32) {
+            console.log("wow, that's a big file you got there. I hope this works.");
+            stco.obj[0] += 8;
+        }
+    
+    
+        let newBuffer = writeBoxArr(boxes);
+        console.log(`Wrote to ${fileName}`)
+    
+        let stream = fs.createWriteStream(fileName);
+        stream.once("open", function(fd) {
+            for(let buf of newBuffer) {
+                stream.write(buf);
+            }
+            stream.end();
+        });
+    }
+}
 
 //todonext
-// - Add writeIntermediate function, and make sure we get the same as we read from test5.mp4
 // - Modify the frames inside test5.mp4 (the payload is just a mjpeg), so ensure we can still play it.
 // - Make sure writeIntermediate works for youtube.mp4 (and add parsing for any new boxes)
 // - Make sure we can put a payload from a full mp4 (test.h264.mp4) into a frament mp4 (youtube.mp4), and get a playable file.
+
+//testYoutube();
+
+//testReadFile("./raw/test5.mp4");
+
+//testWriteFile("./raw/test5.mp4");
+
+//testFile("./youtube.mp4");
+
+testRewriteMjpeg();
