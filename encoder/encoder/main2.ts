@@ -13,7 +13,7 @@
 import { textFromUInt32, readUInt64BE, textToUInt32, writeUInt64BE } from "./util/serialExtension";
 import { LargeBuffer, MaxUInt32 } from "./LargeBuffer";
 import { isArray, throwValue } from "./util/type";
-import { keyBy, mapObjectValues, repeat, flatten } from "./util/misc";
+import { keyBy, mapObjectValues, repeat, flatten, filterObjectValues } from "./util/misc";
 import { writeFileSync } from "fs";
 import { basename } from "path";
 import { decodeUTF8BytesToString, encodeAsUTF8Bytes } from "./util/UTF8";
@@ -22,16 +22,18 @@ import { sum } from "./util/math";
 import * as Jimp from "jimp";
 
 // #region Serial types
+const TestSymbol = Symbol();
+
 const BoxLookupSymbol = Symbol();
 type S = SerialObject;
-function BoxLookup<T1 extends S, T2 extends S, T3 extends S, T4 extends S, T5 extends S, T6 extends S, T7 extends S, T8 extends S>(v1: T1, v2: T2, v3: T3, v4: T4, v5: T5, v6: T6, v7: T7, v8: T8, count?: number): (T1|T2|T3|T4|T5|T6|T7|T8)[];
-function BoxLookup<T1 extends S, T2 extends S, T3 extends S, T4 extends S, T5 extends S, T6 extends S, T7 extends S>(v1: T1, v2: T2, v3: T3, v4: T4, v5: T5, v6: T6, v7: T7, count?: number): (T1|T2|T3|T4|T5|T6|T7)[];
-function BoxLookup<T1 extends S, T2 extends S, T3 extends S, T4 extends S, T5 extends S, T6 extends S>(v1: T1, v2: T2, v3: T3, v4: T4, v5: T5, v6: T6, count?: number): (T1|T2|T3|T4|T5|T6)[];
-function BoxLookup<T1 extends S, T2 extends S, T3 extends S, T4 extends S, T5 extends S>(v1: T1, v2: T2, v3: T3, v4: T4, v5: T5, count?: number): (T1|T2|T3|T4|T5)[];
-function BoxLookup<T1 extends S, T2 extends S, T3 extends S, T4 extends S>(v1: T1, v2: T2, v3: T3, v4: T4, count?: number): (T1|T2|T3|T4)[];
-function BoxLookup<T1 extends S, T2 extends S, T3 extends S>(v1: T1, v2: T2, v3: T3, count?: number): (T1|T2|T3)[];
-function BoxLookup<T1 extends S, T2 extends S>(v1: T1, v2: T2, count?: number): (T1|T2)[];
-function BoxLookup<T1 extends S>(v1: T1, count?: number): T1[];
+function BoxLookup<T1 extends S, T2 extends S, T3 extends S, T4 extends S, T5 extends S, T6 extends S, T7 extends S, T8 extends S>(v1: T1, v2: T2, v3: T3, v4: T4, v5: T5, v6: T6, v7: T7, v8: T8, count?: number): (T1|T2|T3|T4|T5|T6|T7|T8)[] & { T1: T1, T2: T2, T3: T3, T4: T4, T5: T5, T6: T6, T7: T7, T8: T8 };
+function BoxLookup<T1 extends S, T2 extends S, T3 extends S, T4 extends S, T5 extends S, T6 extends S, T7 extends S>(v1: T1, v2: T2, v3: T3, v4: T4, v5: T5, v6: T6, v7: T7, count?: number): (T1|T2|T3|T4|T5|T6|T7)[] & { T1: T1, T2: T2, T3: T3, T4: T4, T5: T5, T6: T6, T7: T7, T8: undefined };
+function BoxLookup<T1 extends S, T2 extends S, T3 extends S, T4 extends S, T5 extends S, T6 extends S>(v1: T1, v2: T2, v3: T3, v4: T4, v5: T5, v6: T6, count?: number): (T1|T2|T3|T4|T5|T6)[] & { T1: T1, T2: T2, T3: T3, T4: T4, T5: T5, T6: T6, T7: undefined, T8: undefined, };
+function BoxLookup<T1 extends S, T2 extends S, T3 extends S, T4 extends S, T5 extends S>(v1: T1, v2: T2, v3: T3, v4: T4, v5: T5, count?: number): (T1|T2|T3|T4|T5)[] & { T1: T1, T2: T2, T3: T3, T4: T4, T5: T5, T6: undefined, T7: undefined, T8: undefined, };
+function BoxLookup<T1 extends S, T2 extends S, T3 extends S, T4 extends S>(v1: T1, v2: T2, v3: T3, v4: T4, count?: number): (T1|T2|T3|T4)[] & { T1: T1, T2: T2, T3: T3, T4: T4, T5: undefined, T6: undefined, T7: undefined, T8: undefined, };
+function BoxLookup<T1 extends S, T2 extends S, T3 extends S>(v1: T1, v2: T2, v3: T3, count?: number): (T1|T2|T3)[] & { T1: T1, T2: T2, T3: T3, T4: undefined, T5: undefined, T6: undefined, T7: undefined, T8: undefined, };
+function BoxLookup<T1 extends S, T2 extends S>(v1: T1, v2: T2, count?: number): (T1|T2)[] & { T1: T1, T2: T2, T3: undefined, T4: undefined, T5: undefined, T6: undefined, T7: undefined, T8: undefined, };
+function BoxLookup<T1 extends S>(v1: T1, count?: number): T1[] & { T1: T1, T2: undefined, T3: undefined, T4: undefined, T5: undefined, T6: undefined, T7: undefined, T8: undefined, };
 function BoxLookup(count?: number): never[];
 function BoxLookup(...arr: any[]): any[] {
     let count: number|undefined = undefined;
@@ -98,6 +100,11 @@ interface SerialObjectPrimitive<T = Types.AnyAll> {
     read(context: ReadContext): T;
     write(context: WriteContext<T>): LargeBuffer;
 }
+interface SerialObjectPrimitiveBoxSymbol<T, BoxType extends string> {
+    [BoxSymbol]: BoxType;
+    read(context: ReadContext): T;
+    write(context: WriteContext<T>): LargeBuffer;
+}
 
 type ChooseContext<CurObject> = CurObject;
 /*
@@ -120,7 +127,10 @@ type SerialObjectChoose<CurObject = any> = (context: ChooseContext<CurObject>) =
 //never;//SerialObjectChildToOutput<ReturnType<T>>;
 type SerialObjectChooseToOutput<T extends SerialObjectChoose> = (
     ReturnType<T> extends SerialObjectPrimitive ? SerialObjectPrimitiveToOutput<ReturnType<T>> :
+    // And this doesn't give an error!? I guess that sort of makes sense...
+    ReturnType<T> extends SerialObject ? SerialObjectOutput<ReturnType<T>> :
     never
+    //{ error: "SerialObjectChooseToOutput has limited inferring capabilities, and could not infer the output of a choose function. See the definition of SerialObjectChooseToOutput" }
 );
 
 const SerialPrimitiveMark = Symbol();
@@ -129,7 +139,7 @@ type SerialPrimitiveMark = typeof SerialPrimitiveMark;
 type SerialObjectPrimitiveToOutput<T extends SerialObjectPrimitive = SerialObjectPrimitive> = {
     primitive: T;
     value: ReturnType<T["read"]>;
-    [SerialPrimitiveMark]: true
+    [SerialPrimitiveMark]: true;
 };
 function isIntermediatePrimitive<T extends SerialObjectPrimitive>(obj: SerialObjectChildBaseToOutput<any>): obj is SerialObjectPrimitiveToOutput<T> {
     return SerialPrimitiveMark in obj;
@@ -157,8 +167,9 @@ type GetSerialObjectChildBaseArray<T extends SerialObjectChildBase[]> = (
 );
 
 type SerialObjectChildToOutput<T extends SerialObjectChild = SerialObjectChild> = (
-    T extends SerialObjectChildBase ? SerialObjectChildBaseToOutput<T> :
+    // Array first is important, to prevent any arrays with extra type values ([] & {}) from being recognized as objects, as they definitely aren't.
     T extends SerialObjectChildBase[] ? SerialObjectChildBaseToOutput<GetSerialObjectChildBaseArray<T>>[] :
+    T extends SerialObjectChildBase ? SerialObjectChildBaseToOutput<T> :
     never
 );
 
@@ -182,8 +193,8 @@ type GetSerialIntermediateChildBaseArray<T extends SerialObjectChildToOutput<Ser
     ForceExtendsType<T extends (infer U)[] ? U : never, SerialObjectChildToOutput<SerialObjectChild>>
 );
 type SerialIntermediateChildToOutput<T extends SerialObjectChildToOutput<SerialObjectChild>> = (
-    T extends SerialObjectChildBaseToOutput ? SerialIntermediateChildBaseToOutput<T> :
     T extends SerialObjectChildBaseToOutput[] ? SerialIntermediateChildBaseToOutput<GetSerialIntermediateChildBaseArray<T>>[] :
+    T extends SerialObjectChildBaseToOutput ? SerialIntermediateChildBaseToOutput<T> :
     never
 );
 type SerialIntermediateToFinal<T extends SerialObjectOutput = SerialObjectOutput> = {
@@ -255,6 +266,7 @@ function cleanup(codeAfter: () => void, code: () => void) {
 
 // #endregion
 
+// #region Parse functions
 /*
 interface SerialObject<CurObject = void> {
     [key: string]: (
@@ -687,6 +699,87 @@ function writeIntermediate<T extends SerialObjectOutput>(intermediate: T): Large
     }
 }
 
+type B = (SerialObject & ReturnType<typeof Box>);
+type O<T extends (SerialObject | undefined)> = (
+    T extends SerialObject ? SerialObjectOutput<T> : never
+);
+
+
+function filterBox<
+    T1 extends (B | undefined), T2 extends (B | undefined), T3 extends (B | undefined), T4 extends (B | undefined), T5 extends (B | undefined), T6 extends (B | undefined), T7 extends (B | undefined), T8 extends (B | undefined),
+    THolder extends {T1: T1,T2: T2,T3: T3,T4: T4, T5: T5, T6: T6, T7: T7, T8: T8},
+>(
+    box: T1,
+    arr: THolder,
+    arr2: (O<T1>|O<T2>|O<T3>|O<T4>|O<T5>|O<T6>|O<T7>|O<T8>)[]
+): O<T1>[];
+function filterBox<
+    T1 extends (B | undefined), T2 extends (B | undefined), T3 extends (B | undefined), T4 extends (B | undefined), T5 extends (B | undefined), T6 extends (B | undefined), T7 extends (B | undefined), T8 extends (B | undefined),
+    THolder extends {T1: T1,T2: T2,T3: T3,T4: T4, T5: T5, T6: T6, T7: T7, T8: T8},
+>(
+    box: T2,
+    arr: THolder,
+    arr2: (O<T1>|O<T2>|O<T3>|O<T4>|O<T5>|O<T6>|O<T7>|O<T8>)[]
+): O<T2>[];
+function filterBox<
+    T1 extends (B | undefined), T2 extends (B | undefined), T3 extends (B | undefined), T4 extends (B | undefined), T5 extends (B | undefined), T6 extends (B | undefined), T7 extends (B | undefined), T8 extends (B | undefined),
+    THolder extends {T1: T1,T2: T2,T3: T3,T4: T4, T5: T5, T6: T6, T7: T7, T8: T8},
+>(
+    box: T3,
+    arr: THolder,
+    arr2: (O<T1>|O<T2>|O<T3>|O<T4>|O<T5>|O<T6>|O<T7>|O<T8>)[]
+): O<T3>[];
+function filterBox<
+    T1 extends (B | undefined), T2 extends (B | undefined), T3 extends (B | undefined), T4 extends (B | undefined), T5 extends (B | undefined), T6 extends (B | undefined), T7 extends (B | undefined), T8 extends (B | undefined),
+    THolder extends {T1: T1,T2: T2,T3: T3,T4: T4, T5: T5, T6: T6, T7: T7, T8: T8},
+>(
+    box: T4,
+    arr: THolder,
+    arr2: (O<T1>|O<T2>|O<T3>|O<T4>|O<T5>|O<T6>|O<T7>|O<T8>)[]
+): O<T4>[];
+function filterBox<
+    T1 extends (B | undefined), T2 extends (B | undefined), T3 extends (B | undefined), T4 extends (B | undefined), T5 extends (B | undefined), T6 extends (B | undefined), T7 extends (B | undefined), T8 extends (B | undefined),
+    THolder extends {T1: T1,T2: T2,T3: T3,T4: T4, T5: T5, T6: T6, T7: T7, T8: T8},
+>(
+    box: T5,
+    arr: THolder,
+    arr2: (O<T1>|O<T2>|O<T3>|O<T4>|O<T5>|O<T6>|O<T7>|O<T8>)[]
+): O<T5>[];
+function filterBox<
+    T1 extends (B | undefined), T2 extends (B | undefined), T3 extends (B | undefined), T4 extends (B | undefined), T5 extends (B | undefined), T6 extends (B | undefined), T7 extends (B | undefined), T8 extends (B | undefined),
+    THolder extends {T1: T1,T2: T2,T3: T3,T4: T4, T5: T5, T6: T6, T7: T7, T8: T8},
+>(
+    box: T6,
+    arr: THolder,
+    arr2: (O<T1>|O<T2>|O<T3>|O<T4>|O<T5>|O<T6>|O<T7>|O<T8>)[]
+): O<T6>[];
+function filterBox<
+    T1 extends (B | undefined), T2 extends (B | undefined), T3 extends (B | undefined), T4 extends (B | undefined), T5 extends (B | undefined), T6 extends (B | undefined), T7 extends (B | undefined), T8 extends (B | undefined),
+    THolder extends {T1: T1,T2: T2,T3: T3,T4: T4, T5: T5, T6: T6, T7: T7, T8: T8},
+>(
+    box: T7,
+    arr: THolder,
+    arr2: (O<T1>|O<T2>|O<T3>|O<T4>|O<T5>|O<T6>|O<T7>|O<T8>)[]
+): O<T7>[];
+function filterBox<
+    T1 extends (B | undefined), T2 extends (B | undefined), T3 extends (B | undefined), T4 extends (B | undefined), T5 extends (B | undefined), T6 extends (B | undefined), T7 extends (B | undefined), T8 extends (B | undefined),
+    THolder extends {T1: T1,T2: T2,T3: T3,T4: T4, T5: T5, T6: T6, T7: T7, T8: T8},
+>(
+    box: T8,
+    arr: THolder,
+    arr2: (O<T1>|O<T2>|O<T3>|O<T4>|O<T5>|O<T6>|O<T7>|O<T8>)[]
+): O<T8>[];
+
+function filterBox(
+    box: any,
+    arr: any[],
+    arr2: any[]
+): any[] {
+    return arr2.filter((x) => x.header.primitive[BoxSymbol] === box.header[BoxSymbol]);
+}
+
+// #endregion
+
 // #region Primitives
 function IntN(bytes: number, signed: boolean): SerialObjectPrimitive<number> {
     if(bytes > 8 || bytes <= 0) {
@@ -824,7 +917,7 @@ const CodeOnlyString: <T extends string>(type: T) => SerialObjectPrimitive<T> = 
 });
 
 const BoxAnyType = "any";
-const Box: <T extends string>(type: T) => { header: SerialObjectPrimitive<{ size: number, type: T, headerSize: number }>; type: SerialObjectPrimitive<T>; } =
+const Box: <T extends string>(type: T) => { header: SerialObjectPrimitiveBoxSymbol<{ size: number, type: T, headerSize: number }, T>; type: ReturnType<typeof CodeOnlyString>; } =
 <T extends string>(typeIn: T) => ({
     header: {
         [BoxSymbol]: typeIn,
@@ -1253,7 +1346,6 @@ const RootBox = {
 
 // #endregion
 
-
 function testReadFile(path: string) {
     let buf = LargeBuffer.FromFile(path);
     let output = parseBytes(buf, RootBox);
@@ -1416,43 +1508,31 @@ async function testRewriteMjpeg() {
 
         let buf = LargeBuffer.FromFile(templateMp4);
         let output = parseBytes(buf, RootBox);
-
-        function filterBox<
-            T extends string,
-            Box extends (SerialObject & ReturnType<typeof Box>),
-            Other extends (SerialObject & ReturnType<typeof Box>),
-        >(
-            type: T,
-            box: Box,
-            arr: ((SerialObjectOutput<Box> | SerialObjectOutput<Other>))[]
-        ): SerialObjectOutput<Box>[] {
-            return arr.filter((x): x is (SerialObjectOutput<Box>) => x.type.value === type);
-        }
+       
 
    
         let timeMultiplier = 2;
     
         // Might as well go in file order.
 
+        // console.log(filterBox(FileBox, RootBox.boxes, output.boxes));
         
         //mdat is just the raw jpegs, side by side
         // data
-        let mdat = filterBox("mdat", MdatBox, output.boxes)[0];
+        let mdat = filterBox(MdatBox, RootBox.boxes, output.boxes)[0];
         mdat.bytes.value = new LargeBuffer(jpegs);
     
-    
-        let mvhd = getAllFirstOfTypeUnsafe(boxes, "mvhd")[0];
+        let mvhd = filterBox("mvhd", MvhdBox, output.boxes)[0];
         // timescale. The number of increments per second. Will need to be the least common multiple of all the framerates
-        let timescale = mvhd._properties.timescale = framePerSecond;
+        let timescale = mvhd.times.timescale.value = framePerSecond;
         // Technically the duration of the longest trak. But we should only have 1, so...
-        let timescaleDuration = mvhd._properties.duration = jpegs.length;
+        let timescaleDuration = mvhd.times.duration.value = jpegs.length;
     
         // Only 1 track
-        let tkhd = getAllFirstOfTypeUnsafe(boxes, "tkhd")[0];
-        tkhd._properties.duration = timescaleDuration;
-        
-        tkhd._properties.width = width;
-        tkhd._properties.height = height;
+        let tkhd = filterBox("tkhd", TkhdBox, output.boxes)[0];
+        tkhd.times.duration.value = timescaleDuration;
+        tkhd.width.value = width;
+        tkhd.height.value = height;
     
         let elst = getAllFirstOfTypeUnsafe(boxes, "elst")[0];
         // Just one segment
@@ -1504,6 +1584,7 @@ async function testRewriteMjpeg() {
             }
             stream.end();
         });
+        */
     }
 }
 
@@ -1521,3 +1602,36 @@ async function testRewriteMjpeg() {
 //testFile("./youtube.mp4");
 
 testRewriteMjpeg();
+
+//console.log(MdatBox.header[BoxSymbol])
+
+
+/*
+
+
+//type idk = SerialObjectOutput<typeof MdatBox>;
+//let idk!: idk;
+//let x = idk.header.primitive[BoxSymbol];
+
+let templateMp4 = "./raw/test5.mp4";
+let buf = LargeBuffer.FromFile(templateMp4);
+let output = parseBytes(buf, RootBox);
+
+
+//RootBox.boxes.T1 = MdatBox
+
+console.log(filterBox(FileBox, RootBox.boxes, output.boxes));
+console.log(filterBox(FreeBox, RootBox.boxes, output.boxes));
+console.log(filterBox(MdatBox, RootBox.boxes, output.boxes));
+console.log(filterBox(MoovBox, RootBox.boxes, output.boxes));
+//let xxx = filterBox(TkhdBox, RootBox.boxes, output.boxes);
+//let y: number = x;
+//let y = filterBox(TkhdBox, RootBox.boxes, output.boxes).header;
+
+
+
+
+
+output.boxes;
+//filterBox(MdatBox, RootBox.boxes, output.boxes);
+*/
