@@ -25,6 +25,6 @@ export function isArray(obj: Types.AnyAll): obj is Types.Arr {
     return obj instanceof Array;
 }
 
-export function throwValue(message: string): any {
+export function throwValue(message: string): never {
     throw new Error(message);
 }

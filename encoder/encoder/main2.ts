@@ -8,13 +8,13 @@
 // https://mpeg.chiariglione.org/standards/mpeg-4/carriage-nal-unit-structured-video-iso-base-media-file-format/text-isoiec-14496-1
 // https://stackoverflow.com/questions/16363167/html5-video-tag-codecs-attribute
 
-// Hmm... another example of an implementation: https://github.com/madebyhiro/codem-isoboxer
+// Hmm... another example of an implementation: https://github.com/madebyhiro/codem-isoboxer B
 
 import { textFromUInt32, readUInt64BE, textToUInt32, writeUInt64BE } from "./util/serialExtension";
 import { LargeBuffer, MaxUInt32 } from "./LargeBuffer";
 import { isArray, throwValue } from "./util/type";
 import { keyBy, mapObjectValues, repeat, flatten, filterObjectValues } from "./util/misc";
-import { writeFileSync } from "fs";
+import { writeFileSync, createWriteStream } from "fs";
 import { basename } from "path";
 import { decodeUTF8BytesToString, encodeAsUTF8Bytes } from "./util/UTF8";
 import { sum } from "./util/math";
@@ -120,6 +120,12 @@ type SerialObjectChoose<CurObject = any> = (context: ChooseContext<CurObject>) =
 
 // #region ChooseInfer types
 
+type ChooseInferArray<R> = (
+    R extends SerialObject[] ? SerialObjectOutput<R[0]> :
+    R extends SerialObjectPrimitive[] ? SerialObjectPrimitiveToOutput<R[0]> :
+    never
+);
+
 // Eh... the choose function causes problem. It says it is recursive. I could probably fix this with manual recursion (just spitting out the
 //  recursive path a lot of times, and then ending the final entry with never), but... let's try without that, and maybe I'll think of a way
 //  to get this to work without that.
@@ -128,6 +134,8 @@ type SerialObjectChoose<CurObject = any> = (context: ChooseContext<CurObject>) =
 type SerialObjectChooseToOutput<T extends SerialObjectChoose> = (
     ReturnType<T> extends SerialObjectPrimitive ? SerialObjectPrimitiveToOutput<ReturnType<T>> :
     // And this doesn't give an error!? I guess that sort of makes sense...
+    ReturnType<T> extends SerialObjectPrimitive[] ? ChooseInferArray<ReturnType<T>>[] :
+    ReturnType<T> extends SerialObject[] ? ChooseInferArray<ReturnType<T>>[] :
     ReturnType<T> extends SerialObject ? SerialObjectOutput<ReturnType<T>> :
     never
     //{ error: "SerialObjectChooseToOutput has limited inferring capabilities, and could not infer the output of a choose function. See the definition of SerialObjectChooseToOutput" }
@@ -917,7 +925,7 @@ const CodeOnlyString: <T extends string>(type: T) => SerialObjectPrimitive<T> = 
 });
 
 const BoxAnyType = "any";
-const Box: <T extends string>(type: T) => { header: SerialObjectPrimitiveBoxSymbol<{ size: number, type: T, headerSize: number }, T>; type: ReturnType<typeof CodeOnlyString>; } =
+const Box: <T extends string>(type: T) => { header: SerialObjectPrimitiveBoxSymbol<{ size: number, type: T, headerSize: number }, T>; type: SerialObjectPrimitive<T>; } =
 <T extends string>(typeIn: T) => ({
     header: {
         [BoxSymbol]: typeIn,
@@ -1118,7 +1126,7 @@ const MdhdBox = ChooseInfer()({
             timescale: UInt32,
             duration: UInt64,
         } :
-        throwValue(`Invalid versio n${version}`)
+        throwValue(`Invalid version ${version}`)
     )
 })({
     padPlusLanguage: UInt16,
@@ -1348,6 +1356,9 @@ const RootBox = {
 
 function testReadFile(path: string) {
     let buf = LargeBuffer.FromFile(path);
+    testRead(path, buf);
+}
+function testRead(path: string, buf: LargeBuffer) {
     let output = parseBytes(buf, RootBox);
     let finalOutput = getFinalOutput(output);
 
@@ -1482,7 +1493,7 @@ async function testRewriteMjpeg() {
         return jpegBuffer;
     }
 
-    let fps = 1;
+    let fps = 10;
     let totalFrameCount = fps * 1;
     let frames: Buffer[] = [];
     let frameCount = totalFrameCount;
@@ -1491,9 +1502,8 @@ async function testRewriteMjpeg() {
         frames.push(buf);
     }
 
-    createVideoOutOfJpegs(
+    let newBuffer = createVideoOutOfJpegs(
         {
-            fileName: "test.mp4",
             framePerSecond: fps,
             width,
             height,
@@ -1501,16 +1511,26 @@ async function testRewriteMjpeg() {
         flatten(repeat(frames, totalFrameCount / frames.length))
     );
 
-    function createVideoOutOfJpegs(info: { fileName: string, framePerSecond: number, width: number, height: number }, jpegs: Buffer[]) {
-        let { fileName, framePerSecond, width, height } = info;
+    let outputFileName = "./testNEW.mp4";
+    testRead(outputFileName, newBuffer);
+
+    let stream = createWriteStream(outputFileName);
+    stream.once("open", function(fd) {
+        let newBuffers = newBuffer.getInternalBufferList();
+        for(let buf of newBuffers) {
+            stream.write(buf);
+        }
+        stream.end();
+    });
+
+    function createVideoOutOfJpegs(info: { framePerSecond: number, width: number, height: number }, jpegs: Buffer[]): LargeBuffer {
+        let { framePerSecond, width, height } = info;
     
         let templateMp4 = "./raw/test5.mp4";
 
         let buf = LargeBuffer.FromFile(templateMp4);
         let output = parseBytes(buf, RootBox);
        
-
-   
         let timeMultiplier = 2;
     
         // Might as well go in file order.
@@ -1522,69 +1542,88 @@ async function testRewriteMjpeg() {
         let mdat = filterBox(MdatBox, RootBox.boxes, output.boxes)[0];
         mdat.bytes.value = new LargeBuffer(jpegs);
     
-        let mvhd = filterBox("mvhd", MvhdBox, output.boxes)[0];
+        let moov = filterBox(MoovBox, RootBox.boxes, output.boxes)[0];
+
+        let mvhd = filterBox(MvhdBox, MoovBox.boxes, moov.boxes)[0];
         // timescale. The number of increments per second. Will need to be the least common multiple of all the framerates
         let timescale = mvhd.times.timescale.value = framePerSecond;
         // Technically the duration of the longest trak. But we should only have 1, so...
         let timescaleDuration = mvhd.times.duration.value = jpegs.length;
-    
+
+
+        let trak = filterBox(TrakBox, MoovBox.boxes, moov.boxes)[0];
+
         // Only 1 track
-        let tkhd = filterBox("tkhd", TkhdBox, output.boxes)[0];
+        let tkhd = filterBox(TkhdBox, TrakBox.boxes, trak.boxes)[0];
         tkhd.times.duration.value = timescaleDuration;
         tkhd.width.value = width;
         tkhd.height.value = height;
-    
-        let elst = getAllFirstOfTypeUnsafe(boxes, "elst")[0];
+
+        let edts = filterBox(EdtsBox, TrakBox.boxes, trak.boxes)[0];
+
+        let elst = filterBox(ElstBox, EdtsBox.boxes, edts.boxes)[0];
         // Just one segment
-        elst.entries.entries[0].segment_duration = timescaleDuration;
-    
-    
-        let mdhd = getAllFirstOfType(boxes, "mdhd")[0];
-    
+        elst.entries[0].segment_duration.value = timescaleDuration;
+
+        let mdia = filterBox(MdiaBox, TrakBox.boxes, trak.boxes)[0];
+        let mdhd = filterBox(MdhdBox, MdiaBox.boxes, mdia.boxes)[0];
+
         // mdhd has a timescale too?
-        mdhd._properties.timescale = timescale;
-        mdhd._properties.duration = timescaleDuration;
-    
-    
-        let stsd = getAllFirstOfTypeUnsafe(boxes, "stsd")[0];
-        stsd.obj[0].width = width;
-        stsd.obj[0].height = height;
-    
-    
-        let stts = getAllFirstOfTypeUnsafe(boxes, "stts")[0];
-        stts.obj[0].sample_delta = 1;
-        stts.obj[0].sample_count = jpegs.length;
-    
-        let stsc = getAllFirstOfTypeUnsafe(boxes, "stsc")[0];
-        stsc.obj[0].samples_per_chunk = jpegs.length;
-    
-        let stsz = getAllFirstOfTypeUnsafe(boxes, "stsz")[0];
-        stsz.obj = jpegs.map(x => x.length);
-    
-        // Position of mdat in file as a whole. So... anything before mdat has to have a constant size, or else this will be wrong,
-        //  or I will need to start calculating it.
-        let stco = getAllFirstOfTypeUnsafe(boxes, "stco")[0];
-        
-        // Okay, time for hacks. So... if mdat switches to a larger header, it's data will be offset. So... deal with that here
-        // maxUInt32
-        let mdatSize = 8 + sum(jpegs.map(x => x.length));
-        if(mdatSize > maxUInt32) {
-            console.log("wow, that's a big file you got there. I hope this works.");
-            stco.obj[0] += 8;
+        mdhd.times.timescale.value = timescale;
+        mdhd.times.duration.value = timescaleDuration;
+
+        let minf = filterBox(MinfBox, MdiaBox.boxes, mdia.boxes)[0];
+
+        let stbl = filterBox(StblBox, MinfBox.boxes, minf.boxes)[0];
+
+        let stsd = filterBox(StsdBox, StblBox.boxes, stbl.boxes)[0];
+        let stsdBox = stsd.boxes[0];
+        if(stsdBox.type.value !== "mp4v") {
+            throw new Error(`Unexpect stsd type ${stsdBox.type.value}`);
         }
-    
-    
-        let newBuffer = writeBoxArr(boxes);
-        console.log(`Wrote to ${fileName}`)
-    
-        let stream = fs.createWriteStream(fileName);
-        stream.once("open", function(fd) {
-            for(let buf of newBuffer) {
-                stream.write(buf);
+
+        stsdBox.width.value = width;
+        stsdBox.height.value = height;
+
+
+        let stts = filterBox(SttsBox, StblBox.boxes, stbl.boxes)[0];
+        {
+            let obj = stts.samples[0];
+            obj.sample_delta.value = 1;
+            obj.sample_count.value = jpegs.length;
+        }
+
+        let stsc = filterBox(StscBox, StblBox.boxes, stbl.boxes)[0];
+        {
+            let obj = stsc.entries[0];
+            obj.samples_per_chunk.value = jpegs.length;
+        }
+
+        let stsz = filterBox(StszBox, StblBox.boxes, stbl.boxes)[0];
+        {
+            stsz.sample_count.value = jpegs.length;
+            stsz.sample_sizes = jpegs.map(x => ({
+                value: x.length,
+                primitive: UInt32,
+                [SerialPrimitiveMark]: true as true
+            }));
+        }
+
+        let stco = filterBox(StcoBox, StblBox.boxes, stbl.boxes)[0];
+        {
+            // Position of mdat in file as a whole. So... anything before mdat has to have a constant size, or else this will be wrong,
+            //  or I will need to start calculating it.
+            
+            // Okay, time for hacks. So... if mdat switches to a larger header, it's data will be offset. So... deal with that here
+            // maxUInt32
+            let mdatSize = 8 + sum(jpegs.map(x => x.length));
+            if(mdatSize > MaxUInt32) {
+                console.log("wow, that's a big file you got there. I hope this works.");
+                stco.chunk_offsets[0].value += 8;
             }
-            stream.end();
-        });
-        */
+        }
+
+        return writeIntermediate(output);
     }
 }
 
