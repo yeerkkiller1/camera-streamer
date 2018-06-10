@@ -28,3 +28,10 @@ export function isArray(obj: Types.AnyAll): obj is Types.Arr {
 export function throwValue(message: string): never {
     throw new Error(message);
 }
+
+export function assertNumber(value: Types.Primitive): number {
+    if(typeof value !== "number") {
+        throw new Error(`Expected number`);
+    }
+    return value;
+}

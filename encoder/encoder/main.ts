@@ -991,16 +991,16 @@ class TrunBox extends Box("trun") {
         boxWriteable.trackRunBoxes = new ArrayBox(trackRunBox);
 
         if(tf_flags & 0x000100) {
-            boxWriteable.sample_duration = new UInt32();
+            trackRunBoxWriteable.sample_duration = new UInt32();
         }
         if(tf_flags & 0x000200) {
-            boxWriteable.sample_size = new UInt32();
+            trackRunBoxWriteable.sample_size = new UInt32();
         }
         if(tf_flags & 0x000400) {
-            boxWriteable.sample_flags = new UInt32();
+            trackRunBoxWriteable.sample_flags = new UInt32();
         }
         if(tf_flags & 0x000800) {
-            boxWriteable.sample_composition_time_offset = new UInt32();
+            trackRunBoxWriteable.sample_composition_time_offset = new UInt32();
         }
 
         return box;
