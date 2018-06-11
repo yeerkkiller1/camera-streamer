@@ -3,6 +3,8 @@
 *.jpg
 *.jpeg
 *.json
+*.m4s
+*.mpd
 digest.txt
 node_modules
 dist

@@ -14,13 +14,15 @@
         //  - Create segments h264.mp4 files, and make sure they work.
         //let result = await fetch("./test2.mp4");
         let result;
+        let startTime = 0;
         if(document.location.search.includes("youtube")) {
-            result = await fetch("./youtubeNEW.mp4");
+            result = await fetch("./youtubeOUT.mp4");
+            //startTime = 38417946360 / 90000;
         } else {
-            todonext
+            //todonext
             // Okay, this should work if we use all the metadata containers from youtube.mp4. It looks like we need to have
             //  certain boxes to trigger an initialization of the video.
-            result = await fetch("./test.h264.mp4");
+            result = await fetch("./10fps.dash.mp4");
         }
 
          
@@ -40,7 +42,7 @@
             buf.addEventListener("updateend", () => {
                 //vid.currentTime = (778184112 / 90000);
                 //vid.currentTime = 114 * 60 * 60 + 50 * 60 + 13;
-                vid.currentTime = 38417946360 / 90000;
+                vid.currentTime = startTime;
                 //vid.currentTime = 0;
                 vid.play();
 
