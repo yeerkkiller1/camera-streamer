@@ -15,7 +15,7 @@ import { textFromUInt32, readUInt64BE, textToUInt32, writeUInt64BE } from "./uti
 import { LargeBuffer, MaxUInt32 } from "./LargeBuffer";
 import { isArray, throwValue, assertNumber } from "./util/type";
 import { keyBy, mapObjectValues, repeat, flatten, filterObjectValues, mapObjectValuesKeyof, range } from "./util/misc";
-import { writeFileSync, createWriteStream } from "fs";
+import { writeFileSync, createWriteStream, readSync } from "fs";
 import { basename } from "path";
 import { decodeUTF8BytesToString, encodeAsUTF8Bytes } from "./util/UTF8";
 import { sum } from "./util/math";
@@ -293,7 +293,8 @@ type SerialObjectChildBase<CurObject = void> = SerialObject<CurObject> | SerialO
 type SerialObjectChild<CurObject = void> = SerialObjectChildBase<CurObject> | SerialObjectChildBase<CurObject>[];
 */
 
-function parseBytes<T extends SerialObject>(buffer: LargeBuffer, rootObjectInfo: T): SerialObjectOutput<T> {
+
+function _parseBytes<T extends SerialObject>(buffer: LargeBuffer, rootObjectInfo: T): SerialObjectOutput<T> {
     let isRoot = true;
 
     let debugPath: string[] = [];
@@ -360,7 +361,7 @@ function parseBytes<T extends SerialObject>(buffer: LargeBuffer, rootObjectInfo:
 
         function parseChildBase(child: SerialObjectChildBase, output: R<SerialObjectChildBaseToOutput>): void {
             if(isSerialChoose(child)) {
-                let chooseContext: ChooseContext<void> = getFinalOutput(outputObject) as any as void;
+                let chooseContext: ChooseContext<void> = _getFinalOutput(outputObject) as any as void;
                 /*
                 let chooseContext: ChooseContext<void> = {
                     // Hmm... this isn't efficient... but we should have that many chooses, right? Or at least, not chooses too close to the root,
@@ -553,7 +554,7 @@ function parseBytes<T extends SerialObject>(buffer: LargeBuffer, rootObjectInfo:
     }
 }
 
-function getFinalOutput<T extends SerialObjectOutput>(output: T): SerialIntermediateToFinal<T> {
+function _getFinalOutput<T extends SerialObjectOutput>(output: T): SerialIntermediateToFinal<T> {
     return getFinalObjectOutput(output) as SerialIntermediateToFinal<T>;
 
     function getFinalObjectOutput(output: SerialObjectOutput): SerialIntermediateToFinal {
@@ -584,7 +585,7 @@ function getFinalOutput<T extends SerialObjectOutput>(output: T): SerialIntermed
     }
 }
 
-function createIntermediateObject<T extends SerialObject>(template: T, data: SerialIntermediateToFinal<SerialObjectOutput<T>>): SerialObjectOutput<T> {
+function _createIntermediateObject<T extends SerialObject>(template: T, data: SerialIntermediateToFinal<SerialObjectOutput<T>>): SerialObjectOutput<T> {
     return getIntermediateOutput(template, data) as SerialObjectOutput<T>;
 
     function getIntermediateOutput(template: SerialObject, data: SerialIntermediateToFinal): SerialObjectOutput {
@@ -708,7 +709,7 @@ function copyBufferWriteContext(oldBuf: LargeBuffer, newBuf: LargeBuffer): void 
     }
 }
 
-function writeIntermediate<T extends SerialObjectOutput>(intermediate: T): LargeBuffer {
+function _writeIntermediate<T extends SerialObjectOutput>(intermediate: T): LargeBuffer {
     let debugPath: string[] = [];
     function createContext(primitive: SerialObjectPrimitiveToOutput): string {
         return `${debugPath.join(".")}`;
@@ -822,10 +823,67 @@ function writeIntermediate<T extends SerialObjectOutput>(intermediate: T): Large
     }
 }
 
-type B = (SerialObject & ReturnType<typeof Box>);
-type O<T extends (SerialObject | undefined)> = (
-    T extends SerialObject ? SerialObjectOutput<T> : never
-);
+
+type TemplateToObject<T extends SerialObject> = SerialIntermediateToFinal<SerialObjectOutput<T>>;
+function parseObject<T extends SerialObject>(buffer: LargeBuffer, template: T): TemplateToObject<T> {
+    return _getFinalOutput(_parseBytes(buffer, template));
+}
+function writeObject<T extends SerialObject>(template: T, object: TemplateToObject<T>): LargeBuffer {
+    return _writeIntermediate(_createIntermediateObject(template, object));
+}
+
+type BoxType<T> = { type: T } | { type?: T } & BoxHolderType;
+type BoxHolderType = { boxes: BoxType<string>[] };
+
+type ForceBoxHolder<T> = T extends BoxHolderType ? T : never;
+// Also delays the evaluate, because for some reason when this was inline it didn't work
+type PickBox<Boxes extends BoxType<string>, T extends string> = (Boxes extends BoxType<T> ? Boxes : never);
+interface FilterBox<Object = void> {
+    // step
+    <T extends string>(type: T): FilterBox<PickBox<ForceBoxHolder<Object>["boxes"][0], T>>;
+
+    // finish
+    (): Object;
+}
+
+function filterBox<T extends (BoxType<string> | string)>(inputIn?: T): FilterBox<T> {
+    // Why isn't it assignable? Odd...
+
+    let input: BoxType<string> | string = inputIn as any;
+    if(input === undefined || typeof input === "string") {
+        throw new Error(`The first call to filter box must be the template holder type.`);
+    }
+    
+    function step(next?: string): any {
+        if(next === undefined) {
+            return input;
+        }
+        if(typeof next !== "string") {
+            throw new Error(`Subsequent calls to the return of filterBox must either pass nothing, or a string.`);
+        }
+
+        if(input === undefined || typeof input === "string") {
+            throw new Error(`Impossible`);
+        }
+
+        if(!("boxes" in input)) {
+            throw new Error(`Cannot get box type ${next} inside box, as the box doesn't have a child of type 'boxes'`);
+        }
+
+        let entries = input.boxes.filter(x => x.type === next);
+        if(entries.length === 0) {
+            throw new Error(`No boxes of type ${next}. Expected 1. Found ${input.boxes.map(x => x.type).join(", ")}`);
+        }
+        if(entries.length > 1) {
+            throw new Error(`Too many boxes of type ${next}. We found ${entries.length} boxes of that type.`);
+        }
+
+        let entry = entries[0];
+        return filterBox(entry);
+    }
+    return step;
+}
+
 
 
 
@@ -1116,6 +1174,38 @@ function bitMapping<T extends { [key: string]: BitCount }>(bitMap: T): SerialObj
         }
     };
 }
+
+const languageBaseBitMapping = bitMapping({
+    pad: 1,
+    langChar0: 5,
+    langChar1: 5,
+    langChar2: 5,
+});
+const LanguageParse: SerialObjectPrimitive<string> = {
+    read(context: ReadContext): string {
+        let obj = languageBaseBitMapping.read(context);
+
+        return (
+            String.fromCharCode(0x60 + obj.langChar0)
+            + String.fromCharCode(0x60 + obj.langChar1)
+            + String.fromCharCode(0x60 + obj.langChar2)
+        );
+    },
+    write(context: WriteContext<string>): LargeBuffer {
+        if(context.value.length !== 3) {
+            throw new Error(`Expected language to have a length of 3. Was: ${context.value}`);
+        }
+        return languageBaseBitMapping.write({
+            ... context,
+            value: {
+                pad: 0,
+                langChar0: context.value.charCodeAt(0) - 0x60,
+                langChar1: context.value.charCodeAt(1) - 0x60,
+                langChar2: context.value.charCodeAt(2) - 0x60,
+            }
+        })
+    }
+};
 // #endregion
 
 // All the boxes have to be SerialObjects... but... we want to keep the underlying types too, so SerialObjectOutput works.
@@ -1170,7 +1260,17 @@ const MvhdBox = ChooseInfer()({ ...FullBox("mvhd") })({
     next_track_ID: Int32,
 })();
 
-const TkhdBox = ChooseInfer()({ ...FullBox("tkhd") })({
+const TkhdBox = ChooseInfer()({
+    ...FullBox("tkhd"),
+    version: UInt8,
+    flags: bitMapping({
+        reserved: 20,
+        track_size_is_aspect_ratio: 1,
+        track_in_preview: 1,
+        track_in_movie: 1,
+        track_enabled: 1,
+    }),
+})({
     times: ({version}) => {
         if(version === 0) {
             return {
@@ -1199,7 +1299,7 @@ const TkhdBox = ChooseInfer()({ ...FullBox("tkhd") })({
     layer: Int16,
     alternate_group: Int16,
     volume: Int16,
-    reversed2: UInt16,
+    reserved2: UInt16,
 
     matrix: repeat(Int32, 9),
 
@@ -1258,7 +1358,7 @@ const MdhdBox = ChooseInfer()({
         throwValue(`Invalid version ${version}`)
     )
 })({
-    padPlusLanguage: UInt16,
+    language: LanguageParse,
     pre_defined: UInt16,
 })
 ();
@@ -1268,7 +1368,7 @@ const HdlrBox = {
 
     pre_defined: UInt32,
     handler_type: UInt32String,
-    reversed: repeat(UInt32, 3),
+    reserved: repeat(UInt32, 3),
 
     name: CString,
 };
@@ -1280,7 +1380,12 @@ const VmhdBox = {
 };
 
 const UrlBox = {
-    ... FullBox("url ")
+    ... Box("url "),
+    version: UInt8,
+    flags: bitMapping({
+        reserved: 23,
+        media_is_in_same_file: 1
+    }),
 };
 const DrefBox = {
     ... FullBox("dref"),
@@ -1643,7 +1748,7 @@ const TfhdBox = ChooseInfer()({
             flags.sample_description_index_present ? {sample_description_index: UInt32} : {},
             flags.default_sample_duration_present ? {default_sample_duration: UInt32} : {},
             flags.default_sample_size_present ? {default_sample_size: UInt32} : {},
-            flags.default_sample_flags_present ? {default_sample_flags: UInt32} : {},
+            flags.default_sample_flags_present ? {default_sample_flags: sample_flags} : {},
         )
     ),
 })
@@ -1676,7 +1781,7 @@ const TrunBox = ChooseInfer()({
         range(0, sample_count).map(index => Object.assign({},
             flags.sample_duration_present ? {sample_duration: UInt32} : {},
             flags.sample_size_present ? {sample_size: UInt32} : {},
-            values.first_sample_flags && index === 0 ? {} : flags.sample_flags_present ? {sample_flags: UInt32} : {},
+            values.first_sample_flags && index === 0 ? {} : flags.sample_flags_present ? {sample_flags: sample_flags} : {},
             flags.sample_composition_time_offsets_present ? {sample_composition_time_offset: UInt32} : {},
         )
     ))
@@ -1735,8 +1840,7 @@ function testReadFile(path: string) {
     testRead(path, buf);
 }
 function testRead(path: string, buf: LargeBuffer) {
-    let output = parseBytes(buf, RootBox);
-    let finalOutput = getFinalOutput(output);
+    let finalOutput = parseObject(buf, RootBox);
 
     function prettyPrint(obj: any): string {
         let uniqueId = 0;
@@ -1766,6 +1870,7 @@ function testRead(path: string, buf: LargeBuffer) {
         return output;
     }
 
+    console.log(`Write to ${basename(path)}`);
     writeFileSync(basename(path) + ".json", prettyPrint(finalOutput));
     
     //writeFileSync(basename(path) + ".json", prettyPrint(finalOutput.boxes.filter(x => x.type === "mdat")));
@@ -1777,17 +1882,13 @@ function testWriteFile(path: string) {
     testReadFile(path);
 
     let oldBuf = LargeBuffer.FromFile(path);
-    let output = parseBytes(oldBuf, RootBox);
-    let newBuf = writeIntermediate(output);
+
+    let finalOutput = parseObject(oldBuf, RootBox)
+    let newBuf = writeObject(RootBox, finalOutput);
 
     testWrite(oldBuf, newBuf);
 
-    let finalOutput = getFinalOutput(output);
-    let intermediateOutput = createIntermediateObject(RootBox, finalOutput);
-    let newBuf2 = writeIntermediate(intermediateOutput);
-    testWrite(oldBuf, newBuf2);
-
-    console.log(oldBuf.getLength(), newBuf.getLength(), newBuf2.getLength());
+    console.log(oldBuf.getLength(), newBuf.getLength());
 }
 function testWrite(oldBuf: LargeBuffer, newBuf: LargeBuffer) {
     // Compare newBuffers with output, using getBufferWriteContext to get the context of each buffer
@@ -1951,8 +2052,7 @@ async function testRewriteMjpeg() {
         let templateMp4 = "./raw/test5.mp4";
 
         let buf = LargeBuffer.FromFile(templateMp4);
-        let outputInter = parseBytes(buf, RootBox);
-        let output = getFinalOutput(outputInter);
+        let output = parseObject(buf, RootBox);
        
         let timeMultiplier = 2;
     
@@ -2062,9 +2162,7 @@ async function testRewriteMjpeg() {
             }
         }
 
-        let reIntOutput = createIntermediateObject(RootBox, output);
-
-        return writeIntermediate(reIntOutput);
+        return writeObject(RootBox, output);
     }
 }
 
@@ -2088,20 +2186,323 @@ async function testRewriteMp4Fragment() {
     
     //testWrite(oldBuf, newBuf);
 
+    function readVideoInfo(buffer: LargeBuffer) {
+        let h264Object = parseObject(buffer, RootBox);
+       
+        let box = filterBox(h264Object);
+        let mdia = box("moov")("trak")("mdia");
+        let timescale: number = mdia("mdhd")().times.timescale;
+
+        let avcConfig = mdia("minf")("stbl")("stsd")("avc1")();
+
+        let width = avcConfig.width;
+        let height = avcConfig.height;
+
+        let avcC = filterBox({boxes: avcConfig.config})("avcC")();
+
+        let AVCProfileIndication = avcC.AVCProfileIndication;
+        let profile_compatibility = avcC.profile_compatibility;
+        let AVCLevelIndication = avcC.AVCLevelIndication;
+
+        let stts = mdia("minf")("stbl")("stts")();
+
+        if(stts.samples.length !== 1) {
+            throw new Error(`Samples of varying duration. This is unexpected.`);
+        }
+
+        let sampleInfo = stts.samples[0];
+
+        let frameTimeInTimescale = sampleInfo.sample_delta;
+
+        // ctts table has times
+        // stsz table has sample byte sizes.
+
+        let mdat = box("mdat")();
+        let stsz = mdia("minf")("stbl")("stsz")();
+        let mdats: LargeBuffer[] = [];
+
+        let pos = 0;
+        for(let sampleSize of stsz.sample_sizes) {
+            mdats.push(mdat.bytes.slice(pos, pos + sampleSize));
+            pos += sampleSize;
+        }
+
+        let ctts = mdia("minf")("stbl")("ctts")();
+        
+        let frames: { buffer: LargeBuffer; composition_offset: number; }[] = [];
+
+        let frameIndex = 0;
+        for(let cttsInfo of ctts.samples) {
+            for(let i = 0; i < cttsInfo.sample_count; i++) {
+                frames.push({
+                    buffer: mdats[frameIndex],
+                    composition_offset: cttsInfo.sample_offset
+                });
+                frameIndex++;
+            }
+        }
+
+        // Why does this not play all the frames? This should play 3 frames, but it plays 1 in vlc, and in chrome it plays 1,
+        //  but then flashes the second frame when we refresh.
+        frames = frames.slice(0, 3);
+
+        // Hmm... the dash generate first sample is of size 2826, while the source is of size 2786. What?
+
+        return {
+            timescale,
+            width,
+            height,
+            AVCProfileIndication,
+            profile_compatibility,
+            AVCLevelIndication,
+            frameTimeInTimescale,
+            frames
+        };
+    }
+
     type O<T extends SerialObject> = SerialIntermediateToFinal<SerialObjectOutput<T>>;
     function createVideo2(): LargeBuffer {
         //todonext
         // - Generate file from 10fps.h264.mp4
+        //      - Start by parameterizing everything until it is greatly simplified and just takes a large buffer,
+        //          and bytes offsets, and sample time offsets.
         //      - Generate trun from 10fps.h264.mp4 ctts
         //      - get width/height from 10fps.h264.mp4
         //      - translate timescale from 10fps.h264.mp4 (using the correct trak timescale, not the overall media timescale)
         //      - take the mdat from 10fps.h264.mp4
         //      - Make sure when it plays, it plays every single frame in 10fps.h264.mp4 (and doesn't skip the last few frames)
         // - create a new h264 media file, and read that data in and output a file for it.
-        let timescale = 10240;
-        let frameTimeInTimescale = timescale / 10;
 
-        function createMoov(): O<typeof MoovBox> {
+
+        let h264Base = LargeBuffer.FromFile("./10fps.h264.mp4");
+
+        let h264Object = readVideoInfo(h264Base);
+
+        let timescale = h264Object.timescale;
+        let frameTimeInTimescale = h264Object.frameTimeInTimescale;
+        let width = h264Object.width;
+        let height = h264Object.height;
+        let AVCProfileIndication = h264Object.AVCProfileIndication;
+        let profile_compatibility = h264Object.profile_compatibility;
+        let AVCLevelIndication = h264Object.AVCLevelIndication;
+
+        let outputs: (O<typeof RootBox>["boxes"][0] | LargeBuffer)[] = [];
+
+        let ftyp: O<typeof FtypBox> = {
+            header: {
+                type: "ftyp"
+            },
+            type: "ftyp",
+            major_brand: "iso5",
+            minor_version: 1,
+            compatible_brands: [
+                "avc1",
+                "iso5",
+                "dash"
+            ]
+        };
+
+        let keyFrameSampleFlags: SampleFlags = {
+            reserved: 0,
+            is_leading: 0,
+            sample_depends_on: 0,
+            sample_is_depended_on: 0,
+            sample_has_redundancy: 0,
+            sample_padding_value: 0,
+            // This resets the default in trex which sets sample_is_non_sync_sample to 1.
+            //  So this essentially says this is a sync sample, AKA, a key frame (reading this
+            //  frames syncs the video, so we can just read forward from any sync frame).
+            sample_is_non_sync_sample: 0,
+            sample_degradation_priority: 0
+        };
+
+        let nonKeyFrameSampleFlags: SampleFlags = {
+            reserved: 0,
+            is_leading: 0,
+            sample_depends_on: 0,
+            sample_is_depended_on: 0,
+            sample_has_redundancy: 0,
+            sample_padding_value: 0,
+            sample_is_non_sync_sample: 1,
+            sample_degradation_priority: 0
+        };
+
+        let moov = createMoov({
+            defaultFlags: nonKeyFrameSampleFlags
+        });
+
+        // A combination of stsz, and ctts
+        let samples: SampleInfo[] = [
+            {
+                sample_size: 2826,
+                sample_composition_time_offset: 2048
+            },
+            {
+                sample_size: 328,
+                sample_composition_time_offset: 2048
+            },
+            {
+                sample_size: 337,
+                sample_composition_time_offset: 2048
+            },
+            {
+                sample_size: 271,
+                sample_composition_time_offset: 5120
+            },
+            {
+                sample_size: 241,
+                sample_composition_time_offset: 2048
+            },
+            {
+                sample_size: 222,
+                sample_composition_time_offset: 0
+            },
+            {
+                sample_size: 243,
+                sample_composition_time_offset: 1024
+            },
+            {
+                sample_size: 248,
+                sample_composition_time_offset: 3072
+            },
+            {
+                sample_size: 211,
+                sample_composition_time_offset: 1024
+            },
+            {
+                sample_size: 544,
+                sample_composition_time_offset: 3072
+            },
+            {
+                sample_size: 217,
+                sample_composition_time_offset: 1024
+            },
+            {
+                sample_size: 329,
+                sample_composition_time_offset: 5120
+            },
+            {
+                sample_size: 280,
+                sample_composition_time_offset: 2048
+            },
+            {
+                sample_size: 149,
+                sample_composition_time_offset: 0
+            },
+            {
+                sample_size: 238,
+                sample_composition_time_offset: 1024
+            },
+            {
+                sample_size: 328,
+                sample_composition_time_offset: 2048
+            },
+            {
+                sample_size: 306,
+                sample_composition_time_offset: 4096
+            },
+            {
+                sample_size: 200,
+                sample_composition_time_offset: 1024
+            },
+            {
+                sample_size: 217,
+                sample_composition_time_offset: 1024
+            },
+            {
+                sample_size: 646,
+                sample_composition_time_offset: 4096
+            }
+        ];
+
+        //samples = [samples[0]];
+
+        samples = h264Object.frames.map(x => ({
+            sample_size: x.buffer.getLength(),
+            sample_composition_time_offset: x.composition_offset
+        }));
+
+        /*
+        samples.forEach(sample => {
+            sample.sample_flags = nonKeyFrameSampleFlags;
+        });
+        samples[0].sample_flags = keyFrameSampleFlags;
+        */
+
+        let moof = createMoof({
+            sequenceNumber: 1,
+            baseMediaDecodeTimeInTimescale: 0,
+            samples,
+            forcedFirstSampleFlags: keyFrameSampleFlags,
+            //defaultSampleFlags: nonKeyFrameSampleFlags
+        });
+        
+        let mdat: O<typeof MdatBox> = {
+            header: {
+                size: 8389,
+                headerSize: 8,
+                type: "mdat"
+            },
+            type: "mdat",
+            bytes: new LargeBuffer(flatten(h264Object.frames.map(x => x.buffer.getInternalBufferList())))
+        };
+        
+        let moofBuf = writeObject(MoofBox, moof);
+        let mdatBuf = writeObject(MdatBox, mdat);
+
+        let sidx = createSidx({
+            moofSize: moofBuf.getLength(),
+            mdatSize: mdatBuf.getLength(),
+            subsegmentDuration: 0
+        });
+
+        outputs.push(ftyp);
+        outputs.push(moov);
+        outputs.push(sidx);
+        outputs.push(moofBuf);
+        outputs.push(mdat);
+
+        let buffers: Buffer[] = [];
+        for(let bufOrDat of outputs) {
+            let subBuffer: LargeBuffer;
+            if(bufOrDat instanceof LargeBuffer) {
+                subBuffer = bufOrDat;
+            } else {
+                // RootBox has no extra values, so it can be used directly to read a single box
+                subBuffer = writeObject(RootBox, { boxes: [bufOrDat] });
+            }
+            for(let b of subBuffer.getInternalBufferList()) {
+                buffers.push(b);
+            }
+        }
+
+        let finalBuffer = new LargeBuffer(buffers);
+
+        console.log(finalBuffer.getLength());
+
+        return finalBuffer;
+
+        /*
+        {
+            header: {
+                "type": "styp"
+            },
+            "type": "styp",
+            "major_brand": "msdh",
+            "minor_version": 0,
+            "compatible_brands": [
+                "msdh",
+                "msix"
+            ]
+        },
+        */
+
+
+        type SampleFlags = O<{x: typeof sample_flags}>["x"];
+
+        function createMoov(
+            d: {defaultFlags: SampleFlags}
+        ): O<typeof MoovBox> {
             return {
                 header: {
                     type: "moov"
@@ -2144,29 +2545,11 @@ async function testRewriteMp4Fragment() {
                                 version: 0,
                                 flags: 0,
                                 track_ID: 1,
+                                // Index of sample information in stsd. Could be used to change width/height?
                                 default_sample_description_index: 1,
                                 default_sample_duration: frameTimeInTimescale,
                                 default_sample_size: 0,
-                                default_sample_flags: {
-                                    reserved: 0,
-                                    is_leading: 0,
-                                    sample_depends_on: 0,
-                                    sample_is_depended_on: 0,
-                                    sample_has_redundancy: 0,
-                                    sample_padding_value: 0,
-                                    sample_is_non_sync_sample: 1,
-                                    sample_degradation_priority: 0
-                                }
-                            },
-                            {
-                                header: {
-                                    type: "trep"
-                                },
-                                type: "trep",
-                                version: 0,
-                                flags: 0,
-                                track_id: 1,
-                                boxes: []
+                                default_sample_flags: d.defaultFlags
                             }
                         ]
                     },
@@ -2182,7 +2565,13 @@ async function testRewriteMp4Fragment() {
                                 },
                                 type: "tkhd",
                                 version: 0,
-                                flags: 3,
+                                flags: {
+                                    reserved: 0,
+                                    track_size_is_aspect_ratio: 0,
+                                    track_in_preview: 0,
+                                    track_in_movie: 1,
+                                    track_enabled: 1
+                                },
                                 times: {
                                     creation_time: 0,
                                     modification_time: 0,
@@ -2195,10 +2584,10 @@ async function testRewriteMp4Fragment() {
                                 layer: 0,
                                 alternate_group: 0,
                                 volume: 0,
-                                reversed2: 0,
+                                reserved2: 0,
                                 matrix: [65536, 0, 0, 0, 65536, 0, 0, 0, 1073741824],
-                                width: 600,
-                                height: 400
+                                width: width,
+                                height: height,
                             },
                             {
                                 header: {
@@ -2219,7 +2608,7 @@ async function testRewriteMp4Fragment() {
                                             timescale: timescale,
                                             duration: 0
                                         },
-                                        padPlusLanguage: 21956,
+                                        language: "und",
                                         pre_defined: 0
                                     },
                                     {
@@ -2231,7 +2620,7 @@ async function testRewriteMp4Fragment() {
                                         flags: 0,
                                         pre_defined: 0,
                                         handler_type: "vide",
-                                        reversed: [0,0,0],
+                                        reserved: [0,0,0],
                                         name: "VideoHandler"
                                     },
                                     {
@@ -2271,7 +2660,10 @@ async function testRewriteMp4Fragment() {
                                                                 },
                                                                 type: "url ",
                                                                 version: 0,
-                                                                flags: 1
+                                                                flags: {
+                                                                    reserved: 0,
+                                                                    media_is_in_same_file: 1
+                                                                }
                                                             }
                                                         ]
                                                     }
@@ -2298,14 +2690,16 @@ async function testRewriteMp4Fragment() {
                                                                 },
                                                                 type: "avc1",
                                                                 reserved: [0, 0, 0, 0, 0, 0],
+                                                                // Index into dref
                                                                 data_reference_index: 1,
                                                                 pre_defined: 0,
                                                                 reserved1: 0,
                                                                 pre_defined1: [0, 0, 0],
-                                                                width: 600,
-                                                                height: 400,
-                                                                horizresolution: 4718592,
-                                                                vertresolution: 4718592,
+                                                                width: width,
+                                                                height: height,
+                                                                // DPI. Useless, and always constant
+                                                                horizresolution: 0x00480000,
+                                                                vertresolution: 0x00480000,
                                                                 reserved2: 0,
                                                                 frame_count: 1,
                                                                 compressorname: [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
@@ -2318,9 +2712,9 @@ async function testRewriteMp4Fragment() {
                                                                         },
                                                                         type: "avcC",
                                                                         configurationVersion: 1,
-                                                                        AVCProfileIndication: 244,
-                                                                        profile_compatibility: 0,
-                                                                        AVCLevelIndication: 22,
+                                                                        AVCProfileIndication: AVCProfileIndication,
+                                                                        profile_compatibility: profile_compatibility,
+                                                                        AVCLevelIndication: AVCLevelIndication,
                                                                         notImportant: [255, 225, 0, 27, 103, 244, 0, 22, 145, 155, 40, 19, 6, 124, 79, 128, 182, 64, 0, 0, 3, 0, 64, 0, 0, 5, 3, 197, 139, 101, 128, 1, 0, 5, 104, 235, 227, 196, 72, 253, 248, 248, 0]
                                                                     }
                                                                 ],
@@ -2381,8 +2775,8 @@ async function testRewriteMp4Fragment() {
             };
         }
 
-        function createSidx(moofSize: number, mdatSize: number): O<typeof SidxBox> {
-            console.log(moofSize + mdatSize);
+        function createSidx(d: {moofSize: number, mdatSize: number, subsegmentDuration: number}): O<typeof SidxBox> {
+            // There is a sidx per moof and mdat.
             return {
                 header: {
                     type: "sidx"
@@ -2393,22 +2787,25 @@ async function testRewriteMp4Fragment() {
                 reference_ID: 1,
                 timescale: timescale,
                 times: {
+                    // Not used, doesn't matter?
                     earliest_presentation_time: 0,
+                    // Not useful, we can just use reference_offset
                     first_offset: 0
                 },
                 reserved: 0,
                 reference_count: 1,
                 ref: [
+                    // Nothing in here matters except reference_offset, and MAYBE subsegment_duration, but I am not even convinced of that.
                     {
                         // The whole SAP and reference_type garbage doesn't matter. Just put 0s, which means "no information of SAPs is provided",
                         //  and use sample_is_non_sync_sample === 0 to indicate SAPs. Also, sample_is_non_sync_sample is used anyway, so these values
                         //  are overriden regardless of what we do.
                         a: {
                             reference_type: 0,
-                            reference_offset: moofSize + mdatSize
+                            reference_offset: d.moofSize + d.mdatSize
                         },
                         // Looks like this isn't used. But we could calculate it correctly, instead of however it was calculated by mp4box
-                        subsegment_duration: 21504,
+                        subsegment_duration: d.subsegmentDuration,
                         SAP: {
                             starts_with_SAP: 0,
                             // a SAP of type 1 or type 2 is indicated as a sync sample, or by "sample_is_non_sync_sample" equal to 0 in the movie fragments.
@@ -2421,7 +2818,45 @@ async function testRewriteMp4Fragment() {
             };
         }
 
-        function createMoof(): O<typeof MoofBox> {
+        type SampleInfo = {
+            sample_duration?: number;
+            sample_size?: number;
+            sample_flags?: SampleFlags;
+            sample_composition_time_offset?: number;
+        }
+        function createMoof(d: {
+            // Order of the moof. Counting starts at 1.
+            sequenceNumber: number;
+            baseMediaDecodeTimeInTimescale: number;
+            samples: SampleInfo[];
+            forcedFirstSampleFlags?: SampleFlags;
+            defaultSampleDurationInTimescale?: number;
+            defaultSampleFlags?: SampleFlags;
+        }): O<typeof MoofBox> {
+
+            let sample_durations = d.samples.filter(x => x.sample_duration !== undefined).length;
+            let sample_sizes = d.samples.filter(x => x.sample_size !== undefined).length;
+            let sample_flagss = d.samples.filter(x => x.sample_flags !== undefined).length;
+            let sample_composition_time_offsets = d.samples.filter(x => x.sample_composition_time_offset !== undefined).length;
+
+            if(sample_durations !== 0 && sample_durations !== d.samples.length) {
+                throw new Error(`Some samples have sample_duration, others don't. This is invalid, samples must be consistent.`);
+            }
+            if(sample_sizes !== 0 && sample_sizes !== d.samples.length) {
+                throw new Error(`Some samples have sample_size, others don't. This is invalid, samples must be consistent.`);
+            }
+            if(sample_flagss !== 0 && sample_flagss !== d.samples.length) {
+                throw new Error(`Some samples have sample_flags, others don't. This is invalid, samples must be consistent. Even if there is a forceFirstSampleFlags, either ever sample needs flags, or none should have it.`);
+            }
+            if(sample_composition_time_offsets !== 0 && sample_composition_time_offsets !== d.samples.length) {
+                throw new Error(`Some samples have sample_composition_time_offset, others don't. This is invalid, samples must be consistent.`);
+            }
+
+            let has_sample_durations = sample_durations > 0;
+            let has_sample_sizes = sample_sizes > 0;
+            let has_sample_flags = sample_flagss > 0;
+            let has_composition_offsets = sample_composition_time_offsets > 0;
+
             function createMoofInternal(moofSize: number) {
                 let moof: O<typeof MoofBox> = {
                     header: {
@@ -2436,7 +2871,7 @@ async function testRewriteMp4Fragment() {
                             type: "mfhd",
                             version: 0,
                             flags: 0,
-                            sequence_number: 1
+                            sequence_number: d.sequenceNumber
                         },
                         {
                             header: {
@@ -2455,15 +2890,21 @@ async function testRewriteMp4Fragment() {
                                         default_base_is_moof: 1,
                                         duration_is_empty: 0,
                                         reserved2: 0,
-                                        default_sample_flags_present: 0,
+                                        // Eh... there is no reason to set this, as we can set the default flags in the moov (trex) anyway.
+                                        default_sample_flags_present: d.defaultSampleFlags === undefined ? 0 : 1,
+                                        // I can't imagine all samples having the same size, so let's not even set this.
                                         default_sample_size_present: 0,
-                                        default_sample_duration_present: 0,
+                                        //  Also set in trex, but we MAY have different durations for different chunks.
+                                        default_sample_duration_present: d.defaultSampleDurationInTimescale === undefined ? 0 : 1,
                                         reserved1: 0,
                                         sample_description_index_present: 0,
                                         base_data_offset_present: 0
                                     },
                                     track_ID: 1,
-                                    values: {}
+                                    values: Object.assign({},
+                                        d.defaultSampleDurationInTimescale === undefined ? {} : { default_sample_duration: d.defaultSampleDurationInTimescale },
+                                        d.defaultSampleFlags === undefined ? {} : { default_sample_flags: d.defaultSampleFlags }
+                                    )
                                 },
                                 {
                                     header: {
@@ -2473,7 +2914,7 @@ async function testRewriteMp4Fragment() {
                                     version: 0,
                                     flags: 0,
                                     values: {
-                                        baseMediaDecodeTime: 0
+                                        baseMediaDecodeTime: d.baseMediaDecodeTimeInTimescale
                                     }
                                 },
                                 {
@@ -2484,114 +2925,21 @@ async function testRewriteMp4Fragment() {
                                     version: 0,
                                     flags: {
                                         reserved2: 0,
-                                        sample_composition_time_offsets_present: 1,
-                                        sample_flags_present: 0,
-                                        sample_size_present: 1,
-                                        sample_duration_present: 0,
+                                        sample_composition_time_offsets_present: has_composition_offsets ? 1 : 0,
+                                        sample_flags_present: has_sample_flags ? 1 : 0,
+                                        sample_size_present: has_sample_sizes ? 1 : 0,
+                                        sample_duration_present: has_sample_durations ? 1 : 0,
                                         reserved1: 0,
-                                        first_sample_flags_present: 1,
+                                        first_sample_flags_present: d.forcedFirstSampleFlags === undefined ? 0 : 1,
                                         reserved0: 0,
                                         data_offset_present: 1
                                     },
-                                    sample_count: 20,
-                                    values: {
-                                        data_offset: moofSize + 8,
-                                        first_sample_flags: {
-                                            reserved: 0,
-                                            is_leading: 0,
-                                            sample_depends_on: 0,
-                                            sample_is_depended_on: 0,
-                                            sample_has_redundancy: 0,
-                                            sample_padding_value: 0,
-                                            // This resets the default in trex which sets sample_is_non_sync_sample to 1.
-                                            //  So this essentially says this is a sync sample, AKA, a key frame (reading this
-                                            //  frames syncs the video, so we can just read forward from any sync frame).
-                                            sample_is_non_sync_sample: 0,
-                                            sample_degradation_priority: 0
-                                        }
-                                    },
-                                    sample_values: [
-                                        {
-                                            sample_size: 2826,
-                                            sample_composition_time_offset: 2048
-                                        },
-                                        {
-                                            sample_size: 328,
-                                            sample_composition_time_offset: 2048
-                                        },
-                                        {
-                                            sample_size: 337,
-                                            sample_composition_time_offset: 2048
-                                        },
-                                        {
-                                            sample_size: 271,
-                                            sample_composition_time_offset: 5120
-                                        },
-                                        {
-                                            sample_size: 241,
-                                            sample_composition_time_offset: 2048
-                                        },
-                                        {
-                                            sample_size: 222,
-                                            sample_composition_time_offset: 0
-                                        },
-                                        {
-                                            sample_size: 243,
-                                            sample_composition_time_offset: 1024
-                                        },
-                                        {
-                                            sample_size: 248,
-                                            sample_composition_time_offset: 3072
-                                        },
-                                        {
-                                            sample_size: 211,
-                                            sample_composition_time_offset: 1024
-                                        },
-                                        {
-                                            sample_size: 544,
-                                            sample_composition_time_offset: 3072
-                                        },
-                                        {
-                                            sample_size: 217,
-                                            sample_composition_time_offset: 1024
-                                        },
-                                        {
-                                            sample_size: 329,
-                                            sample_composition_time_offset: 5120
-                                        },
-                                        {
-                                            sample_size: 280,
-                                            sample_composition_time_offset: 2048
-                                        },
-                                        {
-                                            sample_size: 149,
-                                            sample_composition_time_offset: 0
-                                        },
-                                        {
-                                            sample_size: 238,
-                                            sample_composition_time_offset: 1024
-                                        },
-                                        {
-                                            sample_size: 328,
-                                            sample_composition_time_offset: 2048
-                                        },
-                                        {
-                                            sample_size: 306,
-                                            sample_composition_time_offset: 4096
-                                        },
-                                        {
-                                            sample_size: 200,
-                                            sample_composition_time_offset: 1024
-                                        },
-                                        {
-                                            sample_size: 217,
-                                            sample_composition_time_offset: 1024
-                                        },
-                                        {
-                                            sample_size: 646,
-                                            sample_composition_time_offset: 4096
-                                        }
-                                    ]
+                                    sample_count: d.samples.length,
+                                    values: Object.assign(
+                                        {data_offset: moofSize + 8},
+                                        d.forcedFirstSampleFlags === undefined ? {} : { first_sample_flags: d.forcedFirstSampleFlags}
+                                    ),
+                                    sample_values: d.samples
                                 }
                             ]
                         }
@@ -2600,90 +2948,11 @@ async function testRewriteMp4Fragment() {
                 return moof;
             }
 
-            let size = writeIntermediate(createIntermediateObject(MoofBox, createMoofInternal(0))).getLength();
+            let size = writeObject(MoofBox, createMoofInternal(0)).getLength();
             let moof = createMoofInternal(size);
 
             return moof;
         }
-
-        let outputs: (O<typeof RootBox>["boxes"][0] | LargeBuffer)[] = [];
-
-        let ftyp: O<typeof FtypBox> = {
-            header: {
-                type: "ftyp"
-            },
-            type: "ftyp",
-            major_brand: "iso5",
-            minor_version: 1,
-            compatible_brands: [
-                "avc1",
-                "iso5",
-                "dash"
-            ]
-        };
-
-        let moov = createMoov();
-
-        let moof = createMoof();
-        
-        let mdat: O<typeof MdatBox> = {
-            header: {
-                size: 8389,
-                headerSize: 8,
-                type: "mdat"
-            },
-            type: "mdat",
-            bytes: new LargeBuffer([new Buffer([0,0,0,27,103,244,0,22,145,155,40,19,6,124,79,128,182,64,0,0,3,0,64,0,0,5,3,197,139,101,128,0,0,0,5,104,235,227,196,72,0,0,2,174,6,5,255,255,170,220,69,233,189,230,217,72,183,150,44,216,32,217,35,238,239,120,50,54,52,32,45,32,99,111,114,101,32,49,53,53,32,114,50,57,48,49,32,55,100,48,102,102,50,50,32,45,32,72,46,50,54,52,47,77,80,69,71,45,52,32,65,86,67,32,99,111,100,101,99,32,45,32,67,111,112,121,108,101,102,116,32,50,48,48,51,45,50,48,49,56,32,45,32,104,116,116,112,58,47,47,119,119,119,46,118,105,100,101,111,108,97,110,46,111,114,103,47,120,50,54,52,46,104,116,109,108,32,45,32,111,112,116,105,111,110,115,58,32,99,97,98,97,99,61,49,32,114,101,102,61,51,32,100,101,98,108,111,99,107,61,49,58,48,58,48,32,97,110,97,108,121,115,101,61,48,120,49,58,48,120,49,49,49,32,109,101,61,104,101,120,32,115,117,98,109,101,61,55,32,112,115,121,61,49,32,112,115,121,95,114,100,61,49,46,48,48,58,48,46,48,48,32,109,105,120,101,100,95,114,101,102,61,49,32,109,101,95,114,97,110,103,101,61,49,54,32,99,104,114,111,109,97,95,109,101,61,49,32,116,114,101,108,108,105,115,61,49,32,56,120,56,100,99,116,61,48,32,99,113,109,61,48,32,100,101,97,100,122,111,110,101,61,50,49,44,49,49,32,102,97,115,116,95,112,115,107,105,112,61,49,32,99,104,114,111,109,97,95,113,112,95,111,102,102,115,101,116,61,52,32,116,104,114,101,97,100,115,61,49,50,32,108,111,111,107,97,104,101,97,100,95,116,104,114,101,97,100,115,61,50,32,115,108,105,99,101,100,95,116,104,114,101,97,100,115,61,48,32,110,114,61,48,32,100,101,99,105,109,97,116,101,61,49,32,105,110,116,101,114,108,97,99,101,100,61,48,32,98,108,117,114,97,121,95,99,111,109,112,97,116,61,48,32,99,111,110,115,116,114,97,105,110,101,100,95,105,110,116,114,97,61,48,32,98,102,114,97,109,101,115,61,51,32,98,95,112,121,114,97,109,105,100,61,50,32,98,95,97,100,97,112,116,61,49,32,98,95,98,105,97,115,61,48,32,100,105,114,101,99,116,61,49,32,119,101,105,103,104,116,98,61,49,32,111,112,101,110,95,103,111,112,61,48,32,119,101,105,103,104,116,112,61,50,32,107,101,121,105,110,116,61,50,53,48,32,107,101,121,105,110,116,95,109,105,110,61,49,48,32,115,99,101,110,101,99,117,116,61,52,48,32,105,110,116,114,97,95,114,101,102,114,101,115,104,61,48,32,114,99,95,108,111,111,107,97,104,101,97,100,61,52,48,32,114,99,61,99,114,102,32,109,98,116,114,101,101,61,49,32,99,114,102,61,50,51,46,48,32,113,99,111,109,112,61,48,46,54,48,32,113,112,109,105,110,61,48,32,113,112,109,97,120,61,54,57,32,113,112,115,116,101,112,61,52,32,105,112,95,114,97,116,105,111,61,49,46,52,48,32,97,113,61,49,58,49,46,48,48,0,128,0,0,8,44,101,136,132,0,191,243,8,167,248,159,153,95,180,254,95,152,89,37,247,177,234,225,92,167,240,59,1,165,171,34,149,62,26,91,57,19,250,242,103,157,28,178,137,221,121,129,227,199,47,69,240,68,85,151,250,250,254,160,231,171,6,208,30,11,69,6,197,252,33,207,144,163,152,235,6,57,213,14,203,235,184,224,17,15,255,85,191,190,111,93,188,211,213,57,212,187,125,106,173,219,148,45,58,0,210,87,138,226,247,133,45,218,8,192,164,95,89,123,162,187,169,144,5,187,231,63,94,88,182,29,136,138,151,164,80,189,188,39,230,74,114,65,150,27,14,15,104,99,96,254,46,0,0,3,0,0,3,0,0,3,0,0,3,0,4,77,24,234,196,255,236,79,106,76,253,93,97,5,145,214,15,67,141,44,8,33,159,43,118,100,34,200,184,108,142,123,201,186,166,158,111,242,230,70,23,90,154,185,170,99,233,241,165,78,100,41,12,7,41,34,227,2,31,164,80,167,144,201,166,13,90,38,145,143,1,188,72,37,87,125,165,97,10,192,195,237,2,230,8,78,44,242,124,81,215,229,76,141,147,115,108,43,11,206,198,233,86,182,224,90,4,251,183,253,206,154,135,227,31,63,104,100,172,117,68,42,244,122,238,26,47,71,202,83,53,160,67,47,230,13,65,32,87,105,47,21,72,38,26,92,109,21,1,217,160,167,235,9,240,38,252,47,155,141,23,188,21,128,45,183,136,87,102,160,227,148,3,93,224,205,181,92,35,222,149,129,254,79,109,115,140,87,78,152,242,172,223,133,129,10,243,199,22,178,72,228,60,208,184,169,149,234,195,57,87,59,28,234,181,71,244,219,160,125,85,228,208,50,103,76,129,230,202,36,135,157,5,78,44,83,255,63,232,30,49,116,123,89,202,58,51,115,135,31,201,59,3,223,86,122,236,181,27,79,225,21,231,198,63,145,252,243,197,46,20,203,223,94,97,115,225,122,205,3,226,218,233,114,4,244,21,238,105,245,199,165,61,211,202,126,240,7,112,192,48,50,206,158,202,101,219,154,70,85,255,95,42,168,52,118,222,108,81,161,164,192,176,215,254,45,124,56,42,72,112,3,63,69,53,22,255,179,222,208,88,153,141,220,3,68,173,1,191,40,224,44,215,59,182,109,252,111,104,51,219,245,128,97,85,168,35,21,51,94,226,184,207,194,187,128,108,182,211,251,113,94,191,39,223,49,133,60,101,60,133,69,11,53,25,41,137,155,201,178,246,195,27,175,10,224,91,39,93,254,159,159,123,120,93,240,32,186,170,122,111,150,181,52,101,228,118,11,98,175,141,54,88,191,162,207,17,141,162,176,27,157,105,68,221,243,232,25,192,39,206,252,132,1,52,117,233,164,135,141,200,186,222,189,122,122,28,84,212,3,77,85,130,184,181,129,253,230,131,161,8,197,5,25,18,85,104,42,109,109,130,127,139,33,248,75,104,72,142,218,35,229,42,252,231,50,162,208,59,51,205,208,162,232,78,168,93,248,61,15,225,161,131,151,223,203,14,214,191,129,109,181,5,38,152,28,59,11,121,105,100,103,196,45,73,188,186,28,232,60,185,234,38,210,236,215,191,50,101,175,1,27,190,217,56,250,243,177,1,167,235,111,117,4,54,169,160,162,112,159,195,13,210,65,252,4,173,9,90,115,233,102,227,232,40,139,250,37,250,102,131,2,149,13,139,185,29,116,69,67,161,141,161,127,50,29,5,137,191,112,7,125,24,155,33,56,240,193,128,225,91,155,126,37,108,161,9,151,73,45,194,79,70,117,84,198,253,208,233,183,196,150,22,162,247,113,9,224,52,61,145,95,76,74,115,91,149,198,242,153,95,208,255,111,42,86,79,146,117,13,52,87,75,61,167,193,141,182,128,231,72,138,183,227,84,93,33,180,100,8,217,57,122,147,201,227,161,13,231,255,174,16,162,222,247,60,1,20,210,185,242,36,243,17,197,107,184,116,100,214,190,101,162,198,221,11,141,57,120,225,227,245,25,149,29,183,59,200,232,198,182,153,162,184,232,86,74,203,191,38,54,44,51,157,232,205,58,40,84,56,13,185,98,184,219,169,190,92,204,221,229,98,83,17,49,68,108,40,158,78,7,185,255,231,245,179,171,23,171,36,53,17,142,24,172,159,188,83,5,248,26,242,184,16,157,2,200,203,48,162,159,219,157,203,92,2,154,107,182,184,47,196,0,0,3,0,0,185,175,119,24,87,104,191,219,111,14,142,139,105,90,141,32,142,245,72,4,232,142,255,255,28,39,25,234,116,154,19,211,119,61,51,207,76,115,103,48,157,229,184,177,233,202,206,207,175,214,179,172,65,26,66,211,12,9,58,121,34,248,189,50,111,222,228,200,201,139,206,31,71,8,172,113,169,10,139,52,193,157,197,220,163,250,131,70,117,167,159,113,162,62,83,228,241,19,110,65,200,105,151,94,178,149,118,252,239,131,145,158,131,18,17,27,88,123,250,185,146,43,94,199,51,48,37,48,10,128,99,136,134,109,246,30,172,158,55,203,194,243,184,177,247,100,57,244,39,254,132,139,129,35,132,10,101,178,116,78,166,209,237,231,235,251,82,163,244,212,36,169,81,240,115,195,110,84,103,143,103,34,57,109,110,56,254,225,87,93,44,107,3,93,247,230,177,115,44,244,51,53,41,32,149,22,123,49,197,1,224,230,90,58,165,132,8,238,114,2,237,234,120,17,120,38,19,187,229,108,69,5,102,31,242,181,243,250,243,68,94,109,170,121,36,104,163,50,47,81,16,129,235,4,72,65,155,38,119,234,66,184,107,107,127,132,13,166,23,248,54,44,21,148,39,96,15,201,8,71,44,200,193,203,217,215,74,56,125,19,229,255,152,55,97,98,108,223,108,170,103,26,3,79,190,170,13,204,128,18,29,177,61,195,23,94,24,162,98,110,252,69,28,1,69,243,21,108,16,202,19,240,242,170,238,204,105,158,229,58,130,113,147,213,77,200,111,193,156,41,204,7,95,11,207,148,233,234,65,214,6,180,60,214,43,154,234,235,166,232,30,137,96,245,233,0,101,204,9,229,36,169,212,192,61,137,19,211,194,33,126,240,210,30,152,70,163,224,27,153,148,116,114,5,71,47,167,101,150,214,153,212,37,76,173,190,131,16,29,79,234,246,254,133,157,139,193,108,147,60,148,59,133,21,195,23,241,201,155,51,141,74,82,164,241,217,250,94,197,8,199,187,20,38,154,190,94,26,195,117,102,55,64,144,212,27,182,231,112,129,119,205,14,1,27,33,31,179,184,49,128,141,163,39,8,0,0,26,189,174,192,134,164,188,191,81,34,210,59,1,106,236,133,7,29,182,166,45,82,61,92,110,195,207,226,67,16,55,39,13,213,194,74,169,5,204,52,155,40,85,240,168,212,19,0,161,73,116,202,224,225,84,196,57,65,0,17,155,244,223,105,142,201,181,119,150,243,40,28,103,250,148,102,77,27,249,179,208,63,9,255,103,199,97,211,158,170,43,61,183,125,27,21,218,185,53,3,46,234,138,177,17,102,115,178,63,223,49,69,250,36,89,70,80,61,220,31,44,20,229,134,219,60,212,213,33,136,130,108,255,62,42,246,248,216,3,192,221,194,37,96,105,105,169,198,98,150,155,252,254,41,197,29,24,246,48,248,142,57,187,63,145,102,1,95,69,144,103,213,174,93,136,239,19,68,143,171,10,65,20,87,75,120,236,28,172,136,50,224,89,45,75,150,171,111,27,165,186,186,94,14,170,12,102,212,138,225,202,152,131,34,91,162,96,126,208,22,38,59,152,233,52,52,91,124,111,88,250,56,167,198,34,142,254,251,184,198,41,85,114,95,204,129,201,119,153,62,65,227,147,205,19,203,160,76,193,39,228,48,45,68,148,140,94,168,109,9,17,33,37,204,148,234,86,102,128,220,141,218,84,192,237,181,152,109,224,36,118,87,141,23,153,200,222,175,80,51,21,166,197,33,161,68,198,54,86,24,249,24,66,95,95,140,123,26,103,31,104,96,37,1,88,148,80,101,236,119,214,48,191,238,193,102,13,15,171,21,114,204,7,171,123,92,199,201,106,134,110,167,241,156,229,215,88,252,193,66,141,108,227,152,142,44,114,62,13,101,31,202,199,103,92,199,92,223,96,218,217,166,135,214,38,13,203,112,211,147,247,82,177,172,43,66,31,18,215,246,17,81,86,55,135,19,55,177,192,227,240,96,44,97,134,154,52,225,135,147,156,252,5,161,82,47,160,215,145,70,208,216,195,192,115,228,186,41,123,6,152,158,65,6,254,245,255,204,177,199,45,147,206,152,177,157,199,191,163,167,125,193,236,33,242,247,254,224,66,165,23,167,84,90,156,58,222,206,52,30,185,201,115,44,95,132,189,155,169,27,115,188,215,67,50,81,54,234,33,127,174,232,145,197,196,212,238,144,131,231,46,168,186,208,68,126,176,205,31,124,184,11,1,112,96,13,251,155,35,16,56,53,135,240,41,183,31,177,252,10,107,134,241,252,10,108,118,221,36,155,76,185,193,64,96,4,96,125,36,104,208,0,67,160,3,204,129,107,112,220,80,234,161,17,129,224,68,47,140,184,37,136,191,0,0,3,0,0,3,0,0,3,0,0,3,0,0,3,0,0,3,0,7,249,0,0,1,68,65,154,33,108,75,255,86,209,67,99,45,132,104,39,249,103,110,98,0,61,190,0,97,197,79,186,21,106,215,138,59,50,37,15,182,175,214,189,119,224,145,102,81,251,125,48,90,111,176,89,140,123,5,22,102,18,158,11,108,98,231,97,83,221,18,1,80,222,182,0,0,3,0,0,3,0,15,45,84,98,19,72,65,245,123,55,94,254,85,189,6,152,22,151,122,247,208,111,195,206,147,6,202,106,210,54,93,126,4,217,221,160,114,157,243,178,8,67,180,61,31,73,37,72,209,89,89,193,248,109,192,156,210,105,115,201,190,97,145,239,35,95,229,205,237,131,44,142,110,134,136,158,4,219,93,151,36,219,237,122,228,19,234,68,73,50,47,182,171,145,85,70,75,165,65,199,32,154,176,155,206,18,2,123,208,52,7,33,198,178,221,138,84,168,184,100,243,76,70,221,230,118,144,165,68,222,251,204,208,198,209,23,115,176,88,35,109,153,3,143,231,127,227,251,51,37,178,215,119,255,118,169,150,81,234,204,170,246,205,210,97,75,81,2,40,125,28,222,111,102,209,102,62,126,242,166,240,120,210,248,147,148,45,133,54,77,226,204,89,172,183,243,88,50,230,183,114,81,128,47,128,18,36,4,6,57,249,84,65,56,225,114,228,171,231,39,223,156,245,198,16,59,234,194,78,116,25,47,241,203,70,190,237,87,55,181,201,225,0,0,3,0,4,108,0,0,1,77,65,154,66,60,33,147,41,132,191,135,166,127,184,101,242,169,130,65,38,113,161,125,94,7,39,101,248,143,193,7,184,71,167,13,199,111,111,151,103,195,252,247,36,65,101,199,175,209,138,197,187,181,17,251,87,71,7,4,112,231,121,88,236,247,200,199,121,184,149,150,250,245,200,185,179,229,243,65,105,199,113,223,46,59,137,221,231,117,130,171,3,4,197,189,76,18,64,145,101,59,233,145,22,102,211,42,199,240,171,125,168,149,63,123,252,188,181,161,97,97,214,109,167,248,185,73,214,66,171,213,230,126,221,151,15,60,71,171,113,85,97,139,208,119,42,181,175,199,250,157,51,244,190,197,104,122,18,66,172,142,71,237,133,182,71,187,168,200,97,86,2,6,1,229,30,27,37,13,143,237,119,97,60,140,86,197,34,57,28,241,99,177,217,175,174,93,211,107,105,76,46,109,244,164,1,125,205,158,246,217,241,192,27,243,253,81,18,84,55,177,94,113,78,199,23,120,75,132,235,47,154,57,56,18,15,218,103,142,44,84,110,48,176,18,158,229,45,213,36,129,190,5,64,6,1,133,204,176,20,96,73,79,91,176,197,206,47,13,94,9,102,127,10,136,105,173,219,108,166,154,64,150,91,213,227,64,20,240,79,209,136,166,163,3,33,217,144,200,247,109,177,142,88,95,239,102,253,152,48,37,8,76,140,146,122,9,83,135,69,163,159,77,89,138,184,50,178,76,96,0,0,21,177,0,0,1,11,65,154,102,73,225,15,38,83,2,95,135,155,251,1,226,126,206,125,1,227,148,226,206,75,254,118,127,190,189,80,78,46,32,75,22,177,146,33,253,183,139,31,251,184,65,190,118,176,155,27,168,120,186,192,223,92,34,31,192,11,243,198,117,112,220,73,21,120,161,133,255,87,188,98,64,211,109,212,90,77,173,0,172,93,2,71,42,235,100,151,28,152,7,232,110,138,49,85,178,170,146,45,97,28,170,17,188,217,153,12,6,106,229,43,113,28,110,115,45,95,74,237,144,16,106,169,97,233,20,128,160,142,150,236,5,123,17,146,0,144,250,198,90,70,118,138,17,76,37,67,216,228,154,5,217,233,180,49,107,226,154,87,187,192,192,175,216,48,228,29,62,186,188,48,218,167,186,139,21,227,83,203,136,132,173,245,252,238,99,84,93,117,158,4,253,97,23,128,184,58,97,223,10,193,118,224,132,58,236,71,233,43,76,134,37,82,136,202,147,8,251,185,63,215,54,92,42,224,21,53,45,64,39,18,155,204,9,250,158,114,183,226,96,17,156,36,39,180,184,246,190,215,121,40,88,127,159,170,254,142,152,245,144,0,0,37,96,0,0,0,237,65,158,132,69,17,60,119,104,114,123,183,48,106,209,167,239,110,235,167,253,54,188,76,168,247,25,2,217,39,155,166,143,145,22,106,49,201,26,26,52,182,29,128,174,112,50,246,235,67,59,36,155,71,26,113,73,73,38,148,49,101,171,199,17,32,128,120,146,182,99,134,158,46,181,71,110,255,78,66,102,82,101,104,108,32,33,74,103,100,104,247,108,11,12,128,132,62,14,217,49,195,118,106,85,186,144,17,180,73,70,154,205,23,115,108,244,119,43,161,129,10,130,13,182,250,115,81,142,66,36,33,76,76,17,140,72,138,111,152,94,35,223,154,144,185,92,166,50,93,204,15,73,37,156,158,249,226,11,38,251,129,98,239,181,137,223,189,126,182,155,177,141,227,12,202,99,22,242,22,140,95,53,131,196,187,131,28,249,210,129,70,85,48,52,235,243,159,247,0,65,44,186,86,189,117,65,148,22,12,59,77,44,16,147,190,254,104,48,6,33,67,240,162,233,185,124,78,216,13,68,43,196,74,0,0,12,9,0,0,0,218,1,158,163,116,66,95,120,11,48,158,0,81,164,153,18,12,202,112,176,143,111,186,155,175,26,21,97,159,163,72,216,11,36,115,83,189,117,91,127,167,253,160,117,166,180,19,198,65,77,9,202,36,176,9,130,225,35,237,111,191,51,125,169,176,126,178,35,86,157,26,74,30,24,198,205,7,190,103,216,196,144,0,14,195,105,129,182,64,130,36,95,196,183,238,206,181,226,212,73,217,124,191,52,209,13,225,242,87,173,182,6,192,205,126,186,81,195,163,160,188,242,6,98,73,231,101,19,108,20,81,7,149,26,242,91,77,139,115,237,116,196,69,230,89,71,220,27,221,110,36,153,125,138,175,101,13,194,175,75,196,6,228,7,212,201,228,183,25,182,88,20,184,197,220,130,56,128,244,154,100,60,163,182,54,73,112,135,138,68,20,135,39,6,19,160,93,249,56,142,83,29,94,74,72,176,238,115,11,75,68,68,15,94,192,0,0,202,129,0,0,0,239,1,158,165,106,66,95,119,239,14,187,210,235,203,243,184,26,68,56,153,229,35,35,224,93,77,74,100,204,81,244,147,133,60,100,114,181,25,168,105,217,187,75,184,102,76,77,199,7,95,206,78,95,221,124,206,250,70,0,153,31,117,249,149,131,142,132,169,4,40,219,28,26,196,94,102,22,1,205,113,253,233,183,109,195,154,28,79,175,125,119,102,240,143,209,43,210,74,64,182,221,152,34,75,119,38,13,181,253,177,148,241,191,40,183,70,175,143,116,68,39,183,202,175,214,238,170,35,188,158,145,226,6,59,172,19,130,28,221,150,48,69,233,31,172,125,249,230,194,160,132,200,9,12,66,86,41,167,69,73,211,206,101,249,124,205,203,24,89,114,44,101,196,207,4,27,169,196,21,69,40,207,177,145,45,118,217,0,135,1,121,74,7,68,219,11,212,19,109,113,17,171,30,248,30,100,9,86,154,45,127,242,239,70,183,107,14,211,245,241,168,232,224,52,50,167,222,69,131,234,62,188,73,99,236,192,0,0,170,129,0,0,0,244,65,154,168,73,168,65,104,153,76,20,242,255,135,156,43,155,65,144,77,7,194,35,140,147,243,228,173,41,36,233,231,116,56,14,190,240,26,185,226,110,24,234,157,194,243,181,36,111,241,245,102,244,185,22,119,232,138,15,211,17,85,87,28,22,80,149,172,39,84,30,34,125,231,104,19,101,80,2,3,83,119,44,191,162,205,203,55,204,135,191,247,32,46,176,109,83,246,36,249,175,23,170,71,143,200,61,230,19,79,21,48,95,157,189,79,230,207,179,36,26,233,176,106,156,97,106,138,102,107,152,103,177,64,18,224,36,167,57,27,79,114,27,87,95,102,216,11,168,172,218,8,154,19,255,230,1,155,197,59,208,42,130,12,215,62,226,0,132,192,85,147,36,133,176,154,10,37,235,86,234,64,106,161,159,55,111,206,166,167,237,62,47,36,166,195,59,108,84,149,217,95,10,190,255,200,8,7,199,60,34,122,80,105,147,48,120,30,97,169,69,103,81,235,202,81,127,234,123,250,85,200,215,100,74,137,214,83,93,173,128,0,0,53,161,0,0,0,207,1,158,199,106,66,95,120,88,203,248,58,51,196,252,138,99,184,29,117,11,190,61,193,181,162,87,144,130,36,93,137,36,146,216,12,141,135,158,179,120,159,231,112,67,242,130,18,227,159,225,205,86,84,28,115,21,27,45,22,99,199,175,83,249,38,37,71,163,87,84,39,186,138,86,35,135,61,124,243,24,230,176,103,113,127,148,28,151,54,55,86,217,73,203,28,34,235,253,105,199,176,73,96,32,86,95,22,1,101,75,39,127,146,153,176,199,71,64,40,133,161,73,79,190,244,9,83,132,88,36,253,26,171,0,222,114,159,242,213,118,29,235,177,30,254,82,225,65,112,144,156,1,245,133,246,171,185,255,12,21,174,63,196,200,247,210,52,175,199,206,37,11,106,235,133,165,7,53,181,199,232,94,7,109,5,81,157,246,65,210,154,118,253,145,161,169,13,145,33,158,52,104,192,0,0,170,128,0,0,2,28,65,154,202,73,225,10,82,101,48,82,203,255,135,170,134,144,1,237,228,229,210,126,131,190,134,108,79,212,100,119,236,19,134,193,42,160,176,44,134,6,30,63,202,116,22,161,16,148,106,208,108,68,97,246,197,23,255,127,255,19,87,163,9,252,255,74,240,219,176,135,25,109,97,225,247,31,42,91,179,181,158,186,75,214,231,190,39,15,101,220,126,181,246,200,242,119,86,172,94,218,88,147,117,137,136,232,109,196,129,153,62,112,155,114,107,121,228,226,223,244,36,15,32,199,99,179,112,250,20,195,236,158,91,146,29,135,3,245,199,27,199,111,19,198,2,67,47,101,238,210,53,239,78,146,15,23,132,33,103,44,67,218,200,124,11,6,71,151,65,233,26,99,16,78,234,167,60,126,34,200,160,164,178,78,41,249,59,233,167,39,90,174,82,198,0,142,126,60,98,7,54,51,24,107,189,20,177,244,99,227,218,230,94,185,87,100,127,90,248,46,41,230,25,115,79,141,21,178,84,180,67,145,59,110,71,142,54,124,245,167,165,100,245,11,44,206,8,202,187,201,113,67,116,125,168,54,91,183,136,110,245,213,45,228,113,227,7,169,231,65,17,224,46,126,45,35,110,134,236,200,210,165,161,159,137,223,10,183,145,125,34,78,128,181,121,245,165,225,5,114,135,6,243,110,223,130,161,35,111,89,202,62,175,93,60,27,47,127,55,103,101,63,57,54,117,149,60,166,122,183,248,182,193,62,112,16,81,81,229,34,207,104,62,27,208,89,30,98,191,180,87,144,221,95,170,122,138,113,21,21,42,48,65,117,42,28,151,114,195,113,245,104,64,85,182,184,70,105,221,102,238,204,181,24,201,199,247,25,54,238,113,16,103,65,14,254,176,133,201,226,64,197,90,46,42,178,98,183,144,148,188,164,107,174,217,229,236,21,12,226,242,237,242,158,2,136,146,172,9,195,104,223,236,45,237,137,14,72,208,65,147,143,93,15,124,166,17,243,168,123,99,215,71,214,254,235,196,186,168,26,6,148,67,65,201,246,123,131,171,182,161,235,107,103,112,107,56,105,149,106,199,237,151,52,222,59,127,95,159,255,249,46,252,175,199,130,184,129,55,201,192,79,197,194,250,101,84,233,93,30,47,29,80,177,140,28,49,169,86,102,3,123,149,156,248,21,23,66,232,44,54,99,40,214,147,160,0,0,188,128,0,0,0,213,1,158,233,106,66,95,117,90,48,73,25,149,251,233,200,246,57,219,67,247,155,67,116,167,172,54,131,66,114,235,179,163,243,32,109,127,18,56,220,162,73,158,58,230,84,33,232,40,143,201,175,157,56,90,37,74,41,92,130,168,48,101,221,129,233,57,132,69,182,97,171,181,100,163,58,24,139,171,209,127,102,15,159,229,172,126,125,237,57,222,178,88,76,60,64,224,201,37,54,133,69,84,211,180,173,73,135,15,52,254,2,49,135,10,69,64,87,212,192,46,77,97,131,21,98,254,89,252,63,114,53,81,167,192,149,214,239,221,6,245,129,5,96,8,10,225,107,201,42,255,60,210,29,116,253,34,190,29,170,2,82,191,231,150,175,237,96,253,217,254,217,142,68,195,243,91,89,56,171,209,20,81,148,107,112,54,201,55,36,189,209,231,14,100,96,155,177,238,86,183,98,221,202,231,23,177,152,154,192,0,0,50,161,0,0,1,69,65,154,238,73,225,14,137,148,192,151,255,135,76,110,119,217,130,38,2,89,60,70,176,207,125,105,153,103,202,117,152,253,109,92,124,221,247,61,255,196,9,105,61,188,156,125,1,129,148,7,23,251,99,196,98,253,25,239,12,234,27,161,143,96,211,223,189,134,175,213,193,206,9,241,81,124,44,56,240,252,244,22,253,113,216,34,159,200,3,202,125,245,250,152,86,104,255,80,130,5,99,207,51,229,51,223,165,76,224,35,29,137,215,42,81,62,67,130,42,207,99,217,164,33,156,78,88,128,104,244,237,243,123,19,215,33,135,248,202,247,1,103,232,113,178,136,151,146,170,113,156,169,111,141,190,166,63,227,139,162,169,54,207,105,57,253,26,255,134,161,159,75,211,131,79,145,227,115,110,250,238,52,201,205,205,133,126,114,179,90,6,82,57,88,149,243,52,190,132,96,82,127,69,29,214,194,60,170,222,19,1,220,40,251,209,151,171,113,1,151,101,215,221,227,134,248,79,42,19,238,15,180,227,22,60,227,5,139,253,27,7,190,194,193,158,49,141,253,216,85,20,129,97,212,169,209,6,82,29,46,63,183,186,83,54,43,155,19,248,10,211,163,16,132,185,72,73,57,133,61,141,57,9,102,167,16,62,230,226,200,127,82,179,199,40,251,13,236,240,240,7,139,89,204,69,149,38,231,33,202,177,18,115,174,209,130,242,201,119,189,128,0,0,244,128,0,0,1,20,65,159,12,69,21,60,119,93,196,17,231,10,78,187,148,5,129,162,169,215,202,48,53,182,178,35,212,101,219,150,61,0,73,162,17,144,55,132,210,31,179,216,54,21,189,185,105,70,171,127,180,128,69,55,90,29,90,156,51,194,109,80,25,10,28,122,193,211,199,194,61,121,179,121,111,0,168,182,29,112,194,204,112,97,15,155,223,84,48,135,192,244,195,186,199,133,216,56,80,142,137,121,12,208,21,211,87,80,77,118,51,226,41,142,73,26,139,15,7,104,69,199,79,2,75,101,3,45,135,163,222,83,124,162,114,49,230,72,87,193,115,179,93,175,83,6,120,178,234,238,80,72,20,227,70,39,76,160,251,71,199,173,107,68,0,166,92,144,13,19,59,149,194,210,87,194,121,96,90,106,59,6,144,186,25,183,35,157,130,193,195,65,45,224,59,102,76,203,24,64,159,115,104,225,154,234,7,28,208,106,245,159,89,181,203,239,102,110,221,16,112,195,17,12,20,119,140,140,1,114,238,76,41,142,110,208,85,60,232,64,67,252,129,9,51,250,122,74,25,120,31,103,25,100,211,110,162,155,101,136,98,197,128,252,3,47,132,89,226,195,220,140,0,0,15,72,0,0,0,145,1,159,43,116,66,95,109,122,85,199,0,191,148,204,118,179,79,149,230,0,1,253,248,168,24,17,255,78,156,109,121,102,209,69,233,20,12,27,177,255,210,203,65,72,158,144,181,96,223,62,13,153,56,23,172,201,62,13,1,20,246,186,221,83,111,44,227,185,15,80,164,47,105,247,224,20,234,205,239,196,68,54,40,44,252,186,140,96,21,172,204,241,19,23,149,250,159,201,0,84,2,188,1,239,231,255,52,75,166,131,125,142,231,157,166,224,136,184,26,193,162,225,230,86,15,112,35,239,132,250,219,239,156,103,162,228,51,43,11,0,0,3,0,222,129,0,0,0,234,1,159,45,106,66,95,109,122,85,194,107,24,56,163,65,155,220,251,176,220,178,192,226,115,161,250,242,81,96,47,182,101,103,54,158,59,46,60,66,76,24,50,86,32,214,60,167,3,209,90,181,4,35,25,21,14,40,119,228,93,176,185,30,237,123,202,140,122,197,35,49,179,117,220,37,12,252,59,93,105,88,223,188,168,190,86,90,168,218,159,113,126,66,184,229,213,252,63,5,5,226,121,9,101,100,39,145,237,139,201,239,51,1,214,10,191,63,36,128,61,190,10,23,133,247,190,179,32,161,126,211,203,254,231,225,113,230,59,47,144,16,242,65,20,164,159,104,187,237,69,52,109,19,109,41,122,232,194,72,178,143,212,149,94,99,122,112,133,83,173,54,7,99,163,38,8,151,67,156,191,104,154,0,104,117,114,108,193,145,96,167,61,111,197,181,181,31,66,116,210,158,2,85,213,87,68,127,108,136,206,96,83,94,84,146,165,213,215,42,146,64,35,149,197,63,252,10,213,159,6,0,0,5,157,0,0,1,68,65,155,47,73,168,65,104,153,76,9,127,135,60,67,4,170,178,162,29,20,124,249,109,77,193,8,125,156,119,235,250,87,46,252,144,231,109,200,80,253,180,159,71,54,105,176,224,93,32,36,45,30,198,214,59,0,101,243,67,136,108,164,5,26,170,251,232,165,56,9,78,155,15,51,13,198,128,150,181,83,138,252,241,111,123,9,202,179,27,61,194,152,1,227,251,81,96,83,217,223,153,253,195,113,2,65,32,100,202,50,125,156,202,123,178,135,187,120,133,108,210,1,16,153,21,37,140,34,224,81,138,37,119,185,183,176,193,119,44,146,212,234,179,122,174,134,116,59,227,139,40,166,84,233,143,22,10,215,34,157,150,137,52,5,149,86,94,43,86,214,4,191,154,210,148,84,152,192,17,192,58,88,58,92,10,151,147,177,12,89,182,229,223,68,22,250,63,61,98,217,14,203,50,133,47,224,160,11,179,217,183,185,22,248,204,1,80,169,248,85,47,95,179,135,71,56,205,206,178,242,2,192,199,13,252,228,207,29,254,72,3,13,27,242,27,171,112,213,2,1,181,200,101,35,170,119,106,184,156,28,138,61,142,91,191,27,48,63,79,127,253,166,214,216,194,34,26,15,75,102,152,148,211,88,108,41,193,187,52,179,57,115,161,28,45,179,167,141,131,241,104,131,160,12,96,201,49,54,44,110,117,226,79,169,132,84,106,238,0,0,3,0,224,129,0,0,1,46,65,155,82,73,225,10,82,101,48,37,255,135,56,37,191,116,9,175,136,54,13,124,239,200,25,123,113,29,153,235,167,116,79,112,10,160,24,218,196,143,28,240,24,132,79,255,254,103,102,156,170,220,54,153,97,103,112,200,225,86,174,234,8,70,119,176,3,80,58,151,253,32,221,96,238,172,63,199,169,141,150,58,210,183,235,251,194,167,245,121,78,229,103,191,205,133,173,254,27,217,103,253,166,20,241,68,189,33,13,147,33,202,140,209,169,113,134,167,43,123,26,241,59,185,105,37,194,188,183,192,108,59,178,111,182,58,193,146,201,16,157,225,164,169,91,1,148,8,149,155,201,76,169,17,31,137,170,244,201,227,172,33,49,124,54,2,212,221,214,62,149,247,251,233,255,138,14,6,68,110,220,46,100,144,60,16,149,151,67,50,34,165,180,111,203,32,81,67,249,80,234,174,35,167,90,147,111,77,122,30,152,126,143,211,236,45,3,140,171,36,209,202,184,255,27,81,28,123,142,105,98,67,54,184,86,206,141,89,65,252,79,151,130,210,255,171,95,121,171,29,188,49,191,161,2,197,134,209,12,69,228,96,90,19,47,101,81,91,121,78,110,177,79,136,152,6,43,6,200,18,35,192,61,5,156,101,108,11,192,190,30,22,75,136,239,251,134,96,0,0,52,96,0,0,0,196,65,159,112,69,52,76,33,255,94,90,19,70,53,107,238,95,197,183,66,225,238,130,18,20,229,51,40,192,159,142,44,62,225,221,163,117,177,88,63,71,1,70,239,176,128,149,54,206,157,137,31,181,179,115,97,188,72,189,67,208,4,9,97,185,239,191,43,46,66,196,15,157,118,6,92,161,152,65,14,217,130,23,103,144,101,138,165,209,228,240,35,105,99,62,106,118,213,162,195,225,241,188,201,225,22,128,251,172,25,234,18,100,28,254,140,92,91,102,124,76,154,189,3,49,108,0,116,9,157,214,88,236,7,63,160,246,78,163,68,103,142,27,5,28,38,93,9,139,4,81,187,101,146,147,166,4,148,226,120,28,63,198,62,98,210,241,198,139,38,6,154,12,161,185,32,70,205,96,123,244,1,133,239,32,23,210,35,249,252,1,65,170,128,0,1,103,0,0,0,213,1,159,145,106,66,95,108,234,249,54,216,223,88,206,210,248,236,191,147,119,87,185,225,42,7,170,42,202,172,219,239,231,16,41,200,10,237,231,96,106,101,81,141,3,237,244,142,252,241,100,137,189,158,151,86,108,232,135,54,54,239,3,104,155,188,160,73,55,107,116,194,3,196,179,130,213,16,160,204,107,17,118,6,231,64,227,187,39,172,212,31,110,91,120,107,14,173,238,97,135,201,47,195,235,152,71,6,180,220,58,236,23,153,175,141,163,149,222,207,17,46,89,6,114,156,195,48,99,42,182,249,4,95,203,206,22,199,71,253,186,90,176,87,55,59,73,102,83,12,40,48,230,223,86,39,80,231,119,222,133,118,197,126,19,47,179,40,254,66,42,17,8,144,240,8,0,29,86,119,164,249,67,144,150,160,159,151,63,143,118,201,5,255,124,175,52,92,52,78,184,50,246,154,214,119,72,225,250,0,0,3,3,231,0,0,2,130,65,155,149,73,168,65,104,153,76,9,127,135,153,9,41,248,183,46,62,185,238,253,74,23,237,209,177,139,254,35,12,185,48,45,149,13,253,152,57,228,5,227,64,160,244,134,230,27,240,4,199,99,42,161,130,185,83,179,49,12,3,96,40,158,192,150,21,155,133,190,42,36,148,241,168,24,179,137,86,23,143,217,113,132,186,148,20,57,101,221,152,6,245,222,200,28,66,32,132,194,17,16,24,43,253,25,115,238,158,179,206,146,203,245,188,194,127,11,238,137,135,24,192,0,0,3,0,0,3,0,241,81,117,243,116,139,90,95,117,158,57,210,58,194,73,236,235,53,136,197,144,0,0,130,80,110,165,181,252,218,22,232,91,224,75,254,201,25,217,9,206,236,241,160,103,146,230,191,233,66,109,226,72,223,142,53,134,46,133,16,55,167,125,59,3,23,13,149,119,30,58,145,107,129,137,150,220,187,19,176,168,247,239,126,159,179,149,19,1,139,183,233,10,235,51,128,37,36,220,75,199,191,246,252,9,91,152,134,248,234,67,65,196,48,10,1,141,183,100,205,187,218,174,97,190,186,254,124,139,131,127,147,241,199,13,181,242,124,57,72,230,142,7,143,45,111,66,68,127,144,151,177,103,222,194,105,159,4,173,236,98,138,162,12,81,14,94,235,171,236,165,184,29,240,157,103,154,46,210,149,210,250,177,45,168,145,229,53,215,47,233,180,8,118,135,51,165,178,166,188,200,9,192,121,121,52,88,19,38,245,153,56,158,198,136,41,150,6,247,166,1,220,159,85,220,250,105,149,71,83,164,247,221,24,166,60,165,162,40,159,83,11,21,210,208,97,53,90,148,67,191,238,55,187,106,120,82,40,150,114,160,45,214,177,190,49,136,45,41,180,231,39,180,99,40,147,8,81,5,53,122,248,179,144,39,85,198,214,135,186,16,64,173,134,171,162,67,207,8,183,216,47,163,12,45,0,139,54,95,129,1,200,246,180,188,27,236,125,134,49,180,18,171,146,41,180,199,150,218,148,45,5,139,155,143,84,38,197,24,37,163,107,29,176,228,119,101,83,10,232,40,60,48,222,186,184,128,132,217,205,87,81,6,226,188,108,243,175,88,50,100,57,181,29,2,136,128,21,181,28,218,188,240,86,247,201,187,106,102,99,158,155,148,22,126,113,75,44,127,125,20,230,75,166,236,203,225,9,183,172,181,222,90,42,119,108,255,15,46,208,45,150,230,136,9,54,70,222,137,116,184,238,207,213,244,193,111,110,6,82,32,141,47,16,160,175,178,234,34,192,250,86,254,35,167,60,170,228,89,91,180,191,148,108,101,178,219,24,56,236,151,121,205,154,85,242,67,200,163,145,226,79,52,45,245,64,85,96,74,138,208,67,61,114,40,0,0,3,0,0,3,0,0,162,169,150,0,0,3,0,2,62])])
-        };
-        
-        let moofBuf = writeIntermediate(createIntermediateObject(MoofBox, moof));
-        let mdatBuf = writeIntermediate(createIntermediateObject(MdatBox, mdat));
-
-        let sidx = createSidx(moofBuf.getLength(), mdatBuf.getLength());
-
-
-        outputs.push(ftyp);
-        outputs.push(moov);
-        outputs.push(sidx);
-        outputs.push(moofBuf);
-        outputs.push(mdat);
-
-        //console.log(writeIntermediate(createIntermediateObject(MoovBox, moov)).getLength());
-        //console.log(writeIntermediate(createIntermediateObject(SidxBox, sidx)).getLength());
-
-        
-
-        /*
-        {
-            header: {
-                "type": "styp"
-            },
-            "type": "styp",
-            "major_brand": "msdh",
-            "minor_version": 0,
-            "compatible_brands": [
-                "msdh",
-                "msix"
-            ]
-        },
-        */
-
-        let buffers: Buffer[] = [];
-        for(let bufOrDat of outputs) {
-            let subBuffer: LargeBuffer;
-            if(bufOrDat instanceof LargeBuffer) {
-                subBuffer = bufOrDat;
-            } else {
-                // RootBox has no extra values, so it can be used directly to read a single box
-                let intOutput = createIntermediateObject(RootBox, { boxes: [bufOrDat] });
-                subBuffer = writeIntermediate(intOutput);
-            }
-            for(let b of subBuffer.getInternalBufferList()) {
-                buffers.push(b);
-            }
-        }
-
-        return new LargeBuffer(buffers);
     }
 }
 
