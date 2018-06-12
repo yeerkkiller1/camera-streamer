@@ -2236,12 +2236,13 @@ async function testRewriteMp4Fragment() {
             for(let i = 0; i < cttsInfo.sample_count; i++) {
                 frames.push({
                     buffer: mdats[frameIndex],
-                    composition_offset: cttsInfo.sample_offset
+                    composition_offset: cttsInfo.sample_offset,
                 });
                 frameIndex++;
             }
         }
 
+        todonext
         // Why does this not play all the frames? This should play 3 frames, but it plays 1 in vlc, and in chrome it plays 1,
         //  but then flashes the second frame when we refresh.
         frames = frames.slice(0, 3);
@@ -2331,103 +2332,10 @@ async function testRewriteMp4Fragment() {
             defaultFlags: nonKeyFrameSampleFlags
         });
 
-        // A combination of stsz, and ctts
-        let samples: SampleInfo[] = [
-            {
-                sample_size: 2826,
-                sample_composition_time_offset: 2048
-            },
-            {
-                sample_size: 328,
-                sample_composition_time_offset: 2048
-            },
-            {
-                sample_size: 337,
-                sample_composition_time_offset: 2048
-            },
-            {
-                sample_size: 271,
-                sample_composition_time_offset: 5120
-            },
-            {
-                sample_size: 241,
-                sample_composition_time_offset: 2048
-            },
-            {
-                sample_size: 222,
-                sample_composition_time_offset: 0
-            },
-            {
-                sample_size: 243,
-                sample_composition_time_offset: 1024
-            },
-            {
-                sample_size: 248,
-                sample_composition_time_offset: 3072
-            },
-            {
-                sample_size: 211,
-                sample_composition_time_offset: 1024
-            },
-            {
-                sample_size: 544,
-                sample_composition_time_offset: 3072
-            },
-            {
-                sample_size: 217,
-                sample_composition_time_offset: 1024
-            },
-            {
-                sample_size: 329,
-                sample_composition_time_offset: 5120
-            },
-            {
-                sample_size: 280,
-                sample_composition_time_offset: 2048
-            },
-            {
-                sample_size: 149,
-                sample_composition_time_offset: 0
-            },
-            {
-                sample_size: 238,
-                sample_composition_time_offset: 1024
-            },
-            {
-                sample_size: 328,
-                sample_composition_time_offset: 2048
-            },
-            {
-                sample_size: 306,
-                sample_composition_time_offset: 4096
-            },
-            {
-                sample_size: 200,
-                sample_composition_time_offset: 1024
-            },
-            {
-                sample_size: 217,
-                sample_composition_time_offset: 1024
-            },
-            {
-                sample_size: 646,
-                sample_composition_time_offset: 4096
-            }
-        ];
-
-        //samples = [samples[0]];
-
-        samples = h264Object.frames.map(x => ({
+        let samples: SampleInfo[] = h264Object.frames.map(x => ({
             sample_size: x.buffer.getLength(),
             sample_composition_time_offset: x.composition_offset
         }));
-
-        /*
-        samples.forEach(sample => {
-            sample.sample_flags = nonKeyFrameSampleFlags;
-        });
-        samples[0].sample_flags = keyFrameSampleFlags;
-        */
 
         let moof = createMoof({
             sequenceNumber: 1,
@@ -2439,7 +2347,7 @@ async function testRewriteMp4Fragment() {
         
         let mdat: O<typeof MdatBox> = {
             header: {
-                size: 8389,
+                size: 0,
                 headerSize: 8,
                 type: "mdat"
             },
@@ -2453,7 +2361,7 @@ async function testRewriteMp4Fragment() {
         let sidx = createSidx({
             moofSize: moofBuf.getLength(),
             mdatSize: mdatBuf.getLength(),
-            subsegmentDuration: 0
+            subsegmentDuration: samples.length * frameTimeInTimescale
         });
 
         outputs.push(ftyp);
