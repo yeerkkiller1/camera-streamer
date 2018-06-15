@@ -204,7 +204,6 @@ export function filterObjectValues<A>(
 }
 
 export function zipObject<P extends string, O>(prop1: P, values1: O[]): {[key in P]: O}[];
-
 export function zipObject<
     P1 extends string, V1,
     P2 extends string, V2

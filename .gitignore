@@ -5,6 +5,12 @@
 *.json
 *.m4s
 *.mpd
+*.h264
+*.bmp
+*.exp
+.vs
+x64
+Debug
 digest.txt
 node_modules
 dist
