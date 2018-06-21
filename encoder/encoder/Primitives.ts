@@ -1,10 +1,12 @@
-import { SerialObjectPrimitive, ReadContext, WriteContext } from "./SerialTypes";
-import { LargeBuffer } from "./LargeBuffer";
+import { SerialObjectPrimitive, ReadContext, WriteContext, HandlesBitOffsets, SerialObject, TemplateToObject, SerialPrimitiveName } from "./SerialTypes";
+import { LargeBuffer, MaxUInt32 } from "./LargeBuffer";
 import { textFromUInt32, textToUInt32 } from "./util/serialExtension";
-import { decodeUTF8BytesToString, encodeAsUTF8Bytes } from "./util/UTF8";
+import { decodeUTF8BytesToString, encodeAsUTF8Bytes, debugString } from "./util/UTF8";
 import { sum } from "./util/math";
-import { mapObjectValuesKeyof } from "./util/misc";
-import { Box } from "./BinaryCoder";
+import { mapObjectValuesKeyof, range } from "./util/misc";
+import { Box, parseObject } from "./BinaryCoder";
+
+export type Bit = 0 | 1;
 
 export function IntN(bytes: number, signed: boolean): SerialObjectPrimitive<number> {
     if(bytes > 8 || bytes <= 0) {
@@ -129,6 +131,59 @@ export const CString: SerialObjectPrimitive<string> = {
     }
 };
 
+export function DebugString(length: number): SerialObjectPrimitive<string> {
+    return {
+        read({pPos, buffer}) {
+            let bytes: number[] = [];
+            for(let i = 0; i < length; i++) {
+                let b = buffer.readUIntBE(pPos.v, 1);
+                pPos.v++;
+                bytes.push(b);
+            }
+
+            return debugString(bytes);
+        },
+        write(context) {
+            let value = context.value;
+
+            let output = new Buffer(value.length);
+            for(let i = 0; i < output.length; i++) {
+                let byte = output[i];
+                output.writeUInt8(byte, i);
+            }
+
+            return new LargeBuffer([output]);
+        }
+    };
+};
+
+export function DebugStringRemaining(): SerialObjectPrimitive<string> {
+    return {
+        read({pPos, buffer, end}) {
+            let length = end - pPos.v;
+            let bytes: number[] = [];
+            for(let i = 0; i < length; i++) {
+                let b = buffer.readUIntBE(pPos.v, 1);
+                pPos.v++;
+                bytes.push(b);
+            }
+
+            return debugString(bytes);
+        },
+        write(context) {
+            let value = context.value;
+
+            let output = new Buffer(value.length);
+            for(let i = 0; i < output.length; i++) {
+                let byte = output[i];
+                output.writeUInt8(byte, i);
+            }
+
+            return new LargeBuffer([output]);
+        }
+    };
+};
+
 
 export function FullBox<T extends string>(type: T) {
     return {
@@ -150,18 +205,27 @@ export function bitsToByte(bits: number[]): number {
     }
     return byte;
 }
+
 /** Big endian */
 export function byteToBits(byteIn: number, bitCount = 8): (0|1)[] {
+    if(byteIn === 0 && bitCount === 0) {
+        return [];
+    }
+
+    if(bitCount > 52) {
+        throw new Error(`Javascript doesn't support more than 52 bit numbers. A ${bitCount} number was requested.`);
+    }
+
     let byte = byteIn;
     let bits: (0|1)[] = [];
-    let mask = 1 << (bitCount - 1);
+    let mask =  Math.pow(2, bitCount - 1);
     if(byte >= mask * 2) {
         throw new Error(`Tried to get ${bitCount} bits from ${byte}, but that number has more bits than requested!`);
     }
     while(mask) {
         let bit = byte & mask;
         bits.push(bit === 0 ? 0 : 1);
-        mask = mask >> 1;
+        mask = Math.floor(mask / 2);
     }
     return bits;
 }
@@ -271,6 +335,168 @@ export function PeekPrimitive<T>(primitive: SerialObjectPrimitive<T>): SerialObj
         },
         write(context: WriteContext<T>): LargeBuffer {
             return new LargeBuffer([]);
+        }
+    };
+}
+
+
+// Big endian endian
+export function readBit(context: ReadContext): 0|1 {
+    let { buffer, pPos, bitOffset } = context;
+    let byte = buffer.readUInt8(pPos.v);
+    let bits = byteToBits(byte);
+    let bit = bits[context.bitOffset];
+
+    context.bitOffset++;
+    if(context.bitOffset === 8) {
+        context.bitOffset = 0;
+        context.pPos.v++;
+    }
+
+    return bit;
+}
+
+export const UExpGolomb: SerialObjectPrimitive<number> = {
+    [SerialPrimitiveName]: "UExpGolomb",
+    [HandlesBitOffsets]: true,
+    read(context) {
+        let magnitude = 0;
+        while(true) {
+            let bit = readBit(context);
+            if(bit === 1) break;
+            magnitude++; 
+        }
+
+        let sumOffset = (1 << magnitude) - 1;
+        let bits = range(0, magnitude).map(x => readBit(context));
+        let val = bitsToByte(bits) + sumOffset;
+
+        console.log(`UExpGolomb Read value ${val}, magnitude ${magnitude} bits end ${bits.join("")}, key ${context.debugKey}`);
+
+        return val;
+    },
+    write(context) {
+        if(context.value === 0) {
+            return new LargeBuffer([[1]]);
+        }
+        let bits: Bit[] = [];
+
+        let magnitude = ~~(Math.log2(context.value + 1));
+
+        for(let i = 0; i < magnitude; i++) {
+            bits.push(0);
+        }
+        bits.push(1);
+
+        let sumOffset = (1 << magnitude) - 1;
+        let val = context.value - sumOffset;
+
+        let valBits = byteToBits(val, magnitude);
+        for(let bit of valBits) {
+            bits.push(bit);
+        }
+
+        console.log(`UExpGolomb Writing value ${context.value}, magnitude ${magnitude} bits ${bits.join("")}`);
+
+        return new LargeBuffer([bits]);
+    }
+};
+
+export const SExpGolomb: SerialObjectPrimitive<number> = {
+    [HandlesBitOffsets]: true,
+    read(context) {
+        let base = UExpGolomb.read(context);
+        if(base % 2 === 0) {
+            return -base / 2;
+        } else {
+            return (base + 1) / 2;
+        }
+    },
+    write(context) {
+        let signedValue = context.value;
+        let unsignedValue = signedValue <= 0 ? -signedValue * 2 : signedValue * 2 - 1;
+        return UExpGolomb.write({
+            ...context,
+            value: unsignedValue
+        })
+    }
+};
+
+export const BitPrimitive: SerialObjectPrimitive<0|1> = {
+    [HandlesBitOffsets]: true,
+    read(context) {
+        return readBit(context);
+    },
+    write(context) {
+        return new LargeBuffer([[context.value]]);
+    }
+};
+export function BitPrimitiveN(N: number): SerialObjectPrimitive<(0|1)[]> {
+    return {
+        [HandlesBitOffsets]: true,
+        read(context) {
+            return range(0, N).map(() => readBit(context));
+        },
+        write(context) {
+            return new LargeBuffer([context.value]);
+        }
+    };
+}
+
+export function IntBitN(N: number): SerialObjectPrimitive<number> {
+    return {
+        [HandlesBitOffsets]: true,
+        read(context) {
+            let bits = range(0, N).map(() => readBit(context));
+            return bitsToByte(bits);
+        },
+        write(context) {
+            return new LargeBuffer([byteToBits(context.value, N)]);
+        }
+    };
+}
+
+export const AlignmentBits: SerialObjectPrimitive<(0|1)[]> = {
+    [HandlesBitOffsets]: true,
+    read(context) {
+        if(context.bitOffset === 0) {
+            return [];
+        }
+        let bits = 8 - context.bitOffset;
+        return range(0, bits).map(() => readBit(context));
+    },
+    write(context) {
+        return new LargeBuffer([context.value]);
+    }
+}
+
+export function RemainingData<T>(primitive: SerialObjectPrimitive<T>): SerialObjectPrimitive<T[]> {
+    return {
+        [HandlesBitOffsets]: true,
+        [SerialPrimitiveName]: "RemainingData",
+        read(context) {
+            function getBitCount() {
+                return context.pPos.v * 8 + context.bitOffset;
+            }
+            let results: T[] = [];
+            while(getBitCount() < context.endBits) {
+                let result = primitive.read(context);
+                results.push(result);
+            }
+
+            console.log(`Read ${results.length} bits`)
+            
+            return results;
+        },
+        write(context) {
+            let results = context.value;
+            let bufs = results.map(result => primitive.write({...context, value: result}));
+
+            let result = new LargeBuffer(bufs);
+
+            console.log(`Wrote ${LargeBuffer.GetBitCount(result)}`);
+
+            return result;
         }
     };
 }

@@ -9,7 +9,9 @@
 // https://mpeg.chiariglione.org/standards/mpeg-4/carriage-nal-unit-structured-video-iso-base-media-file-format/text-isoiec-14496-1
 // https://stackoverflow.com/questions/16363167/html5-video-tag-codecs-attribute
 
-// Hmm... another example of an implementation: https://github.com/madebyhiro/codem-isoboxer B
+// https://github.com/cisco/openh264/blob/722f1d16d6361ef46d12a1eb39e3cefa4c5b15bd/codec/common/inc/wels_common_defs.h#L84
+
+// Hmm... another example of an implementation: https://github.com/madebyhiro/codem-isoboxer
 
 import { textFromUInt32, readUInt64BE, textToUInt32, writeUInt64BE } from "./util/serialExtension";
 import { LargeBuffer, MaxUInt32 } from "./LargeBuffer";
@@ -17,14 +19,14 @@ import { isArray, throwValue, assertNumber } from "./util/type";
 import { keyBy, mapObjectValues, repeat, flatten, filterObjectValues, mapObjectValuesKeyof, range } from "./util/misc";
 import { writeFileSync, createWriteStream, readSync, fstat, readFileSync, writeSync } from "fs";
 import { basename } from "path";
-import { decodeUTF8BytesToString, encodeAsUTF8Bytes } from "./util/UTF8";
+import { decodeUTF8BytesToString, encodeAsUTF8Bytes, debugString } from "./util/UTF8";
 import { sum } from "./util/math";
 
 import * as Jimp from "jimp";
 import { parseObject, filterBox, writeObject, getBufferWriteContext } from "./BinaryCoder";
 import { RootBox, MoofBox, MdatBox, FtypBox, MoovBox, sample_flags, SidxBox } from "./BoxObjects";
 import { SerialObject, _SerialObjectOutput, _SerialIntermediateToFinal } from "./SerialTypes";
-import { NALList, parserTest } from "./NAL";
+import { NALList, parserTest, NALType } from "./NAL";
 import { byteToBits, bitsToByte } from "./Primitives";
 
 
@@ -64,7 +66,7 @@ function testRead(path: string, buf: LargeBuffer) {
         return output;
     }
 
-    console.log(`Write to ${basename(path)}`);
+    console.log(`Write to ${basename(path)}.json`);
     writeFileSync(basename(path) + ".json", prettyPrint(finalOutput));
     
     //writeFileSync(basename(path) + ".json", prettyPrint(finalOutput.boxes.filter(x => x.type === "mdat")));
@@ -102,6 +104,7 @@ function testWrite(oldBuf: LargeBuffer, newBuf: LargeBuffer) {
             let newContext = getBufferWriteContext(newBuffer);
 
             console.error(`Byte is wrong at position ${i}. Should be ${oldByte}, was ${newByte}. Write context ${newContext}.\nOld context ${getContext(oldBuf, i)}\nNew context ${getContext(newBuf, i)}`);
+            console.error(`Byte is wrong at position ${i}. Should be ${oldByte}, was ${newByte}. Write context ${newContext}.\nOld context ${getContext(oldBuf, i, 10, true)}\nNew context ${getContext(newBuf, i, 10, true)}`);
             curErrors++;
             if(curErrors > 10) {
                 throw new Error(`Too many errors (${curErrors})`);
@@ -113,41 +116,31 @@ function testWrite(oldBuf: LargeBuffer, newBuf: LargeBuffer) {
         throw new Error(`Length of buffer changed. Should be ${bufLen}, was ${rewriteLen}`);
     }
 
-    function getContext(buffer: LargeBuffer, pos: number, contextSize = 32): string {
+    function getContext(buffer: LargeBuffer, pos: number, contextSize = 32, bits = false): string {
         let beforePos = pos - contextSize;
         let beforeLength = contextSize;
         if(beforePos < 0) {
             beforeLength += beforePos;
             beforePos = 0;
         }
+
         let endBefore = Math.min(beforePos + contextSize, beforePos + beforeLength);
-        let outputBefore = "";
-    
-        for(let i = beforePos; i < endBefore; i++) {
-            let byte = buffer.readUInt8(i);
-            if(byte === 0) {
-                outputBefore += "Ө";// "\\0";
-            } else if(byte === 13) {
-                outputBefore += "П";
-            } else if(byte === 10) {
-                outputBefore += "ϵ";
+
+        function str(b: LargeBuffer, pos: number, before: number) {
+            if(bits) {
+                return range(pos, before).map(i =>
+                    byteToBits(buffer.readUInt8(i)).join("")
+                ).join(",");
             } else {
-                outputBefore += String.fromCharCode(byte);
-                //outputBefore += "(" + byte.toString() + ")";
+                return debugString(range(pos, before).map(i => buffer.readUInt8(i)));
             }
         }
+
+        let outputBefore = str(buffer, beforePos, endBefore);
     
         let end = Math.min(pos + contextSize, buffer.getLength());
-        let output = "";
-    
-        for(let i = pos; i < end; i++) {
-            let byte = buffer.readUInt8(i);
-            if(byte === 0) {
-                output += "\\0";
-            } else {
-                output += String.fromCharCode(byte);
-            }
-        }
+        let output = str(buffer, pos, end);
+
         return "\"" + outputBefore + "|" + output + "\"";
     }
 }
@@ -298,8 +291,8 @@ async function testRewriteMjpeg() {
         if(mdhd.type !== "mdhd") throw new Error("Impossible");
 
         // mdhd has a timescale too?
-        mdhd.times.timescale = timescale;
-        mdhd.times.duration = timescaleDuration;
+        mdhd.timescale = timescale;
+        mdhd.duration = timescaleDuration;
 
         let minf = mdia.boxes.filter(x => x.type === "minf")[0];
         if(minf.type !== "minf") throw new Error("Impossible");
@@ -387,18 +380,18 @@ async function testRewriteMp4Fragment() {
        
         let box = filterBox(h264Object);
         let mdia = box("moov")("trak")("mdia");
-        let timescale: number = mdia("mdhd")().times.timescale;
+        let timescale: number = mdia("mdhd")().timescale;
 
         let avcConfig = mdia("minf")("stbl")("stsd")("avc1")();
 
         let width = avcConfig.width;
         let height = avcConfig.height;
 
-        let avcC = filterBox({boxes: avcConfig.config})("avcC")();
+        let avcC = filterBox(avcConfig)("avcC")();
 
-        let AVCProfileIndication = avcC.AVCProfileIndication;
-        let profile_compatibility = avcC.profile_compatibility;
-        let AVCLevelIndication = avcC.AVCLevelIndication;
+        let AVCProfileIndication = 0; //avcC.AVCProfileIndication;
+        let profile_compatibility = 0; //avcC.profile_compatibility;
+        let AVCLevelIndication = 0; //avcC.AVCLevelIndication;
 
         let stts = mdia("minf")("stbl")("stts")();
 
@@ -463,17 +456,6 @@ async function testRewriteMp4Fragment() {
 
     type O<T extends SerialObject> = _SerialIntermediateToFinal<_SerialObjectOutput<T>>;
     function createVideo2(): LargeBuffer {
-        //todonext
-        // - Generate file from 10fps.h264.mp4
-        //      - Start by parameterizing everything until it is greatly simplified and just takes a large buffer,
-        //          and bytes offsets, and sample time offsets.
-        //      - Generate trun from 10fps.h264.mp4 ctts
-        //      - get width/height from 10fps.h264.mp4
-        //      - translate timescale from 10fps.h264.mp4 (using the correct trak timescale, not the overall media timescale)
-        //      - take the mdat from 10fps.h264.mp4
-        //      - Make sure when it plays, it plays every single frame in 10fps.h264.mp4 (and doesn't skip the last few frames)
-        // - create a new h264 media file, and read that data in and output a file for it.
-
 
         let h264Base = LargeBuffer.FromFile(templateMp4);
 
@@ -719,12 +701,10 @@ async function testRewriteMp4Fragment() {
                                         type: "mdhd",
                                         version: 0,
                                         flags: 0,
-                                        times: {
-                                            creation_time: 0,
-                                            modification_time: 0,
-                                            timescale: timescale,
-                                            duration: 0
-                                        },
+                                        creation_time: 0,
+                                        modification_time: 0,
+                                        timescale: timescale,
+                                        duration: 0,
                                         language: "und",
                                         pre_defined: 0
                                     },
@@ -1053,9 +1033,18 @@ async function testRewriteMp4Fragment() {
                                     },
                                     sample_count: d.samples.length,
                                     values: Object.assign(
+                                        { data_offset: moofSize + 8 },
+                                        // Union assignment has bugs, so... this is sort of weird
+                                        d.forcedFirstSampleFlags === undefined ? {
+                                            first_sample_flags: undefined
+                                        } : {
+                                            first_sample_flags: d.forcedFirstSampleFlags
+                                        }
+                                    )
+                                    /* Object.assign(
                                         {data_offset: moofSize + 8},
                                         d.forcedFirstSampleFlags === undefined ? {} : { first_sample_flags: d.forcedFirstSampleFlags}
-                                    ),
+                                    )*/,
                                     sample_values: d.samples
                                 }
                             ]
@@ -1119,9 +1108,12 @@ async function wrapAsync(fnc: () => Promise<void>): Promise<void> {
 // https://msdn.microsoft.com/en-us/library/windows/desktop/dd757808(v=vs.85).aspx !!
 //  No start codes, as it is avc1. This microsoft document is amazing, and explains everything. Although I don't know how to know the bytes in
 //  the length prefix of a NAL, but assuming 4 is probably fine.
+/*
 function decodeH264File(path: string) {
     decodeH264(LargeBuffer.FromFile(path));
 }
+*/
+/*
 function decodeH264(buf: LargeBuffer) {
     // I want to parse NALs, SPS PPS? HRD?
 
@@ -1130,12 +1122,13 @@ function decodeH264(buf: LargeBuffer) {
         let NAL = obj.NALs[i];
         if("all" in NAL.nalParsed) {
             delete NAL.nalParsed.all;
-            console.log(NAL.NALLength.size, NAL.bitHeader0, NAL.nalParsed);
+            console.log(NAL.NALLength.size, NAL.bitHeader0, NAL.extensionFlag, NAL.nalParsed);
         } else {
-            console.log(NAL.NALLength.size, NAL.bitHeader0, NAL.nalParsed);
+            console.log(NAL.NALLength.size, NAL.bitHeader0, NAL.extensionFlag, NAL.nalParsed);
         }
     }
 }
+*/
 
 function printBinary(path: string) {
     let buf = LargeBuffer.FromFile(path);
@@ -1158,33 +1151,20 @@ var x = parseObject(new LargeBuffer([new Buffer(
 console.log(x);
 */
 
-frameTest();
+
+//frameTest();
 function frameTest() {
-    let count = 20;
+    let count = 3;
 
     console.log("Working video");
-    {
-        //writeFramesToTest(`youtube2.h264.mp4`);
-        //let frames = getFrames(`10fps.h264.mp4`);
-        let frames = getFrames(`youtube2.h264.mp4`);
-        for(let frame of frames) {
-            decodeH264(frame);
-        }
-    }
+    
 
 
     console.log("\nOther video");
     //printBinary(`C:/Users/quent/Dropbox/camera/encoder/h264/h264/frame0.h264`);
     //decodeH264(`C:/Users/quent/Dropbox/camera/encoder/h264/h264/frame0.h264`);
 
-    //todonext
-    // Decode NAL type 6
-    // Decode NAL type 5
-    // Decode NAL type 7
-    // Decode NAL type 1
-    // The NAL type 0 is probably some other type (probably type 1, or 5). So if we add parsers for the other types,
-    //  they will probably be able to parse the type 0 type.
-    // https://github.com/cisco/openh264/blob/722f1d16d6361ef46d12a1eb39e3cefa4c5b15bd/codec/common/inc/wels_common_defs.h#L84
+    
 
     // Uh, so ignore the extra NAL unit?
     //  https://github.com/cisco/openh264/issues/2501
@@ -1201,9 +1181,8 @@ function frameTest() {
     ///*
     for(let i = 0; i < count; i++) {
         let path = `C:/Users/quent/Dropbox/camera/encoder/h264/h264/frame${i}.h264`;
-        //todonext
-        // Hmm... I really don't believe the data I read for this. The SPS says it has a width of 64? But it should be 592
-        decodeH264File(path);
+        //decodeH264File(path);
+
         //process.stdout.write(i + "     ");
         //decodeH264(path);
         //printBinary(path);
@@ -1211,9 +1190,136 @@ function frameTest() {
     //*/
 
 
-    wrapAsync(testRewriteMp4Fragment);
+    //wrapAsync(testRewriteMp4Fragment);
 }
 
+function getMP4H624NALs(path: string): NALType[] {
+    //writeFramesToTest(`youtube2.h264.mp4`);
+    //let frames = getFrames(`10fps.h264.mp4`);
+
+    // One big question. Why is 10fps.h264.mp4 not playing all frames in vlc?
+    //  - Okay, probably because the video ends with a B frame! And also has B frames throughout, and on the frame index 93.
+    //      It is odd that frame index 93 is the last frame to play (as it is a B frame), but the last frame definitely should not play
+    //      as it is a B frame! Maybe the B frame doesn't reference any future frames, but vlc doesn't check and just uses the max
+    //      lookahead frame number and assumes it needs to read that number of frames. Eitherway, we can fix it by
+    //      just not encoding the last frame as a B frame! (in fact, it should really an an I frame).
+
+    return [];
+
+    /*
+    let mp4File = parseObject(LargeBuffer.FromFile(path), RootBox);
+    let box = filterBox(mp4File);
+    let mdia = box("moov")("trak")("mdia");
+    let avcC = mdia("minf")("stbl")("stsd")("avc1")("avcC")();
+
+    if(avcC.sequenceParameterSets.length !== 1) {
+        throw new Error(`Multiple sequenceParameterSets`);
+    }
+    let nalObject = avcC.sequenceParameterSets[0].sps.nalObject;
+    let spsObject = nalObject;
+    if(spsObject.type !== "sps") {
+        throw new Error(`sequenceParameterSet not sps`);
+    }
+    let sps = spsObject.nal;
+
+    if(avcC.pictureParameterSets.length !== 1) {
+        throw new Error(`Multiple pictureParameterSets`);
+    }
+    let nalObject0 = avcC.pictureParameterSets[0].pps.nalObject;
+    let spsObject0 = nalObject0;
+    if(spsObject0.type !== "pps") {
+        console.log(spsObject0);
+        throw new Error(`pictureParameterSets not pps`);
+    }
+    let pps = spsObject0.nal;
+
+    return flatten(getFrames(path).map(frame => {
+        let obj = parseObject(frame, NALList(4, sps, pps));
+        return obj.NALs;
+    }));
+    */
+}
+
+function getOpenH264NALs(): NALType[] {
+    let frames: LargeBuffer[] = [];
+    for(let i = 0; i < 1; i++) {
+        let path = `C:/Users/quent/Dropbox/camera/encoder/h264/h264/frame${i}.h264`;
+        frames.push(LargeBuffer.FromFile(path));
+    }
+
+    // Get sps, and pps.
+    return flatten(frames.map(frame => {
+        let obj = parseObject(frame, NALList(4, undefined, undefined));
+        return obj.NALs;
+    }));
+}
+
+
+function encodeFrames(frames: LargeBuffer[]) {
+    // I am going to assume there is no frame reordering. 
+}
+
+// If we take the pps out of the 10fps video, will it still work?
+function modifyMP4(path: string): void {
+    let mp4File = parseObject(LargeBuffer.FromFile(path), RootBox);
+    let box = filterBox(mp4File);
+    let mdia = box("moov")("trak")("mdia");
+    let avcC = mdia("minf")("stbl")("stsd")("avc1")("avcC")();
+
+    /*
+    if(avcC.sequenceParameterSets.length !== 1) {
+        throw new Error(`Multiple sequenceParameterSets`);
+    }
+    let nalObject = avcC.sequenceParameterSets[0].sps.nalObject;
+    let spsObject = nalObject;
+    if(spsObject.type !== "sps") {
+        throw new Error(`sequenceParameterSet not sps`);
+    }
+    let sps = spsObject.nal;
+
+    if(avcC.pictureParameterSets.length !== 1) {
+        throw new Error(`Multiple pictureParameterSets`);
+    }
+
+    avcC.numOfPictureParameterSets = 0;
+    avcC.pictureParameterSets = [];
+
+    let newFileBuffer = writeObject(RootBox, mp4File);
+    */
+    /*
+    writeFileSync(path + ".modified.mp4", Buffer.concat(newFileBuffer.getInternalBufferList()));
+    */
+}
+
+//modifyMP4(`10fps.h264.mp4`);
+
+testWriteFile(`10fps.h264.mp4`);
+
+
+/*
+//let NALs = getMP4H624NALs(`10fps.h264.mp4`);
+let NALs = getOpenH264NALs();
+writeFileSync(`create0.h264.json`, JSON.stringify(NALs[0].nalObject, null, "    "));
+
+for(let i = 0; i < NALs.length; i++) {
+    let NAL = NALs[i];
+    if(NAL.nalObject.type === "slice") {
+        let nal = NAL.nalObject.nal;
+        console.log(`Index ${i}, Type: ${nal.slice_header.sliceTypeStr} Order: ${nal.slice_header.pic_order_cnt_lsb}`);
+    } else {
+        console.log(`Index ${i}, ${NAL.nalObject.type}`);
+    }
+}
+*/
+
+// Hmm... if we re-encode 10fps.h264.mp4, but with less frames, we can verify we understand the display order correctly.
+
+/*
+testReadFile(`youtube.mp4`);
+testReadFile(`youtube.h264.mp4`);
+testReadFile(`youtube2.h264.mp4`);
+testReadFile(`10fps.h264.mp4`);
+*/
 
 
 //todonext

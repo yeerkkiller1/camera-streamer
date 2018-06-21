@@ -1,24 +1,10 @@
-import { SerialObject, _SerialObjectOutput, P, R, SerialObjectChildBase, SerialObjectChildBaseToOutput, isSerialChoose, ChooseContext, isSerialPrimitive, SerialObjectPrimitiveToOutput, SerialPrimitiveMark, ReadContext, LengthObjectSymbol, isSerialObject, SerialObjectChild, SerialObjectChildToOutput, IsArrayInfinite, IsBoxLookup, GetBoxCount, _SerialIntermediateToFinal, SerialIntermediateChildBaseToOutput, isIntermediatePrimitive, SerialIntermediateChildToOutput, WriteContext, SerialObjectPrimitive, isSerialObjectPrimitiveLength, SerialObjectPrimitiveLength, SerialObjectPrimitiveParsing, TemplateToObject, ErasedKey, ErasedKey0, ErasedKey1, ErasedKey2, ErasedKey3 } from "./SerialTypes";
+import { SerialObject, _SerialObjectOutput, P, R, SerialObjectChildBase, SerialObjectChildBaseToOutput, isSerialChoose, ChooseContext, isSerialPrimitive, SerialObjectPrimitiveToOutput, SerialPrimitiveMark, ReadContext, LengthObjectSymbol, isSerialObject, SerialObjectChild, SerialObjectChildToOutput, IsArrayInfinite, IsBoxLookup, GetBoxCount, _SerialIntermediateToFinal, SerialIntermediateChildBaseToOutput, isIntermediatePrimitive, SerialIntermediateChildToOutput, WriteContext, SerialObjectPrimitive, isSerialObjectPrimitiveLength, SerialObjectPrimitiveLength, SerialObjectPrimitiveParsing, TemplateToObject, ErasedKey, ErasedKey0, ErasedKey1, ErasedKey2, ErasedKey3, ErasedKey4, ErasedKey5, ErasedKey6, ErasedKey7, HandlesBitOffsets, ChooseContinue, ErasedKey8, ErasedKey9, ErasedKey10, SerialPrimitiveName } from "./SerialTypes";
 import { LargeBuffer, MaxUInt32 } from "./LargeBuffer";
 import { isArray, assertNumber } from "./util/type";
 import { mapObjectValues, keyBy, flatten } from "./util/misc";
 import { sum } from "./util/math";
 import { textFromUInt32, textToUInt32, writeUInt64BE } from "./util/serialExtension";
-
-/*
-interface SerialObject<CurObject = void> {
-    [key: string]: (
-        SerialObjectChild<CurObject>
-        // Undefined, as apparent if we have a function that sometimes returns a parameter, it is inferred to be
-        //  in the returned object, but as optional and undefined. So adding undefined here makes chooseBox infinitely
-        //  more useful (as it means it doesn't have to specify it's return type every time we have a chooseBox).
-        | undefined
-    );
-}
-type SerialObjectTerminal<CurObject = void> = SerialObjectPrimitive | SerialObjectChoose<CurObject>;
-type SerialObjectChildBase<CurObject = void> = SerialObject<CurObject> | SerialObjectTerminal<CurObject>;
-type SerialObjectChild<CurObject = void> = SerialObjectChildBase<CurObject> | SerialObjectChildBase<CurObject>[];
-*/
+import { WrapWithFunctionName } from "./debug";
 
 export const BoxAnyType = "any";
 
@@ -38,7 +24,7 @@ function _parseBytes<T extends SerialObject>(buffer: LargeBuffer, rootObjectInfo
     let bitOffset = 0;
 
     let output: R<_SerialObjectOutput<T>> = { key: "v", parent: {v: {} as any} };
-    parseObject(rootObjectInfo, output, buffer.getLength());
+    parseObject(rootObjectInfo, output, LargeBuffer.GetBitCount(buffer));
 
     if(bitOffset != 0) {
         console.warn(`Didn't read ${8 - bitOffset} bits. You should probably read all the bits, as the input buffer only contains full bytes.`);
@@ -50,7 +36,7 @@ function _parseBytes<T extends SerialObject>(buffer: LargeBuffer, rootObjectInfo
         return new Error(`${JSON.stringify(String(message))} in path ${debugPath.join(".")} at position ${pPos.v}`);
     }
 
-    function parseObject(object: SerialObject, output: R<_SerialObjectOutput<SerialObject>>, end: number): void {
+    function parseObject(object: SerialObject, output: R<_SerialObjectOutput<SerialObject>>, endBits: number): void {
         /** True if our end should end our own object (so we should warn if we didn't read enough bytes). */
         let isEndSelf = false;
 
@@ -92,12 +78,15 @@ function _parseBytes<T extends SerialObject>(buffer: LargeBuffer, rootObjectInfo
         }
 
         if(isEndSelf) {
-            if(pPos.v < end) {
-                console.warn(debugError(`Did not read all box bytes. Read ${pPos.v - startPos}, should have read ${end - startPos}`).message);
-                pPos.v = end;
+            if(pPos.v * 8 < endBits) {
+                console.warn(debugError(`Did not read all box bits. Read ${(pPos.v - startPos) * 8 + bitOffset} bits, should have read ${endBits - startPos * 8} bits`).message);
+                pPos.v = ~~(endBits / 8);
+                bitOffset = endBits % 8;
             }
-            if(pPos.v > end) {
-                console.warn(debugError(`Read too far. Read ${pPos.v - startPos}, should have read ${end - startPos}`).message);
+            if(pPos.v * 8 > endBits) {
+                console.warn(debugError(`Read too far. Read ${(pPos.v - startPos) * 8 + bitOffset}, should have read ${endBits - startPos * 8} bits`).message);
+                pPos.v = ~~(endBits / 8);
+                bitOffset = endBits % 8;
             }
         }
 
@@ -120,14 +109,21 @@ function _parseBytes<T extends SerialObject>(buffer: LargeBuffer, rootObjectInfo
                 let outputValue: SerialObjectPrimitiveToOutput<typeof child> = {
                     primitive: child,
                     value: {} as any,
-                    [SerialPrimitiveMark]: true
+                    [SerialPrimitiveMark]: true,
+                    [SerialPrimitiveName]: output.key
                 };
 
                 let context: ReadContext = {
                     buffer,
                     pPos,
                     bitOffset,
+                    end: ~~(endBits / 8),
+                    endBits: endBits,
+                    debugKey: output.key
                 };
+                if(bitOffset != 0 && !child[HandlesBitOffsets]) {
+                    throw debugError(`Tried to read byte aligned primitive when there is currently a bit offset. Primitive: ${child.read}`);
+                }
                 try {
                     outputValue.value = child.read(context);
                 } catch(e) {
@@ -135,10 +131,10 @@ function _parseBytes<T extends SerialObject>(buffer: LargeBuffer, rootObjectInfo
                 }
                 bitOffset = context.bitOffset;
                 if(bitOffset > 7) {
-                    throw new Error(`bitOffset did not wrap properly. If it goes beyond 7, it should wrap around to 0.`);
+                    throw debugError(`bitOffset did not wrap properly. If it goes beyond 7, it should wrap around to 0.`);
                 }
                 if(bitOffset < 0) {
-                    throw new Error(`bitOffset is < 0. This is clearly wrong.`);
+                    throw debugError(`bitOffset is < 0. This is clearly wrong.`);
                 }
 
                 // TODO: After we parse the value, change the last key to use the type from the box, instead of the property key.
@@ -148,7 +144,7 @@ function _parseBytes<T extends SerialObject>(buffer: LargeBuffer, rootObjectInfo
                 if(isSerialObjectPrimitiveLength(child)) {
                     let boxInfo = outputValue.value as ReturnType<typeof child.read>;
                     isEndSelf = true;
-                    end = startPos + boxInfo.size;
+                    endBits = (startPos + boxInfo.size) * 8;
                     setOurKey(child[LengthObjectSymbol] || "not possible");
                 }
 
@@ -156,7 +152,7 @@ function _parseBytes<T extends SerialObject>(buffer: LargeBuffer, rootObjectInfo
             }
             else if(isSerialObject(child)) {
                 // Eh... I don't know. We have to any cast, as the output of parseObject doesn't work with parseChildBase. But it should.
-                return parseObject(child, output as any, end);
+                return parseObject(child, output as any, endBits);
             }
             else {
                 let childIsFinished: never = child;
@@ -184,11 +180,19 @@ function _parseBytes<T extends SerialObject>(buffer: LargeBuffer, rootObjectInfo
 
                     let element = child[0];
 
+                    if(bitOffset !== 0) {
+                        throw new Error(`Infinite array requested, but there is a bitOffset.`);
+                    }
+
                     let time = +new Date();
                     let index = 0;
-                    while(pPos.v < end) {
+                    while(pPos.v < ~~(endBits / 8)) {
                         parseChildBase(element, { key: index as any as string, parent: arr as any });
                         index++;
+                    }
+
+                    if(bitOffset !== 0) {
+                        throw new Error(`Infinite array parsing ended with a bitOffset. This is invalid. Offset: ${bitOffset}`);
                     }
 
                     time = +new Date() - time;
@@ -238,14 +242,14 @@ function _parseBytes<T extends SerialObject>(buffer: LargeBuffer, rootObjectInfo
 
                     if(BoxAnyType in boxLookup) {
                         if(Object.keys(boxLookup).length > 1) {
-                            throw debugError(`Box lookup has a box that matches any type, BUT also has boxes that match types. This won't work, which one do you want to match? Box types: ${Object.keys(boxLookup).join(", ")}`);
+                            //throw debugError(`Box lookup has a box that matches any type, BUT also has boxes that match types. This won't work, which one do you want to match? Box types: ${Object.keys(boxLookup).join(", ")}`);
                         }
                     }
 
                     count = count !== undefined ? count : Number.MAX_SAFE_INTEGER;
 
                     let index = 0;
-                    while(pPos.v < end && count --> 0) {
+                    while(pPos.v < ~~(endBits / 8) && count --> 0) {
                         debugPath.push(index.toString());
 
                         let type: string;
@@ -258,6 +262,9 @@ function _parseBytes<T extends SerialObject>(buffer: LargeBuffer, rootObjectInfo
                                 pPos: { ... pPos },
                                 // Eh... I don't know if this will work.
                                 bitOffset,
+                                end: ~~(endBits / 8),
+                                endBits: endBits,
+                                debugKey: output.key,
                             };
                             let header = Box(BoxAnyType).header as SerialObjectPrimitiveLength<{type: string}>;
                             let boxObj = header.read(context);
@@ -307,6 +314,10 @@ function _parseBytes<T extends SerialObject>(buffer: LargeBuffer, rootObjectInfo
     }
 }
 
+function isKeyErased(key: string): boolean {
+    return key === ErasedKey || key === ErasedKey0 || key === ErasedKey1 || key === ErasedKey2 || key === ErasedKey3 || key === ErasedKey4 || key === ErasedKey5 || key === ErasedKey6 || key === ErasedKey7 || key === ErasedKey8 || key === ErasedKey9 || key === ErasedKey10;
+}
+
 function _getFinalOutput<T extends _SerialObjectOutput>(output: T): _SerialIntermediateToFinal<T> {
     return getObjectOutput(output) as any as _SerialIntermediateToFinal<T>;
 
@@ -314,13 +325,16 @@ function _getFinalOutput<T extends _SerialObjectOutput>(output: T): _SerialInter
         let curOutput = {} as _SerialIntermediateToFinal;
         for(let key in output) {
             curOutput[key] = parseChild(output[key] as any);
-            if(key === ErasedKey || key === ErasedKey0 || key === ErasedKey1 || key === ErasedKey2 || key === ErasedKey3) {
+            if(isKeyErased(key)) {
                 let childObj = curOutput[key];
                 if(!childObj || typeof childObj !== "object") {
                     throw new Error(`ErasedKey has invalid type. We were expecting an object (and not null)! Type: ${typeof childObj}`);
                 }
                 delete curOutput[key];
                 for(let childKey in childObj) {
+                    if(childKey in curOutput) {
+                        throw new Error(`Key exists twice in object. ${childKey}`)
+                    }
                     curOutput[childKey] = (childObj as any)[childKey];
                 }
             }
@@ -356,7 +370,13 @@ function _createIntermediateObject<T extends SerialObject>(template: T, data: _S
         let finalOutput = {} as _SerialObjectOutput;
         for(let key in template) {
             let child = template[key];
-            let childData = data[key];
+            
+            let childData;
+            if(isKeyErased(key)) {
+                childData = data;
+            } else {
+                childData = data[key];
+            }
             if(!child) continue;
             finalOutput[key] = parseChild(child, childData);
         }    
@@ -372,12 +392,25 @@ function _createIntermediateObject<T extends SerialObject>(template: T, data: _S
                     console.error(template, data);
                     throw e;
                 }
-                return parseChild(choosenTemplate, data);
+                if(!(ChooseContinue in choosenTemplate)) {
+                    return parseChild(choosenTemplate, data);
+                }
+
+                // TODO: Replace BoxLookup and ArrayInfinite
+                // Indeterminate loop stuff here.
+                let results: ReturnType<typeof parseChild>[] = [];
+                while((choosenTemplate as any)[ChooseContinue]) {
+                    let prevResult = parseChild(choosenTemplate, data);
+                    results.push(prevResult);
+                    choosenTemplate = child(parentData, prevResult as any);
+                }
+                return results as any;
             } else if(isSerialPrimitive(child)) {
                 return {
                     primitive: child,
                     value: data,
                     [SerialPrimitiveMark]: true,
+                    [SerialPrimitiveName]: child[SerialPrimitiveName] || "anonymous"
                 };
             } else {
                 return getIntermediateOutput(child, data as _SerialIntermediateToFinal);
@@ -422,7 +455,11 @@ function _createIntermediateObject<T extends SerialObject>(template: T, data: _S
                         let datum = dataAsBoxes[i];
                         let childBoxReal = childBoxLookup[datum.header.type];
                         if(!childBoxReal) {
-                            throw new Error(`Cannot find type for box ${datum.header.type}. Expected types of ${Object.keys(childBoxLookup).join(", ")}`);
+                            if(childBoxLookup[BoxAnyType]) {
+                                childBoxReal = childBoxLookup[BoxAnyType];
+                            } else {
+                                throw new Error(`Cannot find type for box ${datum.header.type}. Expected types of ${Object.keys(childBoxLookup).join(", ")}`);
+                            }
                         }
 
                         let entry = parseChild(childBoxReal, datum);
@@ -478,13 +515,20 @@ function _writeIntermediate<T extends _SerialObjectOutput>(intermediate: T): Lar
         return `${debugPath.join(".")}`;
     }
 
-    let buffers: LargeBuffer[] = [];
+    return writeIntermediateObject(intermediate);
 
-    writeIntermediateObject(intermediate);
+    // Go get our callstack insert code, and annotate these functions so I can debug callstacks again. And then
+    //  figure out why something is doing bit operations, when I thought I got rid of all bit offsets.
 
-    return new LargeBuffer(flatten(buffers.map(x => x.getInternalBufferList())));
+    function writeIntermediateObject(output: _SerialObjectOutput): LargeBuffer {
+        let curBitSize = 0;
+        let curBuffers: LargeBuffer[] = [];
+        function addBuffer(buf: LargeBuffer): void {
+            let size = LargeBuffer.GetBitCount(buf);
+            curBitSize += size;
+            curBuffers.push(buf);
+        }
 
-    function writeIntermediateObject(output: _SerialObjectOutput): void {
         // Okay... this is all sort of dangerous. It is true that the total size of bytes of the buffers BEFORE
         //  us may change. But inside of us should have a constant size.
         let delayedBufferCalls: {
@@ -507,18 +551,26 @@ function _writeIntermediate<T extends _SerialObjectOutput>(intermediate: T): Lar
             debugPath[ourKeyIndex] = ourKey;
         }
 
-        let startBufferIndex = buffers.length;
+        let startBufferIndex = curBuffers.length;
         for(let key in output) {
             debugPath.push(key);
-            writeChild(output[key] as any);
+            WrapWithFunctionName(key, () => {
+                writeChild(output[key] as any);
+            })();
             debugPath.pop();
         }
 
         function getSizeAfter(): number {
             didSizeAfterCall = true;
             if(curDelayedBufferIndex === null) return 0;
-            let sizeAfter = sum(buffers.slice(curDelayedBufferIndex + 1).map(x => x.getLength()));
-            return sizeAfter;
+
+            let sizeAfterBits = sum(curBuffers.slice(curDelayedBufferIndex + 1).map(x => LargeBuffer.GetBitCount(x)));
+            if(sizeAfterBits % 8 !== 0) {
+                console.log(`getSizeAfter call has bits that don't bit into byte. There were ${sizeAfterBits} bits.`);
+            }
+            let size = sizeAfterBits / 8;
+
+            return size;
         }
 
         inDelayedBufferCall = true;
@@ -528,60 +580,67 @@ function _writeIntermediate<T extends _SerialObjectOutput>(intermediate: T): Lar
             curDelayedBufferIndex = fncObj.bufferIndex;
             cleanup(() => curDelayedBufferIndex = null, () => {
                 let buf = fncObj.callback();
-                copyBufferWriteContext(buffers[fncObj.bufferIndex], buf);
-                buffers[fncObj.bufferIndex] = buf;
+                copyBufferWriteContext(curBuffers[fncObj.bufferIndex], buf);
+                curBuffers[fncObj.bufferIndex] = buf;
             });
         }
-        return;
+
+        let result = new LargeBuffer(curBuffers);
+
+        return result;
 
         function writePrimitive(primitive: SerialObjectPrimitiveToOutput): void {
-            // Lot's of functionality needing in parsing can be removing when writing the data. Except of course
-            //  getSizeAfter, which is strange, but very much needed to make creating boxes reasonably feasible.
+            WrapWithFunctionName(primitive[SerialPrimitiveName], () => {
+                // Lot's of functionality needing in parsing can be removing when writing the data. Except of course
+                //  getSizeAfter, which is strange, but very much needed to make creating boxes reasonably feasible.
 
-            if(isSerialObjectPrimitiveLength(primitive.primitive)) {
-                setOurKey(primitive.primitive[LengthObjectSymbol]);
-            }
-
-            let context: WriteContext = {
-                getSizeAfter,
-                value: primitive.value,
-            };
-            didSizeAfterCall = false;
-            let bufferOutput;
-            try {
                 if(isSerialObjectPrimitiveLength(primitive.primitive)) {
-                    // Eh... cast to any here, as context won't have LengthObject, but that is fine...
-                    bufferOutput = primitive.primitive.write(context as any);
-                } else {
-                    bufferOutput = primitive.primitive.write(context);
+                    setOurKey(primitive.primitive[LengthObjectSymbol]);
                 }
-            } catch(e) {
-                console.error(output);
-                throw e;
-            }
 
-            setBufferWriteContext(bufferOutput, createContext(primitive));
-
-            let bufferIndex = buffers.length;
-            buffers.push(bufferOutput);
-
-            if(!inDelayedBufferCall && didSizeAfterCall) {
-                recalculateBufferDelayed(bufferIndex, () => {
+                let context: WriteContext = {
+                    getSizeAfter,
+                    value: primitive.value,
+                    curBitSize,
+                };
+                didSizeAfterCall = false;
+                let bufferOutput;
+                try {
                     if(isSerialObjectPrimitiveLength(primitive.primitive)) {
                         // Eh... cast to any here, as context won't have LengthObject, but that is fine...
-                        return primitive.primitive.write(context as any);
+                        bufferOutput = primitive.primitive.write(context as any);
                     } else {
-                        return primitive.primitive.write(context);
+                        bufferOutput = primitive.primitive.write(context);
                     }
-                });
-            }
+                } catch(e) {
+                    console.error(output);
+                    throw e;
+                }
+
+                setBufferWriteContext(bufferOutput, createContext(primitive));
+
+                let bufferIndex = curBuffers.length;
+                addBuffer(bufferOutput);
+                let size = LargeBuffer.GetBitCount(bufferOutput);
+
+                if(!inDelayedBufferCall && didSizeAfterCall) {
+                    recalculateBufferDelayed(bufferIndex, () => {
+                        if(isSerialObjectPrimitiveLength(primitive.primitive)) {
+                            // Eh... cast to any here, as context won't have LengthObject, but that is fine...
+                            return primitive.primitive.write(context as any);
+                        } else {
+                            return primitive.primitive.write(context);
+                        }
+                    });
+                }
+            })();
         }
 
         function writeChildBase(child: SerialObjectChildBaseToOutput): void {
             if(isIntermediatePrimitive(child)) {
                 writePrimitive(child);
             } else {
-                writeIntermediateObject(child);
+                addBuffer(writeIntermediateObject(child));
             }
         }
         function writeChild(child: SerialObjectChildToOutput): void {
@@ -725,6 +784,7 @@ export const Box: <T extends string>(type: T) => { header: SerialObjectPrimitive
  *      object data for intermediate parsing.
  */
 export const CodeOnlyValue: <T>(type: T) => SerialObjectPrimitive<T> = <T>(value: T) => ({
+    [HandlesBitOffsets]: true,
     read({pPos, buffer}) {
         return value;
     },

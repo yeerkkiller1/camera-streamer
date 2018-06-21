@@ -2,11 +2,17 @@ import  * as fs from "fs";
 import { Buffer } from "buffer";
 
 import { textFromUInt32, readUInt64BE, textToUInt32, writeUInt64BE } from "./util/serialExtension";
+import { range, flatten } from "./util/misc";
+import { byteToBits, bitsToByte, Bit } from "./Primitives";
+import { isArray } from "./util/type";
 
 
 export const MaxUInt32 = Math.pow(2, 32) - 1;
 
+let id = 0;
+
 export class LargeBuffer {
+    UID = (id++).toString();
     static FromFile(path: string): LargeBuffer {
         // Try a single Buffer
         try {
@@ -41,14 +47,164 @@ export class LargeBuffer {
     }
 
     private bufferStarts: number[];
-    constructor(private buffers: Buffer[]) {
+
+    /** Must be positive */
+    private bitStartOffset = 0;
+    /** Must be negative */
+    private bitEndOffset = 0;
+    private buffers: Buffer[];
+
+    private creator = new Error().stack;
+    constructor(buffers: (Buffer|(Bit[])|LargeBuffer)[]) {
+        // buffers -> this.buffers
+        this.buffers = [];
+
+        // Okay... if there are BitBuffers, or LargeBuffers with bitOffsets, then we convert everything to bits,
+        //  and then create Buffers, and have a bitOffset (which may be 0).
+
+        let outputBuffers: Buffer[] = [];
+
+        if(buffers.some(x => isArray(x) || x instanceof LargeBuffer && (x.bitStartOffset !== 0 || x.bitEndOffset !== 0))) {
+            // Bit offset, convert everything to bits.
+            let bitCount = buffers.reduce((prev, x) => prev + LargeBuffer.GetBitCount(x), 0);
+
+            //console.log(`Combining bits. ${bitCount} bits in total. If that number is really high, it means you have a large file that is offset by a bit amount, OR, some parsing code didn't properly create a new LargeBuffer to reduce bit align data before it was combined with another large buffer. (It also means this will take FOREVER).`);
+
+            let finalBits: Bit[] = [];
+            for(let i = 0; i < buffers.length; i++) {
+                let curBuf = buffers[i];
+                let expectedSize = LargeBuffer.GetBitCount(curBuf);
+                let curBits = LargeBuffer.ToBits(curBuf);
+                if(curBits.length !== expectedSize) {
+                    throw new Error(`Buffer combined incorrectly. Should have been ${expectedSize} bits, was ${curBits.length} bits`);
+                }
+                for(let bit of curBits) {
+                    finalBits.push(bit);
+                }
+            }
+            
+
+            //console.log(`Combining buffers summing to ${finalBits} (${finalBits.length}) to bits, ${this.UID}`);
+
+            let extraBits = finalBits.length % 8;
+            if(extraBits !== 0) {
+                let dummyBits = 8 - extraBits;
+                this.bitEndOffset = -dummyBits;
+                //console.log({bitEndOffset: this.bitEndOffset});
+                for(let i = 0; i < dummyBits; i++) {
+                    finalBits.push(0);
+                }
+            }
+
+            // Now make the bits into bytes.
+            let bytes: number[] = [];
+            let totalBytes = finalBits.length / 8;
+            if(~~totalBytes !== totalBytes) {
+                throw new Error(`impossible`);
+            }
+            for(let i = 0; i < totalBytes; i++) {
+                let bits = finalBits.slice(i * 8, i * 8 + 8);
+                let byte = bitsToByte(bits);
+                bytes.push(byte);
+            }
+
+            // Now bytes into buffers.
+            let bytePos = 0;
+            while(bytePos < bytes.length) {
+                let curByteCount = Math.min(MaxUInt32, bytes.length - bytePos);
+                let curBytes = bytes.slice(bytePos, bytePos + curByteCount);
+                let curBuffer = new Buffer(curBytes);
+
+                outputBuffers.push(curBuffer);
+
+                bytePos += curByteCount;
+            }
+        } else {
+            // Nothing funny, just combine them regularly
+            for(let buf of buffers) {
+                if(isArray(buf)) {
+                    throw new Error(`impossible`);
+                }
+                if(buf instanceof Buffer) {
+                    outputBuffers.push(buf);
+                    continue;
+                }
+                if(buf instanceof LargeBuffer) {
+                    if(buf.bitStartOffset !== 0) {
+                        throw new Error(`impossible`);
+                    }
+                    if(buf.bitEndOffset !== 0) {
+                        throw new Error(`impossible`);
+                    }
+                    for(let b of buf.buffers) {
+                        outputBuffers.push(b);
+                    }
+                    continue;
+                }
+
+                let no: never = buf;
+                throw new Error(`Buffer type not handled`);
+            }
+        }
+        this.buffers = outputBuffers;       
+
         this.bufferStarts = [];
         let pos = 0;
-        for(let i = 0; i < buffers.length; i++) {
+        for(let i = 0; i < this.buffers.length; i++) {
             this.bufferStarts.push(pos);
-            pos += buffers[i].length;
+            pos += this.buffers[i].length;
         }
         this.bufferStarts.push(pos);
+    }
+
+    public static ToBits(buffer: Buffer|(Bit[])|LargeBuffer): Bit[] {
+        if(isArray(buffer)) {
+            return buffer;
+        }
+        if(buffer instanceof Buffer) {
+            return flatten(Array.from(buffer).map(x => byteToBits(x)));
+        }
+        if(buffer instanceof LargeBuffer) {
+            let buffers = buffer.buffers;
+            let bits: Bit[] = flatten(flatten(buffer.buffers.map(x => Array.from(x).map(x => byteToBits(x)))));
+
+            if(buffer.bitStartOffset !== 0) {
+                if(buffer.bitStartOffset < 0) {
+                    throw new Error(`bitStartOffset is negative, it should not be. ${buffer.bitStartOffset}`);
+                }
+                bits = bits.slice(buffer.bitStartOffset);
+            }
+
+            if(buffer.bitEndOffset !== 0) {
+                if(buffer.bitEndOffset > 0) {
+                    throw new Error(`bitEndOffset is positive, it should not be. ${buffer.bitEndOffset}`);
+                }
+                bits = bits.slice(0, buffer.bitEndOffset);
+            }
+            return bits;
+        }
+
+        let no: never = buffer;
+        throw new Error(`Buffer type not handled`);
+    }
+
+    public static GetBitCount(x: Buffer|(Bit[])|LargeBuffer): number {
+        return (
+            (x instanceof Buffer) ? x.length * 8 :
+            (x instanceof LargeBuffer) ? (x.buffers.reduce((prev, x) => prev + x.length * 8, 0) - x.bitStartOffset + x.bitEndOffset) :
+            x.length
+        );
+    }
+
+    private verifyByteAligned() {
+        if(this.bitStartOffset !== 0 || this.bitEndOffset !== 0) {
+            console.log(this.creator);
+            throw new Error(`Buffer still had a bit offset, and so most operations are invalid on it. It can be combined with another BitBuffer in the constructor to make it valid. Buffer had ${LargeBuffer.GetBitCount(this)} bits, UID ${this.UID}`);
+        }
+    }
+    public WriteToFile(path: string) {
+        this.verifyByteAligned();
+
     }
 
     private getBuffer(pos: number): {
@@ -56,6 +212,8 @@ export class LargeBuffer {
         bufferPos: number;
         buffer: Buffer;
     } {
+        this.verifyByteAligned();
+
         // Eh... we shouldn't need a binary search here. Although... maybe...
         let after = this.bufferStarts.findIndex(end => end > pos);
         if(after < 0) {
@@ -72,6 +230,8 @@ export class LargeBuffer {
     }
 
     private getSmallBuffer(pos: number, length: number): Buffer {
+        this.verifyByteAligned();
+
         let buf = new Buffer(length);
         for(let i = 0; i < length; i++) {
             let absolutePos = pos + i;
@@ -83,6 +243,8 @@ export class LargeBuffer {
     }
 
     public getLength() {
+        this.verifyByteAligned();
+
         return this.bufferStarts[this.bufferStarts.length - 1];
     }
 
@@ -108,6 +270,8 @@ export class LargeBuffer {
     }
 
     public slice(start: number, end: number): LargeBuffer {
+        this.verifyByteAligned();
+
         let subBuffers: Buffer[] = [];
         let pos = start;
         while (pos < end) {

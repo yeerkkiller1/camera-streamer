@@ -1,8 +1,17 @@
-import { Box } from "./BinaryCoder";
-import { UInt32String, UInt32, FullBox, UInt64, NumberShifted, Int32, Int16, UInt16, UInt8, bitMapping, CString, LanguageParse, RawData, Int64 } from "./Primitives";
-import { ArrayInfinite, ChooseInfer, BoxLookup } from "./SerialTypes";
+import { Box, CodeOnlyValue, BoxAnyType } from "./BinaryCoder";
+import { UInt32String, UInt32, FullBox, UInt64, NumberShifted, Int32, Int16, UInt16, UInt8, bitMapping, CString, LanguageParse, RawData, Int64, BitPrimitiveN, IntBitN, BitPrimitive, DebugString, DebugStringRemaining } from "./Primitives";
+import { ArrayInfinite, ChooseInfer, BoxLookup, ErasedKey } from "./SerialTypes";
 import { repeat, range } from "./util/misc";
 import { throwValue, assertNumber } from "./util/type";
+import { EmulationPreventionWrapper, NAL_SPS, NALCreate } from "./NAL";
+
+
+export const AnyBox = ChooseInfer()({
+    ... Box(BoxAnyType),
+})({
+    remainingBytes: (obj) => RawData(assertNumber(obj.header.size) - assertNumber(obj.header.headerSize))
+})
+();
 
 // All the boxes have to be SerialObjects... but... we want to keep the underlying types too, so SerialObjectOutput works.
 export const FtypBox = {
@@ -137,7 +146,7 @@ export const EdtsBox = {
 export const MdhdBox = ChooseInfer()({
     ... FullBox("mdhd")
 })({
-    times: ({version}) => (
+    [ErasedKey]: ({version}) => (
         version === 0 ? {
             creation_time: UInt32,
             modification_time: UInt32,
@@ -229,13 +238,93 @@ export const Mp4vBox = {
     notImportant: ArrayInfinite(UInt8),
 };
 
-export const AvcCBox = {
+// https://www.itscj.ipsj.or.jp/sc29/open/29view/29n14632t.doc
+/*
+aligned(8) class AVCDecoderConfigurationRecord {
+	unsigned int(8) configurationVersion = 1;
+	unsigned int(8) AVCProfileIndication;
+	unsigned int(8) profile_compatibility;
+	unsigned int(8) AVCLevelIndication; 
+	bit(6) reserved = ‘111111’b;
+	unsigned int(2) lengthSizeMinusOne; 
+	bit(3) reserved = ‘111’b;
+	unsigned int(5) numOfSequenceParameterSets;
+	for (i=0; i< numOfSequenceParameterSets;  i++) {
+		unsigned int(16) sequenceParameterSetLength ;
+		bit(8*sequenceParameterSetLength) sequenceParameterSetNALUnit;
+	}
+	unsigned int(8) numOfPictureParameterSets;
+	for (i=0; i< numOfPictureParameterSets;  i++) {
+		unsigned int(16) pictureParameterSetLength;
+		bit(8*pictureParameterSetLength) pictureParameterSetNALUnit;
+	}
+	if( profile_idc  ==  100  ||  profile_idc  ==  110  ||
+	    profile_idc  ==  122  ||  profile_idc  ==  144 )
+	{
+		bit(6) reserved = ‘111111’b;
+		unsigned int(2) chroma_format;
+		bit(5) reserved = ‘11111’b;
+		unsigned int(3) bit_depth_luma_minus8;
+		bit(5) reserved = ‘11111’b;
+		unsigned int(3) bit_depth_chroma_minus8;
+		unsigned int(8) numOfSequenceParameterSetExt;
+		for (i=0; i< numOfSequenceParameterSetExt; i++) {
+			unsigned int(16) sequenceParameterSetExtLength;
+			bit(8*sequenceParameterSetExtLength) sequenceParameterSetExtNALUnit;
+		}
+    }
+}
+*/
+
+
+// https://github.com/videolan/vlc/blob/master/modules/packetizer/h264_nal.c
+export const AvcCBox = ChooseInfer()({
     ... Box("avcC"),
+})({
     configurationVersion: UInt8,
 	AVCProfileIndication: UInt8,
 	profile_compatibility: UInt8,
     AVCLevelIndication: UInt8,
-    notImportant: ArrayInfinite(UInt8),
+})({
+    reserved0: BitPrimitiveN(6),
+    lengthSizeMinusOne: IntBitN(2),
+})({
+
+    reserved1: BitPrimitiveN(3),
+    numOfSequenceParameterSets: IntBitN(5),
+})({
+    sequenceParameterSets: ({numOfSequenceParameterSets, lengthSizeMinusOne}) => {
+        //console.log({lengthSizeMinusOne});
+        // Hmm... but we have a nal length prefix of size 2. Always? I am not sure what lengthSizeMinusOne
+        //  is even used for, but it appears to be wrong?
+        lengthSizeMinusOne = 2 - 1;
+        return repeat({sps: NALCreate(2, undefined, undefined)}, numOfSequenceParameterSets);
+    },
+    [ErasedKey]: CodeOnlyValue({test: 5}),
+})
+//*
+({
+    numOfPictureParameterSets: IntBitN(8),
+})({
+    pictureParameterSets: ({numOfPictureParameterSets}) => {
+        return repeat({pps: NALCreate(2, undefined, undefined)}, numOfPictureParameterSets);
+    }
+})
+//*/
+({
+    remainingBytes: ArrayInfinite(UInt8)
+})
+();
+
+/*
+class PixelAspectRatioBox extends Box(‘pasp’){
+   
+}
+*/
+export const PaspBox = {
+    ... Box("pasp"),
+    hSpacing: UInt32,
+    vSpacing: UInt32,
 };
 
 export const Avc1Box = {
@@ -260,9 +349,14 @@ export const Avc1Box = {
     depth: UInt16,
     pre_defined2: Int16,
 
-    config: [AvcCBox],
+    boxes: BoxLookup(AvcCBox, PaspBox),
 
-    notImportant: ArrayInfinite(UInt8),
+    //extension: [MPEG4ExtensionDescriptorsBox],
+
+    
+    //notImportant: ArrayInfinite(UInt8),
+
+    //output: DebugStringRemaining
 };
 
 export const StsdBox = ChooseInfer()({
@@ -353,7 +447,7 @@ export const StblBox = {
         StszBox,
         StcoBox,
         StssBox,
-        CttsBox,
+        CttsBox
     ),
 };
 
@@ -362,7 +456,7 @@ export const MinfBox = {
     boxes: BoxLookup(
         VmhdBox,
         DinfBox,
-        StblBox,
+        StblBox
     ),
 };
 
@@ -371,7 +465,7 @@ export const MdiaBox = {
     boxes: BoxLookup(
         MdhdBox,
         HdlrBox,
-        MinfBox,
+        MinfBox
     ),
 };
 
@@ -380,7 +474,7 @@ export const TrakBox = {
     boxes: BoxLookup(
         TkhdBox,
         EdtsBox,
-        MdiaBox,
+        MdiaBox
     ),
 };
 
@@ -444,7 +538,7 @@ export const MoovBox = {
         MvhdBox,
         TrakBox,
         UdtaBox,
-        MvexBox,
+        MvexBox
     ),
 };
 
@@ -462,7 +556,7 @@ export const FreeBox = ChooseInfer()({
 })
 ();
 
-export const EmsgBox = {
+export const EmsgBox = ChooseInfer()({
     ... FullBox("emsg"),
 
     scheme_id_uri: CString,
@@ -472,8 +566,20 @@ export const EmsgBox = {
     event_duration: UInt32,
     id: UInt32,
 
-    message_data: ArrayInfinite(UInt8),
-};
+    //message_data: ArrayInfinite(UInt8),
+})({
+    message_data: (obj) => {
+        let lenLeft = (
+            assertNumber(obj.header.size)
+            - assertNumber(obj.header.headerSize)
+            - obj.scheme_id_uri.length - 1
+            - obj.value.length - 1
+            - 4 - 4 - 4 - 4 - 4
+        );
+        return DebugString(lenLeft);
+    }
+})
+();
 
 // From the ISO/IEC 14496-12:2015 version of the spec, as the ISO/IEC 14496-12:2008 one is outdated.
 export const SidxReference = {
@@ -615,6 +721,10 @@ export const MoofBox = {
     ),
 };
 
+//todonext
+// Create "catchall" box, so we can debug from the top-down, by making sure it works with the catchall box (which also parses to a type of any),
+//  and then drill down until we find the problem.
+
 export const RootBox = {
     boxes: BoxLookup(
         FtypBox,
@@ -624,7 +734,7 @@ export const RootBox = {
         FreeBox,
         EmsgBox,
         SidxBox,
-        MoofBox,
+        MoofBox
     ),
 };
 

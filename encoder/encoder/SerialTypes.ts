@@ -44,6 +44,7 @@ export function IsArrayInfinite(arr: SerialObjectChild[]): boolean {
     return ArrayInfiniteSymbol in arr;
 }
 
+
 export type P<T> = { v: T };
 export type R<T> = { key: string; parent: { [key: string]: T } };
 
@@ -68,8 +69,12 @@ export interface ReadContext {
     */
     bitOffset: number;
     pPos: P<number>;
+    end: number;
+    endBits: number;
+    debugKey: string;
 }
 export interface WriteContext<T = Types.AnyAll> {
+    curBitSize: number;
     value: T;
     // Gets the size (in bytes) in the current object after our key. Also prevents our value or key from being in the curObject for the siblings after us.
     //  Ugh... really just for the box headers. Very unfortunate. I think the more correct way to do this would be to allow rearranging the
@@ -79,9 +84,16 @@ export interface WriteContext<T = Types.AnyAll> {
     getSizeAfter(): number;
 }
 
+export const HandlesBitOffsets = Symbol();
+
+export const SerialPrimitiveName = Symbol();
+export type SerialPrimitiveName = typeof SerialPrimitiveName;
+
 export const LengthObjectSymbol = Symbol();
 export type LengthObject = { size: number };
 export type SerialObjectPrimitive<T = Types.AnyAll> = {
+    [HandlesBitOffsets]?: true;
+    [SerialPrimitiveName]?: string;
     read(context: ReadContext): T;
     write(context: WriteContext<T>): LargeBuffer;
 };
@@ -96,16 +108,20 @@ export function isSerialObjectPrimitiveLength<T>(obj: SerialObjectPrimitiveParsi
 }
 
 export type ChooseContext<CurObject> = CurObject;
-/*
-interface ChooseContext<CurObject> {
-    // Has the values parsed in the keys before us. Use ChooseInfer to populate this properly.
-    curObject: CurObject;
 
-    buffer: LargeBuffer;
-    pos: number;
-}
-*/
-export type SerialObjectChoose<CurObject = any> = (context: ChooseContext<CurObject>) => SerialObjectChild<CurObject>;
+// If the returned object from SerialObjectChoose has this as key, and a value of true, we call the function again,
+//  keeping the results in an array. This isn't really understood by TemplateToObject, because
+//  it is too difficult to, but the parser understands it. If ChooseContinue is false
+//  we stop, and don't use the result for anything.
+export const ChooseContinue = Symbol();
+
+export type SerialObjectChoose<CurObject = any> = (
+    context: ChooseContext<CurObject>,
+    // Only passed if ChooseContine was passed last time.
+    prevResult?: SerialObjectChild
+) => SerialObjectChild<CurObject>;
+// This should be on the return type, but adding it crashes the TS compiler, so...
+// & { [ChooseContinue]?: boolean };
 
 // #region ChooseInfer types
 
@@ -137,6 +153,7 @@ export type SerialObjectPrimitiveToOutput<T extends SerialObjectPrimitive = Seri
     primitive: T;
     value: ReturnType<T["read"]>;
     [SerialPrimitiveMark]: true;
+    [SerialPrimitiveName]: string;
 };
 export function isIntermediatePrimitive<T extends SerialObjectPrimitive>(obj: SerialObjectChildBaseToOutput<any>): obj is SerialObjectPrimitiveToOutput<T> {
     return SerialPrimitiveMark in obj;
@@ -184,7 +201,8 @@ export type SerializeIntermediateTerminalToOutput<T extends SerializeTerminalToO
 
 export type SerialIntermediateChildBaseToOutput<T extends SerialObjectChildBaseToOutput = SerialObjectChildBaseToOutput> = (
     T extends SerializeTerminalToOutput<SerialObjectTerminal> ? SerializeIntermediateTerminalToOutput<T> :
-    T extends _SerialObjectOutput<SerialObject> ? { [key in keyof T]: SerialIntermediateChildToOutput<T[key]> } :
+    T extends _SerialObjectOutput<SerialObject> ? _SerialIntermediateToFinal<T> :
+    // T extends _SerialObjectOutput<SerialObject> ?  { [key in keyof T]: SerialIntermediateChildToOutput<T[key]> } :
     never
 );
 
@@ -208,20 +226,46 @@ export const ErasedKey0 = "_ErasedKeySpecial0" as "_ErasedKeySpecial0";
 export const ErasedKey1 = "_ErasedKeySpecial1" as "_ErasedKeySpecial1";
 export const ErasedKey2 = "_ErasedKeySpecial2" as "_ErasedKeySpecial2";
 export const ErasedKey3 = "_ErasedKeySpecial3" as "_ErasedKeySpecial3";
-type EraseKey<T extends { [key: string]: any } & { [ErasedKey]?: any, [ErasedKey0]?: any, [ErasedKey1]?: any, [ErasedKey2]?: any, [ErasedKey3]?: any }> = (
-    { [key in RemoveKey<keyof T, typeof ErasedKey | typeof ErasedKey0 | typeof ErasedKey1 | typeof ErasedKey2 | typeof ErasedKey3>]: T[key] }
+export const ErasedKey4 = "_ErasedKeySpecial4" as "_ErasedKeySpecial4";
+export const ErasedKey5 = "_ErasedKeySpecial5" as "_ErasedKeySpecial5";
+export const ErasedKey6 = "_ErasedKeySpecial6" as "_ErasedKeySpecial6";
+export const ErasedKey7 = "_ErasedKeySpecial7" as "_ErasedKeySpecial7";
+export const ErasedKey8 = "_ErasedKeySpecial8" as "_ErasedKeySpecial8";
+export const ErasedKey9 = "_ErasedKeySpecial9" as "_ErasedKeySpecial9";
+export const ErasedKey10 = "_ErasedKeySpecial10" as "_ErasedKeySpecial10";
+type EraseKey<T extends { [key: string]: any } & { [ErasedKey]?: any, [ErasedKey0]?: any, [ErasedKey1]?: any, [ErasedKey2]?: any, [ErasedKey3]?: any; [ErasedKey4]?: any; [ErasedKey5]?: any; [ErasedKey6]?: any; [ErasedKey7]?: any; [ErasedKey8]?: any; [ErasedKey9]?: any; [ErasedKey10]?: any; }> = (
+    { [key in RemoveKey<keyof T, typeof ErasedKey | typeof ErasedKey0 | typeof ErasedKey1 | typeof ErasedKey2 | typeof ErasedKey3 | typeof ErasedKey4 | typeof ErasedKey5 | typeof ErasedKey6 | typeof ErasedKey7 | typeof ErasedKey8 | typeof ErasedKey9 | typeof ErasedKey10>]: T[key] }
     & (typeof ErasedKey extends keyof T ? T[typeof ErasedKey] : {})
     & (typeof ErasedKey0 extends keyof T ? T[typeof ErasedKey0] : {})
     & (typeof ErasedKey1 extends keyof T ? T[typeof ErasedKey1] : {})
     & (typeof ErasedKey2 extends keyof T ? T[typeof ErasedKey2] : {})
     & (typeof ErasedKey3 extends keyof T ? T[typeof ErasedKey3] : {})
+    & (typeof ErasedKey4 extends keyof T ? T[typeof ErasedKey4] : {})
+    & (typeof ErasedKey5 extends keyof T ? T[typeof ErasedKey5] : {})
+    & (typeof ErasedKey6 extends keyof T ? T[typeof ErasedKey6] : {})
+    & (typeof ErasedKey7 extends keyof T ? T[typeof ErasedKey7] : {})
+    & (typeof ErasedKey8 extends keyof T ? T[typeof ErasedKey8] : {})
+    & (typeof ErasedKey9 extends keyof T ? T[typeof ErasedKey9] : {})
+    & (typeof ErasedKey10 extends keyof T ? T[typeof ErasedKey10] : {})
+);
+
+type ApplyEraseKeyChild<T extends SerialIntermediateChildToOutput> = (
+    T extends (infer U)[] ? U[] :
+    T extends _SerialObjectOutput ? ApplyEraseKey<T> :
+    T
+);
+type ApplyEraseKeyInner<T extends _SerialIntermediateToFinal> = {
+    [key in keyof T]: ApplyEraseKeyChild<T[key]>
+};
+type ApplyEraseKey<T extends _SerialIntermediateToFinal> = (
+    EraseKey<ApplyEraseKeyInner<T>>
 );
 
 export type _SerialIntermediateToFinal_Inner<T extends _SerialObjectOutput = _SerialObjectOutput> = {
     [key in keyof T]: SerialIntermediateChildToOutput<T[key]>;
 };
 export type _SerialIntermediateToFinal<T extends _SerialObjectOutput = _SerialObjectOutput> = (
-    _SerialIntermediateToFinal_Inner<EraseKey<T>>
+    ApplyEraseKey<_SerialIntermediateToFinal_Inner<T>>
 );
 
 // #endregion
