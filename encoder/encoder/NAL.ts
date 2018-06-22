@@ -1,8 +1,28 @@
-import { SerialObjectPrimitive, ArrayInfinite, SerialObjectPrimitiveLength, LengthObjectSymbol, ChooseInfer, SerialObject, _SerialObjectOutput, TemplateToObject, ReadContext, ErasedKey, ErasedKey0, ErasedKey1, ErasedKey2, ErasedKey3, HandlesBitOffsets, ErasedKey4, ChooseContinue, ErasedKey5, ErasedKey6, ErasedKey7, ErasedKey8, ErasedKey9, ErasedKey10 } from "./SerialTypes";
+import { SerialObjectPrimitive, ArrayInfinite, SerialObjectPrimitiveLength, LengthObjectSymbol, ChooseInfer, SerialObject, _SerialObjectOutput, TemplateToObject, ReadContext, ErasedKey, ErasedKey0, ErasedKey1, ErasedKey2, ErasedKey3, HandlesBitOffsets, ErasedKey4, ErasedKey5, ErasedKey6, ErasedKey7, ErasedKey8, ErasedKey9, ErasedKey10 } from "./SerialTypes";
 import { LargeBuffer } from "./LargeBuffer";
 import { RawData, UInt8, bitMapping, VoidParse, PeekPrimitive, byteToBits, bitsToByte, UInt16, UInt64, UInt32, CString, DebugString, readBit, UExpGolomb, BitPrimitive, BitPrimitiveN, IntBitN, SExpGolomb, AlignmentBits, Bit, RemainingData } from "./Primitives";
-import { CodeOnlyValue, parseObject, writeObject } from "./BinaryCoder";
+import { CodeOnlyValue, parseObject, writeObject, Iterate } from "./BinaryCoder";
 import { repeat, range } from "./util/misc";
+
+/*
+// C:\Users\quent\Downloads\jm19.0\JM\ldecod\src\parset.c
+// c:\Users\quent\Downloads\jm19.0\JM\ldecod\inc\defines.h
+//AVC Profile IDC definitions
+typedef enum {
+  NO_PROFILE     =  0,       //!< disable profile checking for experimental coding (enables FRExt, but disables MV)
+  FREXT_CAVLC444 = 44,       //!< YUV 4:4:4/14 "CAVLC 4:4:4"
+  BASELINE       = 66,       //!< YUV 4:2:0/8  "Baseline"
+  MAIN           = 77,       //!< YUV 4:2:0/8  "Main"
+  EXTENDED       = 88,       //!< YUV 4:2:0/8  "Extended"
+  FREXT_HP       = 100,      //!< YUV 4:2:0/8  "High"
+  FREXT_Hi10P    = 110,      //!< YUV 4:2:0/10 "High 10"
+  FREXT_Hi422    = 122,      //!< YUV 4:2:2/10 "High 4:2:2"
+  FREXT_Hi444    = 244,      //!< YUV 4:4:4/14 "High 4:4:4"
+  MVC_HIGH       = 118,      //!< YUV 4:2:0/8  "Multiview High"
+  STEREO_HIGH    = 128       //!< YUV 4:2:0/8  "Stereo High"
+} ProfileIDC;
+*/
+
 
 // There are NALs without start codes, as mentioned in: https://msdn.microsoft.com/en-us/library/windows/desktop/dd757808(v=vs.85).aspx,
 //  So they are length prefixed with a 4 byte length. Technically the length isn't part of the NAL... but whatever...
@@ -14,7 +34,6 @@ export function NALLength(sizeByteLength = 4): SerialObjectPrimitiveLength<{}> {
             let { buffer, pPos } = context;
 
             let size = buffer.readUIntBE(pPos.v, sizeByteLength) + sizeByteLength;
-            console.log(`Nal size ${size}`);
             pPos.v += sizeByteLength;
 
             return { size };
@@ -48,7 +67,7 @@ export function EmulationPreventionWrapper<T extends SerialObject>(totalLength: 
             for(let i = 0; i < totalLength; i++) {
                 // If we read 0x000003, skip the 3
                 if(i > 2 && rawBytes[i] === 3 && rawBytes[i - 1] === 0 && rawBytes[i - 2] === 0) {
-                    console.log(`EmulationPrevention did something at byte ${i}`);
+                    //console.log(`EmulationPrevention did something at byte ${i}`);
                     let nextByte = rawBytes[i + 1];
                     if(nextByte != 0 && nextByte != 1 && nextByte != 2 && nextByte != 3) {
                         throw new Error(`EmulationPreventation byte with no purpose. It was used to escape: ${nextByte}`);
@@ -61,7 +80,7 @@ export function EmulationPreventionWrapper<T extends SerialObject>(totalLength: 
             // TODO: We also need to parse some end sequences. Something about cabac_zero_word, and trailing cabac_zero_words and stuff like that...
 
             
-            console.log(`Emulation from ${rawBytes.length} to ${finalBytes.length}`);
+            //console.log(`Emulation from ${rawBytes.length} to ${finalBytes.length}`);
 
             pPos.v += totalLength;
 
@@ -79,7 +98,7 @@ export function EmulationPreventionWrapper<T extends SerialObject>(totalLength: 
             let realBytes: number[] = [];
             //todonext
             // How is buffer becoming not bit aligned here? We should be eating up the remaining data?
-            console.log(`Bit count ${LargeBuffer.GetBitCount(buf)}`);
+            //console.log(`Bit count ${LargeBuffer.GetBitCount(buf)}`);
 
             let len = buf.getLength();
             for(let i = 0; i < len; i++) {
@@ -90,7 +109,7 @@ export function EmulationPreventionWrapper<T extends SerialObject>(totalLength: 
             let finalBytes: number[] = [];
             for(let i = 0; i < realBytes.length; i++) {
                 if(i > 2 && realBytes[i - 2] === 0 && realBytes[i - 1] === 0 && (realBytes[i] & 0b11111100) === 0) {
-                    console.log(`EmulationPrevention activated something at byte ${i}`);
+                    //console.log(`EmulationPrevention activated something at byte ${i}`);
                     finalBytes.push(0x03);
                 }
                 finalBytes.push(realBytes[i]);
@@ -168,24 +187,6 @@ export const parserTest = {
     f: BitPrimitive,
 };
 
-/*
-// C:\Users\quent\Downloads\jm19.0\JM\ldecod\src\parset.c
-// c:\Users\quent\Downloads\jm19.0\JM\ldecod\inc\defines.h
-//AVC Profile IDC definitions
-typedef enum {
-  NO_PROFILE     =  0,       //!< disable profile checking for experimental coding (enables FRExt, but disables MV)
-  FREXT_CAVLC444 = 44,       //!< YUV 4:4:4/14 "CAVLC 4:4:4"
-  BASELINE       = 66,       //!< YUV 4:2:0/8  "Baseline"
-  MAIN           = 77,       //!< YUV 4:2:0/8  "Main"
-  EXTENDED       = 88,       //!< YUV 4:2:0/8  "Extended"
-  FREXT_HP       = 100,      //!< YUV 4:2:0/8  "High"
-  FREXT_Hi10P    = 110,      //!< YUV 4:2:0/10 "High 10"
-  FREXT_Hi422    = 122,      //!< YUV 4:2:2/10 "High 4:2:2"
-  FREXT_Hi444    = 244,      //!< YUV 4:4:4/14 "High 4:4:4"
-  MVC_HIGH       = 118,      //!< YUV 4:2:0/8  "Multiview High"
-  STEREO_HIGH    = 128       //!< YUV 4:2:0/8  "Stereo High"
-} ProfileIDC;
-*/
 
 const hrd_parameters = ChooseInfer()({
     cpb_cnt_minus1: UExpGolomb,
@@ -197,12 +198,20 @@ const hrd_parameters = ChooseInfer()({
         cpb_size_value_minus1: UExpGolomb,
         cbr_flag: BitPrimitive,
     })),
+    /*
+    [ErasedKey]: ({cpb_cnt_minus1}) => range(0, cpb_cnt_minus1 + 1).map(() => ({
+        bit_rate_value_minus1: UExpGolomb,
+        cpb_size_value_minus1: UExpGolomb,
+        cbr_flag: BitPrimitive,
+    })),
+    */
     initial_cpb_removal_delay_length_minus1: IntBitN(5),
     cpb_removal_delay_length_minus1: IntBitN(5),
     dpb_output_delay_length_minus1: IntBitN(5),
     time_offset_length: IntBitN(5),
 })
 ();
+
 
 // https://github.com/iizukanao/node-rtsp-rtmp-server/blob/master/h264.coffee
 //  The spec does the worst possible job explaining this flag. It uses it in hundreds of places, and never explicitly defines it. wtf.
@@ -218,7 +227,7 @@ function getChromaArrayType(sps: TemplateToObject<typeof NAL_SPS>): number {
 }
 
 // #region nal_unit_type = 7
-/** nal_unit_type = 7 */
+export type SPS = TemplateToObject<typeof NAL_SPS>;
 export const NAL_SPS = ChooseInfer()({
     profile_idc: IntBitN(8),
     constraint_set0_flag: BitPrimitive,
@@ -232,9 +241,7 @@ export const NAL_SPS = ChooseInfer()({
     reserved_zero_2bits_check: InvariantCheck(({reserved_zero_2bits}) => reserved_zero_2bits[0] === 0 && reserved_zero_2bits[1] === 0),
     level_idc: IntBitN(8),
     seq_parameter_set_id: UExpGolomb,
-})
-///*
-({
+})({
     [ErasedKey]: (({profile_idc}) => {
         if(
             profile_idc == 100 || profile_idc == 110 ||
@@ -341,8 +348,7 @@ export const NAL_SPS = ChooseInfer()({
         };
     },
     nal_hrd_parameters_present_flag: BitPrimitive,
-})
-({
+})({
     data0: ({nal_hrd_parameters_present_flag}) => {
         if(!nal_hrd_parameters_present_flag) return {};
         return { hrd_parameters };
@@ -368,7 +374,7 @@ export const NAL_SPS = ChooseInfer()({
 // #endregion
 
 // #region nal_unit_type = 8
-/** nal_unit_type = 8 */
+export type PPS = TemplateToObject<typeof NAL_PPS>;
 export const NAL_PPS = ChooseInfer()({
     pic_parameter_set_id: UExpGolomb,
     seq_parameter_set_id: UExpGolomb,
@@ -428,7 +434,6 @@ const FunnyNumberType: SerialObjectPrimitive<number> = {
 };
 
 // #region nal_unit_type = 6
-/** nal_unit_type = 6 */
 const NAL_SEI = ChooseInfer()({
     payloadType: FunnyNumberType,
     payloadSize: FunnyNumberType,
@@ -472,28 +477,6 @@ function getSliceType(type: number): SliceTypeStr {
     }
 }
 
-function iterate<
-    F extends () => SerialObject
->(
-    generate: F
-) {
-    type ResultObject = TemplateToObject<ReturnType<F>> | undefined;
-    //return function(continueCondition: (last: ResultObject) => boolean): ReturnType<F>[] {
-    return function(continueCondition: (last: ResultObject) => boolean): ReturnType<F>[] {
-        let iterateFnc = (parentData: void, lastResult: ResultObject) => {
-            if(!continueCondition(lastResult)) {
-                return {
-                    [ChooseContinue]: false
-                };
-            }
-            let entry = generate();
-            (entry as any)[ChooseContinue] = true;
-            return entry;
-        };
-        return iterateFnc as any;
-    };
-}
-
 function IdrPicFlag(nal_unit_type: number) {
     return nal_unit_type === 5 ? 1 : 0;
 }
@@ -501,13 +484,12 @@ function IdrPicFlag(nal_unit_type: number) {
 function ref_pic_list_modification(slice_type: number) {
     return ChooseInfer()({
         [ErasedKey]: () => {
-            console.log("ref_pic_list_modification", slice_type);
             let list = ChooseInfer()({
                 ref_pic_list_modification_flag_l0: BitPrimitive,
             })({
                 list: ({ref_pic_list_modification_flag_l0}) => {
                     if(ref_pic_list_modification_flag_l0) {
-                        return iterate(() => {
+                        return Iterate(() => {
                             return ChooseInfer()({
                                 modification_of_pic_nums_idc: UExpGolomb,
                             })({
@@ -568,7 +550,7 @@ function dec_ref_pic_marking(nal_unit_type: number) {
         })({
             [ErasedKey]: ({adaptive_ref_pic_marking_mode_flag}) => {
                 if(adaptive_ref_pic_marking_mode_flag) {
-                    return iterate(() => {
+                    return Iterate(() => {
                         return ChooseInfer()({
                             memory_management_control_operation: UExpGolomb,
                         })({
@@ -866,12 +848,14 @@ function slice_data(nal_unit_type: number, sps: TemplateToObject<typeof NAL_SPS>
             }
             return {};
         }
+    })({
+        remaining: RemainingData(BitPrimitive),
     })
     ();
 }
 
 // #region nal_unit_type = 1, 5
-/** nal_unit_type = 1, 5 */
+// nal_unit_type = 1, 5
 function NAL_SLICE_LAYER_WITHOUT_PARTITIONING(nal_unit_type: number, sps: TemplateToObject<typeof NAL_SPS>, pps: TemplateToObject<typeof NAL_PPS>, nal_ref_idc: number) {
     return ChooseInfer()({
         slice_header: slice_header(nal_unit_type, sps, pps, nal_ref_idc),
@@ -882,7 +866,8 @@ function NAL_SLICE_LAYER_WITHOUT_PARTITIONING(nal_unit_type: number, sps: Templa
 }
 // #endregion
 
-
+export type NALTemplate = ReturnType<typeof NALCreate>;
+export type NALType = TemplateToObject<NALTemplate>;
 export function NALCreate(sizeByteLength: number, sps: TemplateToObject<typeof NAL_SPS>|undefined, pps: TemplateToObject<typeof NAL_PPS>|undefined) {
     return ChooseInfer()({
         NALLength: NALLength(sizeByteLength)
@@ -978,7 +963,7 @@ export function NALCreate(sizeByteLength: number, sps: TemplateToObject<typeof N
     })({
         nalObject: ({NALLength, bitHeader0, extension}) => {
             let payloadLength = NALLength.size - extension.nalUnitHeaderBytes - sizeByteLength;
-            console.log(`Start ${bitHeader0.nal_unit_type}, length ${payloadLength}`);
+            //console.log(`Start ${bitHeader0.nal_unit_type}, length ${payloadLength}`);
             if(bitHeader0.nal_unit_type === 7) {
                 return {type: CodeOnlyValue("sps" as "sps"), nal: EmulationPreventionWrapper(payloadLength, NAL_SPS)};
             } else if(bitHeader0.nal_unit_type === 8) {
@@ -1003,8 +988,32 @@ export function NALCreate(sizeByteLength: number, sps: TemplateToObject<typeof N
 
 export function NALList(sizeByteLength: number, sps: TemplateToObject<typeof NAL_SPS>|undefined, pps: TemplateToObject<typeof NAL_PPS>|undefined) {
     return {
-        NALs: ArrayInfinite(NALCreate(sizeByteLength, sps, pps))
-    };
-};
+        NALs: (
+            Iterate<() => NALTemplate>(
+                () => NALCreate(sizeByteLength, sps, pps)
+            )(
+                last => {
+                    if(last === undefined) return true;
+                    if(last.nalObject.type === "sps") {
+                        if(sps !== undefined) {
+                            console.warn(`When parsing the NALList we found an SPS. However, we already had an sps. Either we found two, or we found one, and you also passed one. We will use the latest sps we find.`);
+                        }
+                        sps = last.nalObject.nal;
+                        console.log("found sps");
+                    }
 
-export type NALType = TemplateToObject<ReturnType<typeof NALCreate>>;
+                    if(last.nalObject.type === "pps") {
+                        if(pps !== undefined) {
+                            console.warn(`When parsing the NALList we found an PPS. However, we already had an pps. Either we found two, or we found one, and you also passed one. We will use the latest pps we find.`);
+                        }
+                        pps = last.nalObject.nal;
+                        console.log("found pps");
+                    }
+                    return true;
+                }
+            )
+        )
+    };
+    // return { NALs: ArrayInfinite(NALCreate(sizeByteLength, sps, pps)) };
+};
+//*/

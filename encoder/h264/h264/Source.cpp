@@ -107,6 +107,101 @@ void main2() {
 //todonext
 //ugh... read about h264 enough to understand how to get the output of here, and maybe enough to see what is wrong with the ffmpeg data.
 
+void writeNALUnits(SFrameBSInfo& info, std::ofstream& outputFile) {
+
+	printf("size: %d, frame type %d\n", info.iFrameSizeInBytes, info.eFrameType);
+	printf("iLayerNum: %d, uiTimeStamp: %lld\n", info.iLayerNum, info.uiTimeStamp);
+	for (int i = 0; i < info.iLayerNum; i++) {
+		//for (int i = 0; i < 1; i++) {
+		SLayerBSInfo layerInfo = info.sLayerInfo[i];
+
+		int pos = 0;
+		for (int j = 0; j < layerInfo.iNalCount; j++) {
+			int len = layerInfo.pNalLengthInByte[j];
+
+			unsigned char* buf = layerInfo.pBsBuf + pos;
+			pos += len;
+
+			if (buf[0] != 0) {
+				throw "invalid start code";
+			}
+			if (buf[1] != 0) {
+				throw "invalid start code";
+			}
+			if (buf[2] != 0) {
+				throw "invalid start code";
+			}
+			if (buf[3] != 1) {
+				throw "invalid start code";
+			}
+			len = len - 4;
+			char b1 = len >> 24;
+			char b2 = len << 8 >> 24;
+			char b3 = len << 16 >> 24;
+			char b4 = len << 24 >> 24;
+			const char lenBytes[4]{ b1, b2, b3, b4 };
+			outputFile.write(lenBytes, 4);
+			outputFile.write((const char*)buf + 4, len);
+		}
+		
+
+		// Ignore the start code, and write a length prefixed start code.
+		/*
+		//if (i == 0) {
+			if (layerInfo.pBsBuf[0] != 0) {
+				throw "invalid start code";
+			}
+			if (layerInfo.pBsBuf[1] != 0) {
+				throw "invalid start code";
+			}
+			if (layerInfo.pBsBuf[2] != 0) {
+				throw "invalid start code";
+			}
+			if (layerInfo.pBsBuf[3] != 1) {
+				throw "invalid start code";
+			}
+			len = len - 4;
+			char b1 = len >> 24;
+			char b2 = len << 8 >> 24;
+			char b3 = len << 16 >> 24;
+			char b4 = len << 24 >> 24;
+			const char lenBytes[4]{ b1, b2, b3, b4 };
+			outputFile.write(lenBytes, 4);
+			outputFile.write((const char*)layerInfo.pBsBuf + 4, len);
+		//}
+		/*
+		else {
+			char b1 = len >> 24;
+			char b2 = len << 8 >> 24;
+			char b3 = len << 16 >> 24;
+			char b4 = len << 24 >> 24;
+			const char lenBytes[4]{ b1, b2, b3, b4 };
+			outputFile.write(lenBytes, 4);
+			outputFile.write((const char*)layerInfo.pBsBuf, len);
+		}
+		*/
+		//*/
+
+		//outputFile.write((const char*)layerInfo.pBsBuf, len);
+
+		//outputFile.write(test, 600);
+		printf("pBsBuf %lld, iNalCount: %d, pNalLengthInByte: %d, eFrameType: %d, sub seq id: %d, uiLayerType: %d, uiQualityId: %d, uiSpatialId: %d, uiTemporalId: %d\n",
+			layerInfo.pBsBuf,
+			layerInfo.iNalCount,
+			*layerInfo.pNalLengthInByte,
+			layerInfo.eFrameType,
+			layerInfo.iSubSeqId,
+			(int)layerInfo.uiLayerType,
+			(int)layerInfo.uiQualityId,
+			(int)layerInfo.uiSpatialId,
+			(int)layerInfo.uiTemporalId
+		);
+		//break;
+
+		int breakhere = 5;
+		//}
+	}
+}
 
 void main() {
 	ISVCEncoder* encoder;
@@ -125,10 +220,10 @@ void main() {
 	encoder->Initialize(&param);
 
 	int uiTraceLevel = WELS_LOG_DETAIL;
-	//encoder->SetOption(ENCODER_OPTION_TRACE_LEVEL, &uiTraceLevel);
+	encoder->SetOption(ENCODER_OPTION_TRACE_LEVEL, &uiTraceLevel);
 
-	int add = 0;
-	encoder->SetOption(ENCODER_OPTION_SPS_PPS_ID_STRATEGY, &add);
+	//int add = 0;
+	//encoder->SetOption(ENCODER_OPTION_SPS_PPS_ID_STRATEGY, &add);
 
 	int profile = PRO_CAVLC444;
 	encoder->SetOption(ENCODER_OPTION_PROFILE, &profile);
@@ -163,6 +258,7 @@ void main() {
 	pic.pData[1] = pic.pData[0] + width * height;
 	pic.pData[2] = pic.pData[1] + (width * height / 4);
 	*/
+
 	printf("start\n");
 	for (int num = 0; num < 50; num++) {
 		pic.uiTimeStamp = num * 100;
@@ -179,68 +275,18 @@ void main() {
 			throw "failed";
 		}
 
-		printf("size: %d, frame type %d\n", info.iFrameSizeInBytes, info.eFrameType);
-		printf("iLayerNum: %d, uiTimeStamp: %lld\n", info.iLayerNum, info.uiTimeStamp);
-		for (int i = 0; i < info.iLayerNum; i++) {
-		//for (int i = 0; i < 1; i++) {
-			SLayerBSInfo layerInfo = info.sLayerInfo[i];
-			//if (layerInfo.eFrameType != videoFrameTypeSkip && *layerInfo.pNalLengthInByte != 0 && *layerInfo.pNalLengthInByte != 8) {
-				int len = *layerInfo.pNalLengthInByte;
+		writeNALUnits(info, outputFile);
+	}
+	//*/
 
-				// Ignore the start code, and write a length prefixed start code.
-				///*
-				if (i == 0) {
-					if (layerInfo.pBsBuf[0] != 0) {
-						throw "invalid start code";
-					}
-					if (layerInfo.pBsBuf[1] != 0) {
-						throw "invalid start code";
-					}
-					if (layerInfo.pBsBuf[2] != 0) {
-						throw "invalid start code";
-					}
-					if (layerInfo.pBsBuf[3] != 1) {
-						throw "invalid start code";
-					}
-					len = len - 4;
-					char b1 = len >> 24;
-					char b2 = len << 8 >> 24;
-					char b3 = len << 16 >> 24;
-					char b4 = len << 24 >> 24;
-					const char lenBytes[4]{ b1, b2, b3, b4 };
-					outputFile.write(lenBytes, 4);
-					outputFile.write((const char*)layerInfo.pBsBuf + 4, len);
-				}
-				else {
-					char b1 = len >> 24;
-					char b2 = len << 8 >> 24;
-					char b3 = len << 16 >> 24;
-					char b4 = len << 24 >> 24;
-					const char lenBytes[4]{ b1, b2, b3, b4 };
-					outputFile.write(lenBytes, 4);
-					outputFile.write((const char*)layerInfo.pBsBuf, len);
-				}
-				//*/
+	/*
+	{
+		auto fileName = std::string() + "metadata.h264";
+		std::ofstream outputFile(fileName, std::ios_base::binary);
 
-				//outputFile.write((const char*)layerInfo.pBsBuf, len);
-
-				//outputFile.write(test, 600);
-				printf("pBsBuf %lld, iNalCount: %d, pNalLengthInByte: %d, eFrameType: %d, sub seq id: %d, uiLayerType: %d, uiQualityId: %d, uiSpatialId: %d, uiTemporalId: %d\n",
-					layerInfo.pBsBuf,
-					layerInfo.iNalCount,
-					*layerInfo.pNalLengthInByte,
-					layerInfo.eFrameType,
-					layerInfo.iSubSeqId,
-					(int)layerInfo.uiLayerType,
-					(int)layerInfo.uiQualityId,
-					(int)layerInfo.uiSpatialId,
-					(int)layerInfo.uiTemporalId
-				);
-				//break;
-
-				int breakhere = 5; 
-			//}
-		}
+		SFrameBSInfo frameInfo;
+		encoder->EncodeParameterSets(&frameInfo);
+		writeNALUnits(info, outputFile);
 	}
 	//*/
 }

@@ -1,9 +1,17 @@
 import { Box, CodeOnlyValue, BoxAnyType } from "./BinaryCoder";
-import { UInt32String, UInt32, FullBox, UInt64, NumberShifted, Int32, Int16, UInt16, UInt8, bitMapping, CString, LanguageParse, RawData, Int64, BitPrimitiveN, IntBitN, BitPrimitive, DebugString, DebugStringRemaining } from "./Primitives";
+import { UInt32String, UInt32, UInt64, NumberShifted, Int32, Int16, UInt16, UInt8, bitMapping, CString, LanguageParse, RawData, Int64, BitPrimitiveN, IntBitN, BitPrimitive, DebugString, DebugStringRemaining, UInt24 } from "./Primitives";
 import { ArrayInfinite, ChooseInfer, BoxLookup, ErasedKey } from "./SerialTypes";
 import { repeat, range } from "./util/misc";
 import { throwValue, assertNumber } from "./util/type";
 import { EmulationPreventionWrapper, NAL_SPS, NALCreate } from "./NAL";
+
+export function FullBox<T extends string>(type: T) {
+    return {
+        ... Box(type),
+        version: UInt8,
+        flags: UInt24,
+    };
+}
 
 
 export const AnyBox = ChooseInfer()({
@@ -238,43 +246,6 @@ export const Mp4vBox = {
     notImportant: ArrayInfinite(UInt8),
 };
 
-// https://www.itscj.ipsj.or.jp/sc29/open/29view/29n14632t.doc
-/*
-aligned(8) class AVCDecoderConfigurationRecord {
-	unsigned int(8) configurationVersion = 1;
-	unsigned int(8) AVCProfileIndication;
-	unsigned int(8) profile_compatibility;
-	unsigned int(8) AVCLevelIndication; 
-	bit(6) reserved = ‘111111’b;
-	unsigned int(2) lengthSizeMinusOne; 
-	bit(3) reserved = ‘111’b;
-	unsigned int(5) numOfSequenceParameterSets;
-	for (i=0; i< numOfSequenceParameterSets;  i++) {
-		unsigned int(16) sequenceParameterSetLength ;
-		bit(8*sequenceParameterSetLength) sequenceParameterSetNALUnit;
-	}
-	unsigned int(8) numOfPictureParameterSets;
-	for (i=0; i< numOfPictureParameterSets;  i++) {
-		unsigned int(16) pictureParameterSetLength;
-		bit(8*pictureParameterSetLength) pictureParameterSetNALUnit;
-	}
-	if( profile_idc  ==  100  ||  profile_idc  ==  110  ||
-	    profile_idc  ==  122  ||  profile_idc  ==  144 )
-	{
-		bit(6) reserved = ‘111111’b;
-		unsigned int(2) chroma_format;
-		bit(5) reserved = ‘11111’b;
-		unsigned int(3) bit_depth_luma_minus8;
-		bit(5) reserved = ‘11111’b;
-		unsigned int(3) bit_depth_chroma_minus8;
-		unsigned int(8) numOfSequenceParameterSetExt;
-		for (i=0; i< numOfSequenceParameterSetExt; i++) {
-			unsigned int(16) sequenceParameterSetExtLength;
-			bit(8*sequenceParameterSetExtLength) sequenceParameterSetExtNALUnit;
-		}
-    }
-}
-*/
 
 
 // https://github.com/videolan/vlc/blob/master/modules/packetizer/h264_nal.c
@@ -301,26 +272,17 @@ export const AvcCBox = ChooseInfer()({
         return repeat({sps: NALCreate(2, undefined, undefined)}, numOfSequenceParameterSets);
     },
     [ErasedKey]: CodeOnlyValue({test: 5}),
-})
-//*
-({
+})({
     numOfPictureParameterSets: IntBitN(8),
 })({
     pictureParameterSets: ({numOfPictureParameterSets}) => {
         return repeat({pps: NALCreate(2, undefined, undefined)}, numOfPictureParameterSets);
     }
-})
-//*/
-({
+})({
     remainingBytes: ArrayInfinite(UInt8)
 })
 ();
 
-/*
-class PixelAspectRatioBox extends Box(‘pasp’){
-   
-}
-*/
 export const PaspBox = {
     ... Box("pasp"),
     hSpacing: UInt32,
@@ -738,3 +700,42 @@ export const RootBox = {
     ),
 };
 
+
+
+// https://www.itscj.ipsj.or.jp/sc29/open/29view/29n14632t.doc
+/*
+aligned(8) class AVCDecoderConfigurationRecord {
+	unsigned int(8) configurationVersion = 1;
+	unsigned int(8) AVCProfileIndication;
+	unsigned int(8) profile_compatibility;
+	unsigned int(8) AVCLevelIndication; 
+	bit(6) reserved = ‘111111’b;
+	unsigned int(2) lengthSizeMinusOne; 
+	bit(3) reserved = ‘111’b;
+	unsigned int(5) numOfSequenceParameterSets;
+	for (i=0; i< numOfSequenceParameterSets;  i++) {
+		unsigned int(16) sequenceParameterSetLength ;
+		bit(8*sequenceParameterSetLength) sequenceParameterSetNALUnit;
+	}
+	unsigned int(8) numOfPictureParameterSets;
+	for (i=0; i< numOfPictureParameterSets;  i++) {
+		unsigned int(16) pictureParameterSetLength;
+		bit(8*pictureParameterSetLength) pictureParameterSetNALUnit;
+	}
+	if( profile_idc  ==  100  ||  profile_idc  ==  110  ||
+	    profile_idc  ==  122  ||  profile_idc  ==  144 )
+	{
+		bit(6) reserved = ‘111111’b;
+		unsigned int(2) chroma_format;
+		bit(5) reserved = ‘11111’b;
+		unsigned int(3) bit_depth_luma_minus8;
+		bit(5) reserved = ‘11111’b;
+		unsigned int(3) bit_depth_chroma_minus8;
+		unsigned int(8) numOfSequenceParameterSetExt;
+		for (i=0; i< numOfSequenceParameterSetExt; i++) {
+			unsigned int(16) sequenceParameterSetExtLength;
+			bit(8*sequenceParameterSetExtLength) sequenceParameterSetExtNALUnit;
+		}
+    }
+}
+*/

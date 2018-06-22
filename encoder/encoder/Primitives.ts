@@ -4,7 +4,7 @@ import { textFromUInt32, textToUInt32 } from "./util/serialExtension";
 import { decodeUTF8BytesToString, encodeAsUTF8Bytes, debugString } from "./util/UTF8";
 import { sum } from "./util/math";
 import { mapObjectValuesKeyof, range } from "./util/misc";
-import { Box, parseObject } from "./BinaryCoder";
+//import { parseObject } from "./BinaryCoder";
 
 export type Bit = 0 | 1;
 
@@ -185,14 +185,6 @@ export function DebugStringRemaining(): SerialObjectPrimitive<string> {
 };
 
 
-export function FullBox<T extends string>(type: T) {
-    return {
-        ... Box(type),
-        version: UInt8,
-        flags: UInt24,
-    };
-}
-
 /** Big endian */
 export function bitsToByte(bits: number[]): number {
     let byte = 0;
@@ -371,7 +363,7 @@ export const UExpGolomb: SerialObjectPrimitive<number> = {
         let bits = range(0, magnitude).map(x => readBit(context));
         let val = bitsToByte(bits) + sumOffset;
 
-        console.log(`UExpGolomb Read value ${val}, magnitude ${magnitude} bits end ${bits.join("")}, key ${context.debugKey}`);
+        //console.log(`UExpGolomb Read value ${val}, magnitude ${magnitude} bits end ${bits.join("")}, key ${context.debugKey}`);
 
         return val;
     },
@@ -396,7 +388,7 @@ export const UExpGolomb: SerialObjectPrimitive<number> = {
             bits.push(bit);
         }
 
-        console.log(`UExpGolomb Writing value ${context.value}, magnitude ${magnitude} bits ${bits.join("")}`);
+        //console.log(`UExpGolomb Writing value ${context.value}, magnitude ${magnitude} bits ${bits.join("")}`);
 
         return new LargeBuffer([bits]);
     }
@@ -484,7 +476,7 @@ export function RemainingData<T>(primitive: SerialObjectPrimitive<T>): SerialObj
                 results.push(result);
             }
 
-            console.log(`Read ${results.length} bits`)
+            //console.log(`Read ${results.length} bits`)
             
             return results;
         },
@@ -494,7 +486,7 @@ export function RemainingData<T>(primitive: SerialObjectPrimitive<T>): SerialObj
 
             let result = new LargeBuffer(bufs);
 
-            console.log(`Wrote ${LargeBuffer.GetBitCount(result)}`);
+            //console.log(`Wrote ${LargeBuffer.GetBitCount(result)}`);
 
             return result;
         }

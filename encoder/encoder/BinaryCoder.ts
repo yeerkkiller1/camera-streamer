@@ -1,4 +1,51 @@
-import { SerialObject, _SerialObjectOutput, P, R, SerialObjectChildBase, SerialObjectChildBaseToOutput, isSerialChoose, ChooseContext, isSerialPrimitive, SerialObjectPrimitiveToOutput, SerialPrimitiveMark, ReadContext, LengthObjectSymbol, isSerialObject, SerialObjectChild, SerialObjectChildToOutput, IsArrayInfinite, IsBoxLookup, GetBoxCount, _SerialIntermediateToFinal, SerialIntermediateChildBaseToOutput, isIntermediatePrimitive, SerialIntermediateChildToOutput, WriteContext, SerialObjectPrimitive, isSerialObjectPrimitiveLength, SerialObjectPrimitiveLength, SerialObjectPrimitiveParsing, TemplateToObject, ErasedKey, ErasedKey0, ErasedKey1, ErasedKey2, ErasedKey3, ErasedKey4, ErasedKey5, ErasedKey6, ErasedKey7, HandlesBitOffsets, ChooseContinue, ErasedKey8, ErasedKey9, ErasedKey10, SerialPrimitiveName } from "./SerialTypes";
+import { SerialObject, 
+    _SerialObjectOutput, 
+    P, 
+    R, 
+    SerialObjectChildBase, 
+    SerialObjectChildBaseToOutput, 
+    isSerialChoose, 
+    ChooseContext, 
+    isSerialPrimitive, 
+    SerialObjectPrimitiveToOutput, 
+    SerialPrimitiveMark, 
+    ReadContext, 
+    LengthObjectSymbol, 
+    isSerialObject, 
+    SerialObjectChild, 
+    SerialObjectChildToOutput, 
+    IsArrayInfinite, 
+    IsBoxLookup, 
+    GetBoxCount, 
+    _SerialIntermediateToFinal, 
+    SerialIntermediateChildBaseToOutput, 
+    isIntermediatePrimitive, 
+    SerialIntermediateChildToOutput, 
+    WriteContext, 
+    SerialObjectPrimitive, 
+    isSerialObjectPrimitiveLength, 
+    SerialObjectPrimitiveLength, 
+    SerialObjectPrimitiveParsing,
+    TemplateToObject, 
+    ErasedKey, 
+    ErasedKey0, 
+    ErasedKey1, 
+    ErasedKey2, 
+    ErasedKey3, 
+    ErasedKey4, 
+    ErasedKey5, 
+    ErasedKey6, 
+    ErasedKey7, 
+    HandlesBitOffsets, 
+    ErasedKey8, 
+    ErasedKey9, 
+    ErasedKey10, 
+    SerialPrimitiveName, 
+    SerialObjectChoose,
+    ChooseLoopEnd,
+    ChooseLoop
+} from "./SerialTypes";
+
 import { LargeBuffer, MaxUInt32 } from "./LargeBuffer";
 import { isArray, assertNumber } from "./util/type";
 import { mapObjectValues, keyBy, flatten } from "./util/misc";
@@ -8,12 +55,40 @@ import { WrapWithFunctionName } from "./debug";
 
 export const BoxAnyType = "any";
 
+type test = SerialObjectChildToOutput<SerialObjectChild>;
+
+
 function cleanup(codeAfter: () => void, code: () => void) {
     try {
         code();
     } finally {
         codeAfter();
     }
+}
+
+type SingleOrArray<T> = T | T[];
+
+// Used in two cases:
+//  1) We have all the data, and want to figure out what templates we should use to write it
+//  2) We are parsing the data, and figuring out the templates as we go, based on previous pieces of data.
+function evaluateChooseLoop(
+    chooseFnc: SerialObjectChoose,
+    context: SerialIntermediateChildToOutput,
+    getIntermediate: (template: SerialObjectChild) => SerialObjectChildBaseToOutput
+): SingleOrArray<SerialObjectChildBaseToOutput> {
+    let results: SerialObjectChildBaseToOutput[] = [];
+
+    let lastResult: SerialObjectChildBaseToOutput|undefined = undefined;
+
+    while(true) {
+        let choosenTemplate = chooseFnc(context, lastResult);
+        if(choosenTemplate === ChooseLoopEnd) {
+            break;
+        }
+        lastResult = getIntermediate(choosenTemplate);
+        results.push(lastResult);
+    }
+    return results;
 }
 
 function _parseBytes<T extends SerialObject>(buffer: LargeBuffer, rootObjectInfo: T): _SerialObjectOutput<T> {
@@ -37,7 +112,7 @@ function _parseBytes<T extends SerialObject>(buffer: LargeBuffer, rootObjectInfo
     }
 
     function parseObject(object: SerialObject, output: R<_SerialObjectOutput<SerialObject>>, endBits: number): void {
-        /** True if our end should end our own object (so we should warn if we didn't read enough bytes). */
+        // True if our end should end our own object (so we should warn if we didn't read enough bytes).
         let isEndSelf = false;
 
         if(isRoot) {
@@ -69,6 +144,10 @@ function _parseBytes<T extends SerialObject>(buffer: LargeBuffer, rootObjectInfo
             cleanup(() => debugPath.pop(), () => {
                 let child: SerialObject[""] = object[key];
 
+                if(key === "NALs") {
+                    console.log(child, ChooseLoop in (child as any));
+                }
+
                 if(child === undefined) {
                     throw debugError(`Child is undefined.`);
                 }
@@ -90,20 +169,41 @@ function _parseBytes<T extends SerialObject>(buffer: LargeBuffer, rootObjectInfo
             }
         }
 
-        function parseChildBase(child: SerialObjectChildBase, output: R<SerialObjectChildBaseToOutput>): void {
+        function parseChildBase(child: SerialObjectChildBase, output: R<SerialObjectChildToOutput>): void {
             if(isSerialChoose(child)) {
-                let chooseContext: ChooseContext<void> = _getFinalOutput(outputObject) as any as void;
-                /*
-                let chooseContext: ChooseContext<void> = {
-                    // Hmm... this isn't efficient... but we should have that many chooses, right? Or at least, not chooses too close to the root,
-                    //  so hopefully this doesn't become exponential.
-                    curObject: getFinalOutput(outputObject) as any,
-                    buffer: buffer,
-                    pos: pPos.v,
-                };
-                */
-                let choosenChild = child(chooseContext);
-                parseChild(choosenChild, output);
+                let context: ChooseContext<void> = _getFinalOutput(outputObject) as any as void;
+
+                //let arr: SerialObjectChildBaseToOutput<SerialObjectChildBase<void>>[] = [];
+                if(!(ChooseLoop in child)) {
+                    let choosenChild = child(context);
+                    if(choosenChild === ChooseLoopEnd) {
+                        throw new Error(`If ChooseLoopEnd is returned, the function should have ChooseLoop as a property. A function cannot dynamically switch between returning an object, and being a loop.`);
+                    }
+                    parseChild(choosenChild, output);
+                } else {
+                    try {
+                        let intermediateOutput = evaluateChooseLoop(
+                            (... args: any[]) => {
+                                let curBits = pPos.v * 8 + bitOffset;
+                                if(curBits >= endBits) {
+                                    return ChooseLoopEnd;
+                                }
+                                let result = child.apply(null, args);
+                                return result;
+                            },
+                            context,
+                            template => {
+                                let output = { x: null as any as SerialObjectChildBaseToOutput };
+                                parseChild(template, { key: "x", parent: output });
+                                return output.x;
+                            }
+                        );
+
+                        output.parent[output.key] = intermediateOutput;
+                    } catch (e) {
+                        throw debugError(e.message);
+                    }
+                }
             }
             else if(isSerialPrimitive(child)) {
                 let outputValue: SerialObjectPrimitiveToOutput<typeof child> = {
@@ -314,6 +414,7 @@ function _parseBytes<T extends SerialObject>(buffer: LargeBuffer, rootObjectInfo
     }
 }
 
+///*
 function isKeyErased(key: string): boolean {
     return key === ErasedKey || key === ErasedKey0 || key === ErasedKey1 || key === ErasedKey2 || key === ErasedKey3 || key === ErasedKey4 || key === ErasedKey5 || key === ErasedKey6 || key === ErasedKey7 || key === ErasedKey8 || key === ErasedKey9 || key === ErasedKey10;
 }
@@ -362,6 +463,7 @@ function _getFinalOutput<T extends _SerialObjectOutput>(output: T): _SerialInter
     }
 }
 
+
 function _createIntermediateObject<T extends SerialObject>(template: T, data: _SerialIntermediateToFinal<_SerialObjectOutput<T>>): _SerialObjectOutput<T> {
     return getIntermediateOutput(template, data as any) as _SerialObjectOutput<T>;
 
@@ -384,27 +486,26 @@ function _createIntermediateObject<T extends SerialObject>(template: T, data: _S
 
         function parseChildBase(child: SerialObjectChildBase, data: SerialIntermediateChildToOutput): SerialObjectChildToOutput {
             if(isSerialChoose(child)) {
-                // Hmm... we can actually call the choose function with the output data.
-                let choosenTemplate;
-                try {
-                    choosenTemplate = child(parentData);
-                } catch(e) {
-                    console.error(template, data);
-                    throw e;
+                if(!(ChooseLoop in child)) {
+                    let chooseTemplate = child(parentData);
+                    if(chooseTemplate === ChooseLoopEnd) {
+                        throw new Error(`ChooseLoopEnd was returned, but ChooseLoop wasn't a property of the function.`);
+                    }
+                    return parseChild(chooseTemplate, data);
+                } else {
+                    let index = 0;
+                    return evaluateChooseLoop(
+                        (... args: any[]) => {
+                            if(index === data.length) {
+                                return ChooseLoopEnd;
+                            }
+                            let result = child.apply(null, args);
+                            return result;
+                        },
+                        parentData,
+                        template => parseChild(template, data[index++]) as SerialObjectChildBaseToOutput
+                    );
                 }
-                if(!(ChooseContinue in choosenTemplate)) {
-                    return parseChild(choosenTemplate, data);
-                }
-
-                // TODO: Replace BoxLookup and ArrayInfinite
-                // Indeterminate loop stuff here.
-                let results: ReturnType<typeof parseChild>[] = [];
-                while((choosenTemplate as any)[ChooseContinue]) {
-                    let prevResult = parseChild(choosenTemplate, data);
-                    results.push(prevResult);
-                    choosenTemplate = child(parentData, prevResult as any);
-                }
-                return results as any;
             } else if(isSerialPrimitive(child)) {
                 return {
                     primitive: child,
@@ -717,6 +818,48 @@ export function filterBox<T extends (BoxType<string> | string)>(inputIn?: T): Fi
     return step;
 }
 
+//*/
+
+
+/** A string that exists in our code, but doesn't get written back to disk. Useful to adding values to the
+ *      object data for intermediate parsing.
+ */
+
+export const CodeOnlyValue: <T>(type: T) => SerialObjectPrimitive<T> = <T>(value: T) => ({
+    [HandlesBitOffsets]: true,
+    read({pPos, buffer}) {
+        return value;
+    },
+    write(context) {
+        return new LargeBuffer([]);
+    }
+});
+
+export function Iterate<
+    F extends () => SerialObject
+>(
+    generate: F
+) {
+    type FinalResultObject = TemplateToObject<ReturnType<F>> | undefined;
+    type ResultObject = _SerialObjectOutput<ReturnType<F>> | undefined;
+
+    // Nested function, for type inference.
+
+    function iter(continueCondition: (last: FinalResultObject) => boolean) {
+        function iterReal(parentData: void, lastResult: ResultObject) {
+            if(!continueCondition(lastResult === undefined ? undefined : _getFinalOutput(lastResult))) {
+                return ChooseLoopEnd;
+            }
+            let entry = generate();
+            return entry;
+        };
+        let iterReturn = Object.assign(iterReal, { [ChooseLoop]: true}) as any;
+        return iterReturn;
+    };
+
+    return iter as ((continueCondition: (last: FinalResultObject) => boolean) => ReturnType<F>[]);
+}
+
 // TODO: Move the special parsing logic for BoxLookup to somewhere else, as BinaryCoder doesn't really need to know about it.
 export const Box: <T extends string>(type: T) => { header: SerialObjectPrimitive<{ size?: number; type: T, headerSize?: number }>; type: SerialObjectPrimitive<T>; } =
 <T extends string>(typeIn: T) => ({
@@ -724,11 +867,9 @@ export const Box: <T extends string>(type: T) => { header: SerialObjectPrimitive
         [LengthObjectSymbol]: typeIn,
         read(context) {
             let { buffer, pPos } = context;
-            /*
-                size is an integer that specifies the number of bytes in this box, including all its fields and contained
-                    boxes; if size is 1 then the actual size is in the field largesize; if size is 0, then this box is the last
-                    one in the file, and its contents extend to the end of the file (normally only used for a Media Data Box) 
-            */
+            //    size is an integer that specifies the number of bytes in this box, including all its fields and contained
+            //        boxes; if size is 1 then the actual size is in the field largesize; if size is 0, then this box is the last
+            //        one in the file, and its contents extend to the end of the file (normally only used for a Media Data Box) 
             let size = buffer.readUInt32BE(pPos.v); pPos.v += 4;
             let type = textFromUInt32(buffer.readUInt32BE(pPos.v)) as T; pPos.v += 4;
 
@@ -778,17 +919,4 @@ export const Box: <T extends string>(type: T) => { header: SerialObjectPrimitive
         }
     },
     type: CodeOnlyValue(typeIn),
-});
-
-/** A string that exists in our code, but doesn't get written back to disk. Useful to adding values to the
- *      object data for intermediate parsing.
- */
-export const CodeOnlyValue: <T>(type: T) => SerialObjectPrimitive<T> = <T>(value: T) => ({
-    [HandlesBitOffsets]: true,
-    read({pPos, buffer}) {
-        return value;
-    },
-    write(context) {
-        return new LargeBuffer([]);
-    }
 });

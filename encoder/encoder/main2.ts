@@ -13,6 +13,13 @@
 
 // Hmm... another example of an implementation: https://github.com/madebyhiro/codem-isoboxer
 
+// https://github.com/aizvorski/h264bitstream
+
+// https://msdn.microsoft.com/en-us/library/windows/desktop/dd757808(v=vs.85).aspx !!
+//  No start codes, as it is avc1. This microsoft document is amazing, and explains everything. Although I don't know how to know the bytes in
+//  the length prefix of a NAL, but assuming 4 is probably fine.
+
+
 import { textFromUInt32, readUInt64BE, textToUInt32, writeUInt64BE } from "./util/serialExtension";
 import { LargeBuffer, MaxUInt32 } from "./LargeBuffer";
 import { isArray, throwValue, assertNumber } from "./util/type";
@@ -26,7 +33,7 @@ import * as Jimp from "jimp";
 import { parseObject, filterBox, writeObject, getBufferWriteContext } from "./BinaryCoder";
 import { RootBox, MoofBox, MdatBox, FtypBox, MoovBox, sample_flags, SidxBox } from "./BoxObjects";
 import { SerialObject, _SerialObjectOutput, _SerialIntermediateToFinal } from "./SerialTypes";
-import { NALList, parserTest, NALType } from "./NAL";
+import { NALList, parserTest, NALType, SPS, PPS } from "./NAL";
 import { byteToBits, bitsToByte } from "./Primitives";
 
 
@@ -433,14 +440,12 @@ async function testRewriteMp4Fragment() {
         }
 
         
-        ///*
         //timescale = 5994;
         //frameTimeInTimescale = 100;
         frames = range(0, 10).map(index => ({
             buffer: new LargeBuffer([readFileSync(`C:/Users/quent/Dropbox/camera/encoder/h264/h264/frame${index}.h264`)]),
             composition_offset: 0
         }));
-        //*/
 
         return {
             timescale,
@@ -578,20 +583,6 @@ async function testRewriteMp4Fragment() {
 
         return finalBuffer;
 
-        /*
-        {
-            header: {
-                "type": "styp"
-            },
-            "type": "styp",
-            "major_brand": "msdh",
-            "minor_version": 0,
-            "compatible_brands": [
-                "msdh",
-                "msix"
-            ]
-        },
-        */
 
 
         type SampleFlags = O<{x: typeof sample_flags}>["x"];
@@ -1040,11 +1031,7 @@ async function testRewriteMp4Fragment() {
                                         } : {
                                             first_sample_flags: d.forcedFirstSampleFlags
                                         }
-                                    )
-                                    /* Object.assign(
-                                        {data_offset: moofSize + 8},
-                                        d.forcedFirstSampleFlags === undefined ? {} : { first_sample_flags: d.forcedFirstSampleFlags}
-                                    )*/,
+                                    ),
                                     sample_values: d.samples
                                 }
                             ]
@@ -1103,32 +1090,6 @@ async function wrapAsync(fnc: () => Promise<void>): Promise<void> {
 }
 
 
-// https://github.com/aizvorski/h264bitstream
-
-// https://msdn.microsoft.com/en-us/library/windows/desktop/dd757808(v=vs.85).aspx !!
-//  No start codes, as it is avc1. This microsoft document is amazing, and explains everything. Although I don't know how to know the bytes in
-//  the length prefix of a NAL, but assuming 4 is probably fine.
-/*
-function decodeH264File(path: string) {
-    decodeH264(LargeBuffer.FromFile(path));
-}
-*/
-/*
-function decodeH264(buf: LargeBuffer) {
-    // I want to parse NALs, SPS PPS? HRD?
-
-    let obj = parseObject(buf, NALList);
-    for(let i = 0; i < obj.NALs.length; i++) {
-        let NAL = obj.NALs[i];
-        if("all" in NAL.nalParsed) {
-            delete NAL.nalParsed.all;
-            console.log(NAL.NALLength.size, NAL.bitHeader0, NAL.extensionFlag, NAL.nalParsed);
-        } else {
-            console.log(NAL.NALLength.size, NAL.bitHeader0, NAL.extensionFlag, NAL.nalParsed);
-        }
-    }
-}
-*/
 
 function printBinary(path: string) {
     let buf = LargeBuffer.FromFile(path);
@@ -1141,15 +1102,6 @@ function printBinary(path: string) {
     process.stdout.write("\n");
 }
 
-/*
-var x = parseObject(new LargeBuffer([new Buffer(
-    [
-        bitsToByte([0,0,1,0,1,0,1, 1]),
-        bitsToByte([1, 0]),
-    ]
-)]), parserTest);
-console.log(x);
-*/
 
 
 //frameTest();
@@ -1178,7 +1130,6 @@ function frameTest() {
     //  we'll just make our own NAL frame? NAL type 1 is in both and likely the frame data,
     //  and 5 is in both (just in the not working it is delayed a bit).
 
-    ///*
     for(let i = 0; i < count; i++) {
         let path = `C:/Users/quent/Dropbox/camera/encoder/h264/h264/frame${i}.h264`;
         //decodeH264File(path);
@@ -1187,26 +1138,12 @@ function frameTest() {
         //decodeH264(path);
         //printBinary(path);
     }
-    //*/
 
 
     //wrapAsync(testRewriteMp4Fragment);
 }
 
 function getMP4H624NALs(path: string): NALType[] {
-    //writeFramesToTest(`youtube2.h264.mp4`);
-    //let frames = getFrames(`10fps.h264.mp4`);
-
-    // One big question. Why is 10fps.h264.mp4 not playing all frames in vlc?
-    //  - Okay, probably because the video ends with a B frame! And also has B frames throughout, and on the frame index 93.
-    //      It is odd that frame index 93 is the last frame to play (as it is a B frame), but the last frame definitely should not play
-    //      as it is a B frame! Maybe the B frame doesn't reference any future frames, but vlc doesn't check and just uses the max
-    //      lookahead frame number and assumes it needs to read that number of frames. Eitherway, we can fix it by
-    //      just not encoding the last frame as a B frame! (in fact, it should really an an I frame).
-
-    return [];
-
-    /*
     let mp4File = parseObject(LargeBuffer.FromFile(path), RootBox);
     let box = filterBox(mp4File);
     let mdia = box("moov")("trak")("mdia");
@@ -1237,21 +1174,48 @@ function getMP4H624NALs(path: string): NALType[] {
         let obj = parseObject(frame, NALList(4, sps, pps));
         return obj.NALs;
     }));
-    */
 }
 
-function getOpenH264NALs(): NALType[] {
-    let frames: LargeBuffer[] = [];
-    for(let i = 0; i < 1; i++) {
-        let path = `C:/Users/quent/Dropbox/camera/encoder/h264/h264/frame${i}.h264`;
-        frames.push(LargeBuffer.FromFile(path));
-    }
+function getOpenH264NALs() {
+    return getH264NALsFiles(range(0, 10).map(i => `C:/Users/quent/Dropbox/camera/encoder/h264/h264/frame${i}.h264`));
+}
 
-    // Get sps, and pps.
-    return flatten(frames.map(frame => {
-        let obj = parseObject(frame, NALList(4, undefined, undefined));
-        return obj.NALs;
-    }));
+function getH264NALsFiles(files: string[]): NALType[] {
+    return getH264NALs(files.map(file => ({ buf: LargeBuffer.FromFile(file), path: file })));
+}
+function getH264NALs(bufs: { buf: LargeBuffer, path: string }[]): NALType[] {
+    let nals: NALType[] = [];
+
+    let sps: SPS|undefined = undefined;
+    let pps: PPS|undefined = undefined;
+
+    for(let frameObj of bufs) {
+        let frame = frameObj.buf;
+        let path = frameObj.path;
+        let obj = parseObject(frame, NALList(4, sps, pps));
+
+        console.log(obj);
+
+        // Must be a forEach loop, to disconnect the sps variable from these assignments. Otherwise typescript
+        //  thinks the assignment (which insures sps is not undefined), maybe impact the output of parseObject,
+        //  and so says it cannot determine the type.
+        obj.NALs.forEach((nal, i) => {
+            //todonext
+            // NALList needs to pick up sps and pps while parsing? Because nal units won't always be in different files
+            //  and may require the sps and pps before parseObject returns.
+            if(nal.nalObject.type === "sps") {
+                sps = nal.nalObject.nal;
+            }
+            if(nal.nalObject.type === "pps") {
+                pps = nal.nalObject.nal;
+            }
+            nals.push(nal);
+
+            let outputText = JSON.stringify(nal, null, "    ");
+            writeFileSync(path + `.${i}.nal`, outputText);
+        });
+    }
+    return nals;
 }
 
 
@@ -1259,14 +1223,16 @@ function encodeFrames(frames: LargeBuffer[]) {
     // I am going to assume there is no frame reordering. 
 }
 
-// If we take the pps out of the 10fps video, will it still work?
+//todonext
+// Okay. Now we can finally try taking the NALs from the generated video, putting the sps and pps where they belong, updating
+//  the frame reference stuff, and seeing if the video plays!
+
 function modifyMP4(path: string): void {
     let mp4File = parseObject(LargeBuffer.FromFile(path), RootBox);
     let box = filterBox(mp4File);
     let mdia = box("moov")("trak")("mdia");
     let avcC = mdia("minf")("stbl")("stsd")("avc1")("avcC")();
 
-    /*
     if(avcC.sequenceParameterSets.length !== 1) {
         throw new Error(`Multiple sequenceParameterSets`);
     }
@@ -1281,19 +1247,42 @@ function modifyMP4(path: string): void {
         throw new Error(`Multiple pictureParameterSets`);
     }
 
-    avcC.numOfPictureParameterSets = 0;
-    avcC.pictureParameterSets = [];
+    //avcC.numOfPictureParameterSets = 0;
+    //avcC.pictureParameterSets = [];
 
     let newFileBuffer = writeObject(RootBox, mp4File);
-    */
-    /*
     writeFileSync(path + ".modified.mp4", Buffer.concat(newFileBuffer.getInternalBufferList()));
-    */
 }
 
+function printNals(nals: NALType[]): void {
+    for(let nal of nals) {
+        let n = nal.nalObject;
+        //if(n.type === "slice") continue;
+        console.log(n.type, nal.bitHeader0.nal_unit_type);
+        //console.log(n);
+    }
+}
+
+function testNALs(paths: string[]) {
+    let bufs = paths.map(x => ({ buf: LargeBuffer.FromFile(x), path: x }));
+    let entireBuf = new LargeBuffer(bufs.map(x => x.buf));
+    let nals = getH264NALs(bufs);
+    let output = writeObject(NALList(4, undefined, undefined), { NALs: nals });
+
+    testWrite(entireBuf, output);
+}
+
+//testReadFile(`10fps.h264.mp4`);
+//testWriteFile(`10fps.h264.mp4`);
 //modifyMP4(`10fps.h264.mp4`);
 
-testWriteFile(`10fps.h264.mp4`);
+//testNALs([`C:/Users/quent/Dropbox/camera/encoder/h264/h264/frame0.h264`]);
+
+//let nals = getOpenH264NALs(); //getMP4H624NALs(`10fps.h264.mp4`);
+
+
+//printNals(getH264NALs([`C:/Users/quent/Dropbox/camera/encoder/h264/h264/frame0.h264`]));
+//printNals(getOpenH264NALs());
 
 
 /*

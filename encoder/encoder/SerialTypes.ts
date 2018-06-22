@@ -1,3 +1,4 @@
+//*
 import { LargeBuffer } from "./LargeBuffer";
 import { isArray } from "./util/type";
 import { Utf8AsciiLatin1Encoding } from "crypto";
@@ -63,10 +64,9 @@ export type SerialObjectChild<CurObject = any> = SerialObjectChildBase<CurObject
 
 export interface ReadContext {
     buffer: LargeBuffer;
-    /** We expect this to wrap around when it hits 8 to 0. If you increment it, and it doesn't wrap around, we may throw.
-            Also, this is from lowest bit to highest bit (as that is how memory is usually laid out, and is how
-                the h264 spec lays out it's memory). (Little endian)
-    */
+    // We expect this to wrap around when it hits 8 to 0. If you increment it, and it doesn't wrap around, we may throw.
+    //        Also, this is from lowest bit to highest bit (as that is how memory is usually laid out, and is how
+    //            the h264 spec lays out it's memory). (Little endian)
     bitOffset: number;
     pPos: P<number>;
     end: number;
@@ -109,19 +109,21 @@ export function isSerialObjectPrimitiveLength<T>(obj: SerialObjectPrimitiveParsi
 
 export type ChooseContext<CurObject> = CurObject;
 
-// If the returned object from SerialObjectChoose has this as key, and a value of true, we call the function again,
-//  keeping the results in an array. This isn't really understood by TemplateToObject, because
-//  it is too difficult to, but the parser understands it. If ChooseContinue is false
-//  we stop, and don't use the result for anything.
-export const ChooseContinue = Symbol();
+
+export const ChooseLoop = Symbol();
+type ChooseLoop = typeof ChooseLoop;
+export const ChooseLoopEnd = Symbol();
+type ChooseLoopEnd = typeof ChooseLoopEnd;
 
 export type SerialObjectChoose<CurObject = any> = (
-    context: ChooseContext<CurObject>,
-    // Only passed if ChooseContine was passed last time.
-    prevResult?: SerialObjectChild
-) => SerialObjectChild<CurObject>;
-// This should be on the return type, but adding it crashes the TS compiler, so...
-// & { [ChooseContinue]?: boolean };
+    (
+        context: ChooseContext<CurObject>,
+        // The data result from the last iteration. undefined on the first iteration.
+        prevFinalResult?: any //TemplateToObject // Setting this to TemplateToObject CRASHES THE COMPILER! So don't do that...
+    ) => SerialObjectChild<CurObject> | ChooseLoopEnd
+);
+// We can't do this, as it makes typescript think this type is recursive. But this is what should trigger a loop
+//& { [ChooseLoop]?: true };
 
 // #region ChooseInfer types
 
@@ -158,6 +160,7 @@ export type SerialObjectPrimitiveToOutput<T extends SerialObjectPrimitive = Seri
 export function isIntermediatePrimitive<T extends SerialObjectPrimitive>(obj: SerialObjectChildBaseToOutput<any>): obj is SerialObjectPrimitiveToOutput<T> {
     return SerialPrimitiveMark in obj;
 }
+//*/
 
 export type SerializeTerminalToOutput<T extends SerialObjectTerminal> = (
     T extends SerialObjectChoose ? SerialObjectChooseToOutput<T> :
@@ -188,10 +191,10 @@ export type SerialObjectChildToOutput<T extends SerialObjectChild = SerialObject
     never
 );
 
-export type _SerialObjectOutput<T extends SerialObject<any> = SerialObject> = {
+export type _SerialObjectOutput<T extends SerialObject = SerialObject> = {
     [key in keyof T]: SerialObjectChildMap<T[key]>;
 };
-export type TemplateToObject<T extends SerialObject> = _SerialIntermediateToFinal<_SerialObjectOutput<T>>;
+export type TemplateToObject<T extends SerialObject = SerialObject> = _SerialIntermediateToFinal<_SerialObjectOutput<T>>;
 
 
 
@@ -202,19 +205,19 @@ export type SerializeIntermediateTerminalToOutput<T extends SerializeTerminalToO
 export type SerialIntermediateChildBaseToOutput<T extends SerialObjectChildBaseToOutput = SerialObjectChildBaseToOutput> = (
     T extends SerializeTerminalToOutput<SerialObjectTerminal> ? SerializeIntermediateTerminalToOutput<T> :
     T extends _SerialObjectOutput<SerialObject> ? _SerialIntermediateToFinal<T> :
-    // T extends _SerialObjectOutput<SerialObject> ?  { [key in keyof T]: SerialIntermediateChildToOutput<T[key]> } :
     never
 );
 
-export type GetSerialIntermediateChildBaseArray<T extends SerialObjectChildToOutput[]> = (
-    ForceExtendsType<T extends (infer U)[] ? U : never, SerialObjectChildToOutput>
+export type GetSerialIntermediateChildBaseArray<T extends SerialObjectChildToOutput<SerialObjectChild>[]> = (
+    ForceExtendsType<T extends (infer U)[] ? U : never, SerialObjectChildToOutput<SerialObjectChild>>
 );
-export type SerialIntermediateChildToOutput<T extends (SerialObjectChildToOutput | undefined) = SerialObjectChildToOutput> = (
+export type SerialIntermediateChildToOutput<T extends (SerialObjectChildToOutput<SerialObjectChild> | undefined) = SerialObjectChildToOutput> = (
     T extends undefined ? undefined :
     T extends SerialObjectChildBaseToOutput[] ? SerialIntermediateChildBaseToOutput<GetSerialIntermediateChildBaseArray<T>>[] :
     T extends SerialObjectChildBaseToOutput ? SerialIntermediateChildBaseToOutput<T> :
     never
 );
+
 
 type RemoveKey<T, K> = T extends K ? never : T;
 
@@ -233,6 +236,7 @@ export const ErasedKey7 = "_ErasedKeySpecial7" as "_ErasedKeySpecial7";
 export const ErasedKey8 = "_ErasedKeySpecial8" as "_ErasedKeySpecial8";
 export const ErasedKey9 = "_ErasedKeySpecial9" as "_ErasedKeySpecial9";
 export const ErasedKey10 = "_ErasedKeySpecial10" as "_ErasedKeySpecial10";
+
 type EraseKey<T extends { [key: string]: any } & { [ErasedKey]?: any, [ErasedKey0]?: any, [ErasedKey1]?: any, [ErasedKey2]?: any, [ErasedKey3]?: any; [ErasedKey4]?: any; [ErasedKey5]?: any; [ErasedKey6]?: any; [ErasedKey7]?: any; [ErasedKey8]?: any; [ErasedKey9]?: any; [ErasedKey10]?: any; }> = (
     { [key in RemoveKey<keyof T, typeof ErasedKey | typeof ErasedKey0 | typeof ErasedKey1 | typeof ErasedKey2 | typeof ErasedKey3 | typeof ErasedKey4 | typeof ErasedKey5 | typeof ErasedKey6 | typeof ErasedKey7 | typeof ErasedKey8 | typeof ErasedKey9 | typeof ErasedKey10>]: T[key] }
     & (typeof ErasedKey extends keyof T ? T[typeof ErasedKey] : {})
@@ -261,41 +265,29 @@ type ApplyEraseKey<T extends _SerialIntermediateToFinal> = (
     EraseKey<ApplyEraseKeyInner<T>>
 );
 
-export type _SerialIntermediateToFinal_Inner<T extends _SerialObjectOutput = _SerialObjectOutput> = {
+
+export type _SerialIntermediateToFinal_Inner<T extends _SerialObjectOutput<SerialObject>> = {
     [key in keyof T]: SerialIntermediateChildToOutput<T[key]>;
 };
 export type _SerialIntermediateToFinal<T extends _SerialObjectOutput = _SerialObjectOutput> = (
     ApplyEraseKey<_SerialIntermediateToFinal_Inner<T>>
 );
 
+
 // #endregion
+
 
 export interface MultiStageContinue<CurSerialObject extends SerialObject, CurSerialOutput> {
     (): CurSerialObject;
     <NextSerialObject extends SerialObject<CurSerialOutput>>(
         next: NextSerialObject
     ): MultiStageContinue<
-        CurSerialObject & NextSerialObject,
-        CurSerialOutput & _SerialIntermediateToFinal<_SerialObjectOutput<NextSerialObject>>
+    CurSerialObject & NextSerialObject,
+    CurSerialOutput & _SerialIntermediateToFinal<_SerialObjectOutput<NextSerialObject>>
     >;
 }
 
-/**
-    ChooseInfer()
-    ({ x: UInt32 })
-    ({ y: UInt32String })
-    ({
-        k: (t) => {
-            if(t.curObject.x === 0) {
-                return { k: UInt32 };
-            } else {
-                return { y: UInt64 };
-            }
-            t.curObject.y;
-            return null as any;
-        }
-    });
-*/
+
 export function ChooseInfer(): MultiStageContinue<{}, {}> {
     let curObject = {};
 
@@ -313,7 +305,6 @@ export function ChooseInfer(): MultiStageContinue<{}, {}> {
 
     return multiStageContinue;
 }
-
 
 export function isSerialPrimitive(child: SerialObject[""]): child is SerialObjectPrimitive {
     return child !== undefined && !isArray(child) && typeof child === "object" && typeof (child as any).read === "function";
