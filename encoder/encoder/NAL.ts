@@ -1,7 +1,7 @@
 import { SerialObjectPrimitive, ArrayInfinite, SerialObjectPrimitiveLength, LengthObjectSymbol, ChooseInfer, SerialObject, _SerialObjectOutput, TemplateToObject, ReadContext, ErasedKey, ErasedKey0, ErasedKey1, ErasedKey2, ErasedKey3, HandlesBitOffsets, ErasedKey4, ErasedKey5, ErasedKey6, ErasedKey7, ErasedKey8, ErasedKey9, ErasedKey10 } from "./SerialTypes";
 import { LargeBuffer } from "./LargeBuffer";
-import { RawData, UInt8, bitMapping, VoidParse, PeekPrimitive, byteToBits, bitsToByte, UInt16, UInt64, UInt32, CString, DebugString, readBit, UExpGolomb, BitPrimitive, BitPrimitiveN, IntBitN, SExpGolomb, AlignmentBits, Bit, RemainingData } from "./Primitives";
-import { CodeOnlyValue, parseObject, writeObject, Iterate } from "./BinaryCoder";
+import { RawData, UInt8, bitMapping, VoidParse, PeekPrimitive, byteToBits, bitsToByte, UInt16, UInt64, UInt32, CString, DebugString, readBit, UExpGolomb, BitPrimitive, BitPrimitiveN, IntBitN, SExpGolomb, AlignmentBits, Bit, RemainingData, RemainingDataRaw } from "./Primitives";
+import { CodeOnlyValue, parseObject, writeObject, Iterate, getBufferWriteContext, getBufferWriteContextRanges, getAllBufferWriteContextRanges, WriteContextRange, setBufferWriteContext } from "./BinaryCoder";
 import { repeat, range } from "./util/misc";
 
 /*
@@ -100,22 +100,82 @@ export function EmulationPreventionWrapper<T extends SerialObject>(totalLength: 
             // How is buffer becoming not bit aligned here? We should be eating up the remaining data?
             //console.log(`Bit count ${LargeBuffer.GetBitCount(buf)}`);
 
+            let bitPos = 0;
+            let ranges: WriteContextRange[] = [];
+            for(let b of buf.getInternalBufferList()) {
+                let bufRanges = getAllBufferWriteContextRanges(b);
+                for(let range of bufRanges) {
+                    let offset = ~~(bitPos / 8);
+                    range.start += offset;
+                    range.end += offset;
+                    ranges.push(range);
+                }
+
+                bitPos += LargeBuffer.GetBitCount(b);
+            }
+
             let len = buf.getLength();
             for(let i = 0; i < len; i++) {
                 let byte = buf.readUInt8(i);
                 realBytes.push(byte);
             }
 
+            // Make ranges an offset list, so we can easily increment every entry by 1 if you need to add an emulation prevent byte.
+            type OffsetEntry = {
+                offsetToLast: number;
+                size: number;
+                context: string;
+                originalPos: number;
+            };
+            let offsetList: OffsetEntry[] = [];
+            let lastPos = 0;
+            for(let range of ranges) {
+                let offset = range.start - lastPos;
+                lastPos = range.start;
+                offsetList.push({
+                    offsetToLast: offset,
+                    size: range.end - range.start,
+                    context: range.context,
+                    originalPos: range.start,
+                });
+            }
+
+            let offsetIndex = 0;
+
             let finalBytes: number[] = [];
             for(let i = 0; i < realBytes.length; i++) {
-                if(i > 2 && realBytes[i - 2] === 0 && realBytes[i - 1] === 0 && (realBytes[i] & 0b11111100) === 0) {
+                while(offsetIndex < offsetList.length && offsetList[offsetIndex].originalPos <= i) {
+                    offsetIndex++;
+                }
+
+                if(i > 2 && finalBytes[finalBytes.length - 2] === 0 && finalBytes[finalBytes.length - 1] === 0 && (realBytes[i] & 0b11111100) === 0) {
                     //console.log(`EmulationPrevention activated something at byte ${i}`);
                     finalBytes.push(0x03);
+
+                    if(offsetIndex < offsetList.length) {
+                        offsetList[offsetIndex].offsetToLast++;
+                    }
                 }
+
                 finalBytes.push(realBytes[i]);
             }
 
-            return new LargeBuffer([new Buffer(finalBytes)]);
+            let finalBuf = new LargeBuffer([new Buffer(finalBytes)]);
+
+            let curPos = 0;
+            for(let offset of offsetList) {
+                curPos += offset.offsetToLast;
+
+                let range: WriteContextRange = {
+                    start: curPos,
+                    // Eh... this is sort of wrong... but w/e... It is hard to handle this correctly with overlapping ranges.
+                    end: offset.size,
+                    context: offset.context,
+                };
+                setBufferWriteContext(finalBuf, range.context, range);
+            }
+
+            return finalBuf;
         }
     };
 }
@@ -306,7 +366,7 @@ export const NAL_SPS = ChooseInfer()({
     aspect_ratio_info_present_flag: BitPrimitive,
 })({
     [ErasedKey0]: ({aspect_ratio_info_present_flag}) => {
-        if(!aspect_ratio_info_present_flag) return {};
+        if(!aspect_ratio_info_present_flag) return ChooseInfer()({ [ErasedKey]: () => ({}) })();
         return ChooseInfer()({
             // Hmm... I don't know if this is being parsed correctly. 128? That seems wrong...
             //  It should really be 15.
@@ -324,7 +384,7 @@ export const NAL_SPS = ChooseInfer()({
     video_signal_type_present_flag: BitPrimitive,
 })({
     [ErasedKey1]: ({video_signal_type_present_flag}) => {
-        if(!video_signal_type_present_flag) return {};
+        if(!video_signal_type_present_flag) return ChooseInfer()({ [ErasedKey]: () => ({}) })();
         return ChooseInfer()({
             video_format: BitPrimitiveN(3),
             video_full_range_flag: BitPrimitive,
@@ -340,7 +400,7 @@ export const NAL_SPS = ChooseInfer()({
     timing_info_present_flag: BitPrimitive,
 })({
     [ErasedKey2]: ({timing_info_present_flag}) => {
-        if(!timing_info_present_flag) return {};
+        if(!timing_info_present_flag) return ChooseInfer()({ [ErasedKey]: () => ({}) })();
         return {
             num_units_in_tick: IntBitN(32),
             time_scale: IntBitN(32), 
@@ -350,7 +410,7 @@ export const NAL_SPS = ChooseInfer()({
     nal_hrd_parameters_present_flag: BitPrimitive,
 })({
     data0: ({nal_hrd_parameters_present_flag}) => {
-        if(!nal_hrd_parameters_present_flag) return {};
+        if(!nal_hrd_parameters_present_flag) return ChooseInfer()({ [ErasedKey]: () => ({}) })();
         return { hrd_parameters };
     },
     nal_hrd_parameters_present_flag_check: InvariantCheck(({nal_hrd_parameters_present_flag}) => nal_hrd_parameters_present_flag === 0),
@@ -399,7 +459,7 @@ export const NAL_PPS = ChooseInfer()({
     isDone: IsMoreDataLeft,
 })({
     [ErasedKey]: ({isDone}) => {
-        if(isDone) return {};
+        if(isDone) return ChooseInfer()({ [ErasedKey]: () => ({}) })();
         return ChooseInfer()({
             transform_8x8_mode_flag: BitPrimitive,
             pic_scaling_matrix_present_flag: BitPrimitive,
@@ -428,8 +488,20 @@ const FunnyNumberType: SerialObjectPrimitive<number> = {
         }
         return value;
     },
-    write() {
-        throw new Error(`FunnyNumberType.write not implemented`);
+    write(context) {
+        let size = Math.ceil(context.value / 0xFF);
+        let pos = 0;
+        let buf = new Buffer(size);
+
+        
+        let val = context.value;
+        while(val >= 0xFF) {
+            val -= 0xFF;
+            buf[pos++] = 0xFF;
+        }
+        buf[pos++] = val;
+
+        return new LargeBuffer([buf]);
     }
 };
 
@@ -681,7 +753,7 @@ function slice_header(nal_unit_type: number, sps: TemplateToObject<typeof NAL_SP
     })({
         sliceTypeStr: ({slice_type}) => CodeOnlyValue(getSliceType(slice_type)),
         pic_parameter_set_id: UExpGolomb,
-        frame_num: IntBitN(sps.log2_max_frame_num_minus4 + 4),
+        frame_num,
         [ErasedKey0]: () => {
             if(!sps.frame_mbs_only_flag) {
                 return ChooseInfer()({
@@ -849,7 +921,8 @@ function slice_data(nal_unit_type: number, sps: TemplateToObject<typeof NAL_SPS>
             return {};
         }
     })({
-        remaining: RemainingData(BitPrimitive),
+        align: AlignmentBits,
+        remaining: RemainingDataRaw,
     })
     ();
 }

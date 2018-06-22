@@ -5,6 +5,8 @@ import { textFromUInt32, readUInt64BE, textToUInt32, writeUInt64BE } from "./uti
 import { range, flatten } from "./util/misc";
 import { byteToBits, bitsToByte, Bit } from "./Primitives";
 import { isArray } from "./util/type";
+import { createWriteStream } from "fs";
+import { copyBufferWriteContext, getBufferWriteContext, WriteContextRange, getBufferWriteContextRanges, setBufferWriteContext } from "./BinaryCoder";
 
 
 export const MaxUInt32 = Math.pow(2, 32) - 1;
@@ -69,12 +71,25 @@ export class LargeBuffer {
             let bitCount = buffers.reduce((prev, x) => prev + LargeBuffer.GetBitCount(x), 0);
 
             //console.log(`Combining bits. ${bitCount} bits in total. If that number is really high, it means you have a large file that is offset by a bit amount, OR, some parsing code didn't properly create a new LargeBuffer to reduce bit align data before it was combined with another large buffer. (It also means this will take FOREVER).`);
+            let finalRanges: WriteContextRange[] = [];
 
             let finalBits: Bit[] = [];
             for(let i = 0; i < buffers.length; i++) {
                 let curBuf = buffers[i];
+
                 let expectedSize = LargeBuffer.GetBitCount(curBuf);
-                let curBits = LargeBuffer.ToBits(curBuf);
+                let curBitsObj = LargeBuffer.ToBits(curBuf);
+
+                let offset = ~~(finalBits.length / 8);
+                let ranges = curBitsObj.ranges;
+
+                for(let range of ranges) {
+                    range.start += offset;
+                    range.end += offset;
+                    finalRanges.push(range);
+                }
+
+                let curBits = curBitsObj.bits;
                 if(curBits.length !== expectedSize) {
                     throw new Error(`Buffer combined incorrectly. Should have been ${expectedSize} bits, was ${curBits.length} bits`);
                 }
@@ -82,6 +97,9 @@ export class LargeBuffer {
                     finalBits.push(bit);
                 }
             }
+
+            
+            
             
 
             //console.log(`Combining buffers summing to ${finalBits} (${finalBits.length}) to bits, ${this.UID}`);
@@ -115,10 +133,18 @@ export class LargeBuffer {
                 let curBytes = bytes.slice(bytePos, bytePos + curByteCount);
                 let curBuffer = new Buffer(curBytes);
 
+
                 outputBuffers.push(curBuffer);
 
                 bytePos += curByteCount;
             }
+            this.buffers = outputBuffers;
+
+            //console.log("finalRanges", finalRanges);
+            for(let range of finalRanges) {
+                setBufferWriteContext(this, range.context, range);
+            }
+
         } else {
             // Nothing funny, just combine them regularly
             for(let buf of buffers) {
@@ -145,8 +171,8 @@ export class LargeBuffer {
                 let no: never = buf;
                 throw new Error(`Buffer type not handled`);
             }
+            this.buffers = outputBuffers;
         }
-        this.buffers = outputBuffers;       
 
         this.bufferStarts = [];
         let pos = 0;
@@ -157,16 +183,37 @@ export class LargeBuffer {
         this.bufferStarts.push(pos);
     }
 
-    public static ToBits(buffer: Buffer|(Bit[])|LargeBuffer): Bit[] {
+    private static ToBits(buffer: Buffer|(Bit[])|LargeBuffer): {bits: Bit[], ranges: WriteContextRange[]} {
         if(isArray(buffer)) {
-            return buffer;
+            return {bits: buffer, ranges: []};
         }
         if(buffer instanceof Buffer) {
-            return flatten(Array.from(buffer).map(x => byteToBits(x)));
+            console.log("ToBit removing context", getBufferWriteContext(buffer));
+            return {bits: flatten(Array.from(buffer).map(x => byteToBits(x))), ranges: []};
         }
         if(buffer instanceof LargeBuffer) {
             let buffers = buffer.buffers;
-            let bits: Bit[] = flatten(flatten(buffer.buffers.map(x => Array.from(x).map(x => byteToBits(x)))));
+
+            //todonext
+            // Preserve the context!
+
+            let ranges: WriteContextRange[] = [];
+
+            let bitPos = 0;
+            for(let b of buffers) {
+                let offset = ~~(bitPos / 8);
+                let bitSize = LargeBuffer.GetBitCount(b);
+                bitPos += bitSize;
+
+                for(let range of getBufferWriteContextRanges(b)) {
+                    let newRange = {...range};
+                    newRange.start += offset;
+                    newRange.end += offset;
+                    ranges.push(newRange);
+                }
+            }
+
+            let bits: Bit[] = flatten(flatten(buffers.map(x => Array.from(x).map(x => byteToBits(x)))));
 
             if(buffer.bitStartOffset !== 0) {
                 if(buffer.bitStartOffset < 0) {
@@ -181,7 +228,7 @@ export class LargeBuffer {
                 }
                 bits = bits.slice(0, buffer.bitEndOffset);
             }
-            return bits;
+            return {bits, ranges};
         }
 
         let no: never = buffer;
@@ -205,6 +252,13 @@ export class LargeBuffer {
     public WriteToFile(path: string) {
         this.verifyByteAligned();
 
+        let stream = createWriteStream(path);
+        stream.once("open", (fd) => {
+            for(let buf of this.buffers) {
+                stream.write(buf);
+            }
+            stream.end();
+        });
     }
 
     private getBuffer(pos: number): {

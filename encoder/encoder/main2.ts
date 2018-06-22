@@ -32,7 +32,7 @@ import { sum } from "./util/math";
 import * as Jimp from "jimp";
 import { parseObject, filterBox, writeObject, getBufferWriteContext } from "./BinaryCoder";
 import { RootBox, MoofBox, MdatBox, FtypBox, MoovBox, sample_flags, SidxBox } from "./BoxObjects";
-import { SerialObject, _SerialObjectOutput, _SerialIntermediateToFinal } from "./SerialTypes";
+import { SerialObject, _SerialObjectOutput, _SerialIntermediateToFinal, TemplateToObject } from "./SerialTypes";
 import { NALList, parserTest, NALType, SPS, PPS } from "./NAL";
 import { byteToBits, bitsToByte } from "./Primitives";
 
@@ -41,37 +41,36 @@ function testReadFile(path: string) {
     let buf = LargeBuffer.FromFile(path);
     testRead(path, buf);
 }
+function prettyPrint(obj: any): string {
+    let uniqueId = 0;
+    let largeBufferId: { [id: number]: LargeBuffer } = {};
+    function cleanOutput(key: string, value: any) {
+        //if(key === "size") return undefined;
+        //if(key === "headerSize") return undefined;
+        if(value && value instanceof LargeBuffer) {
+            let id = uniqueId++;
+            largeBufferId[id] = value;
+            //return `unique${id}`;
+            return `Buffer(${value.getLength()})`;
+        }
+        return value;
+    }
+    let output = JSON.stringify(obj, cleanOutput, "    ");
+    for(let id in largeBufferId) {
+        let text = `"unique${id}"`;
+        let buffer = largeBufferId[id];
+        let nums: number[] = [];
+        for(let b of buffer.getInternalBufferList()) {
+            for(let i = 0; i < b.length; i++) {
+                nums.push(b[i]);
+            }
+        }
+        output = output.replace(text, `new LargeBuffer([new Buffer([${nums.join(",")}])])`);
+    }
+    return output;
+}
 function testRead(path: string, buf: LargeBuffer) {
     let finalOutput = parseObject(buf, RootBox);
-
-    function prettyPrint(obj: any): string {
-        let uniqueId = 0;
-        let largeBufferId: { [id: number]: LargeBuffer } = {};
-        function cleanOutput(key: string, value: any) {
-            //if(key === "size") return undefined;
-            //if(key === "headerSize") return undefined;
-            if(value && value instanceof LargeBuffer) {
-                let id = uniqueId++;
-                largeBufferId[id] = value;
-                //return `unique${id}`;
-                return `Buffer(${value.getLength()})`;
-            }
-            return value;
-        }
-        let output = JSON.stringify(obj, cleanOutput, "    ");
-        for(let id in largeBufferId) {
-            let text = `"unique${id}"`;
-            let buffer = largeBufferId[id];
-            let nums: number[] = [];
-            for(let b of buffer.getInternalBufferList()) {
-                for(let i = 0; i < b.length; i++) {
-                    nums.push(b[i]);
-                }
-            }
-            output = output.replace(text, `new LargeBuffer([new Buffer([${nums.join(",")}])])`);
-        }
-        return output;
-    }
 
     console.log(`Write to ${basename(path)}.json`);
     writeFileSync(basename(path) + ".json", prettyPrint(finalOutput));
@@ -108,7 +107,7 @@ function testWrite(oldBuf: LargeBuffer, newBuf: LargeBuffer) {
 
         if(oldByte !== newByte) {
             let newBuffer = newBuf.getInternalBuffer(i);
-            let newContext = getBufferWriteContext(newBuffer);
+            let newContext = getBufferWriteContext(newBuffer, i);
 
             console.error(`Byte is wrong at position ${i}. Should be ${oldByte}, was ${newByte}. Write context ${newContext}.\nOld context ${getContext(oldBuf, i)}\nNew context ${getContext(newBuf, i)}`);
             console.error(`Byte is wrong at position ${i}. Should be ${oldByte}, was ${newByte}. Write context ${newContext}.\nOld context ${getContext(oldBuf, i, 10, true)}\nNew context ${getContext(newBuf, i, 10, true)}`);
@@ -362,21 +361,14 @@ async function testRewriteMjpeg() {
 
 async function testRewriteMp4Fragment() {
     let templateMp4 = "./10fps.h264.mp4";
-    let outputFileName = "./youtube2.mp4";
+    let outputFileName = templateMp4 + ".test.mp4";
 
     //let oldBuf = LargeBuffer.FromFile(templateMp4);
     //let newBuf = createVideoOutOfJpegs();
     let newBuf = createVideo2();
 
 
-    let stream = createWriteStream(outputFileName);
-    stream.once("open", function(fd) {
-        let newBuffers = newBuf.getInternalBufferList();
-        for(let buf of newBuffers) {
-            stream.write(buf);
-        }
-        stream.end();
-    });
+    newBuf.WriteToFile(outputFileName);
     
     //testWrite(oldBuf, newBuf);
 
@@ -396,9 +388,9 @@ async function testRewriteMp4Fragment() {
 
         let avcC = filterBox(avcConfig)("avcC")();
 
-        let AVCProfileIndication = 0; //avcC.AVCProfileIndication;
-        let profile_compatibility = 0; //avcC.profile_compatibility;
-        let AVCLevelIndication = 0; //avcC.AVCLevelIndication;
+        let AVCProfileIndication = avcC.AVCProfileIndication;
+        let profile_compatibility = avcC.profile_compatibility;
+        let AVCLevelIndication = avcC.AVCLevelIndication;
 
         let stts = mdia("minf")("stbl")("stts")();
 
@@ -423,6 +415,8 @@ async function testRewriteMp4Fragment() {
             mdats.push(mdat.bytes.slice(pos, pos + sampleSize));
             pos += sampleSize;
         }
+        
+
 
         let ctts = mdia("minf")("stbl")("ctts")();
         
@@ -433,7 +427,7 @@ async function testRewriteMp4Fragment() {
             for(let i = 0; i < cttsInfo.sample_count; i++) {
                 frames.push({
                     buffer: mdats[frameIndex],
-                    composition_offset: 0,//cttsInfo.sample_offset,
+                    composition_offset: cttsInfo.sample_offset,
                 });
                 frameIndex++;
             }
@@ -442,10 +436,12 @@ async function testRewriteMp4Fragment() {
         
         //timescale = 5994;
         //frameTimeInTimescale = 100;
+        /*
         frames = range(0, 10).map(index => ({
             buffer: new LargeBuffer([readFileSync(`C:/Users/quent/Dropbox/camera/encoder/h264/h264/frame${index}.h264`)]),
             composition_offset: 0
         }));
+        */
 
         return {
             timescale,
@@ -459,13 +455,14 @@ async function testRewriteMp4Fragment() {
         };
     }
 
-    type O<T extends SerialObject> = _SerialIntermediateToFinal<_SerialObjectOutput<T>>;
     function createVideo2(): LargeBuffer {
 
         let h264Base = LargeBuffer.FromFile(templateMp4);
 
         let h264Object = readVideoInfo(h264Base);
 
+        //todonext
+        // So... there is timescale information in the SPS, and I can't figure out how to set it correctly.
         let timescale = h264Object.timescale;
         let frameTimeInTimescale = h264Object.frameTimeInTimescale;
         let width = h264Object.width;
@@ -474,7 +471,8 @@ async function testRewriteMp4Fragment() {
         let profile_compatibility = h264Object.profile_compatibility;
         let AVCLevelIndication = h264Object.AVCLevelIndication;
 
-        let outputs: (O<typeof RootBox>["boxes"][0] | LargeBuffer)[] = [];
+        timescale = 1;
+        frameTimeInTimescale = 1;
 
         let ftyp: O<typeof FtypBox> = {
             header: {
@@ -490,39 +488,157 @@ async function testRewriteMp4Fragment() {
             ]
         };
 
-        let keyFrameSampleFlags: SampleFlags = {
-            reserved: 0,
-            is_leading: 0,
-            sample_depends_on: 0,
-            sample_is_depended_on: 0,
-            sample_has_redundancy: 0,
-            sample_padding_value: 0,
-            // This resets the default in trex which sets sample_is_non_sync_sample to 1.
-            //  So this essentially says this is a sync sample, AKA, a key frame (reading this
-            //  frames syncs the video, so we can just read forward from any sync frame).
-            sample_is_non_sync_sample: 0,
-            sample_degradation_priority: 0
+        
+        let sps: SPS = {
+            "profile_idc": 244,
+            "constraint_set0_flag": 0,
+            "constraint_set1_flag": 0,
+            "constraint_set2_flag": 0,
+            "constraint_set3_flag": 0,
+            "constraint_set4_flag": 0,
+            "constraint_set5_flag": 0,
+            "reserved_zero_2bits": [
+                0,
+                0
+            ],
+            "reserved_zero_2bits_check": {},
+            "level_idc": 22,
+            "seq_parameter_set_id": 0,
+            "chroma_format_idc": 3,
+            "separate_colour_plane_flags": 0,
+            "bit_depth_luma_minus8": 0,
+            "bit_depth_chroma_minus8": 0,
+            "qpprime_y_zero_transform_bypass_flag": 0,
+            "seq_scaling_matrix_present_flag": 0,
+            "seq_scaling_matrix_present_flag_check": {},
+            "log2_max_frame_num_minus4": 0,
+            "pic_order_cnt_type": 0,
+            "pic_order_cnt_type_check": {},
+            "log2_max_pic_order_cnt_lsb_minus4": 2,
+            "max_num_ref_frames": 4,
+            "gaps_in_frame_num_value_allowed_flag": 0,
+            "pic_width_in_mbs_minus1": 37,
+            "pic_height_in_map_units_minus1": 24,
+            "frame_mbs_only_flag": 1,
+            "frame_mbs_only_flag_check": {},
+            "direct_8x8_inference_flag": 1,
+            "frame_cropping_flag": 1,
+            "frame_cropping_flag_check": {},
+            "frame_crop_left_offset": 0,
+            "frame_crop_right_offset": 8,
+            "frame_crop_top_offset": 0,
+            "frame_crop_bottom_offset": 0,
+            "vui_parameters_present_flag": 1,
+            "vui_parameters_check": {},
+            "aspect_ratio_info_present_flag": 1,
+            "aspect_ratio_idc": 1,
+            "aspect_ratio_idc_check": {},
+            "overscan_info_present_flag": 0,
+            "overscan_info_present_flag_check": {},
+            "video_signal_type_present_flag": 1,
+            "video_format": [
+                1,
+                0,
+                1
+            ],
+            "video_full_range_flag": 1,
+            "colour_description_present_flag": 0,
+            "colour_description_present_flag_check": {},
+            "chroma_loc_info_present_flag": 0,
+            "chroma_loc_info_present_flag_check": {},
+            "timing_info_present_flag": 1,
+            "num_units_in_tick": frameTimeInTimescale,
+            "time_scale": timescale,
+            "fixed_frame_rate_flag": 0,
+            "nal_hrd_parameters_present_flag": 0,
+            "data0": {},
+            "nal_hrd_parameters_present_flag_check": {},
+            "vcl_hrd_parameters_present_flag": 0,
+            "vcl_hrd_parameters_present_flag_check": {},
+            "pic_struct_present_flag": 0,
+            "bitstream_restriction_flag": 1,
+            "bitstream_restriction_flag_check": {},
+            "motion_vectors_over_pic_boundaries_flag": 1,
+            "max_bytes_per_pic_denom": 0,
+            "max_bits_per_mb_denom": 0,
+            "log2_max_mv_length_horizontal": 10,
+            "log2_max_mv_length_vertical": 10,
+            "max_num_reorder_frames": 2,
+            "max_dec_frame_buffering": 4,
+            trailing: undefined
+        };
+        let pps: PPS = {
+            "pic_parameter_set_id": 0,
+            "seq_parameter_set_id": 0,
+            "entropy_coding_mode_flag": 1,
+            "bottom_field_pic_order_in_frame_present_flag": 0,
+            "num_slice_groups_minus1": 0,
+            "num_slice_groups_minus1_check": {},
+            "slice_group_map_type": -1,
+            "slice_group_change_rate_minus1": -1,
+            "num_ref_idx_l0_default_active_minus1": 2,
+            "num_ref_idx_l1_default_active_minus1": 0,
+            "weighted_pred_flag": 1,
+            "weighted_bipred_idc": 2,
+            "pic_init_qp_minus26": -3,
+            "pic_init_qs_minus26": 0,
+            "chroma_qp_index_offset": 4,
+            "deblocking_filter_control_present_flag": 1,
+            "constrained_intra_pred_flag": 0,
+            "redundant_pic_cnt_present_flag": 0,
+            "isDone": true,
+            RbspTrailingPrimitive: undefined
         };
 
-        let nonKeyFrameSampleFlags: SampleFlags = {
-            reserved: 0,
-            is_leading: 0,
-            sample_depends_on: 0,
-            sample_is_depended_on: 0,
-            sample_has_redundancy: 0,
-            sample_padding_value: 0,
-            sample_is_non_sync_sample: 1,
-            sample_degradation_priority: 0
-        };
+        let frames = h264Object.frames;
 
-        let samples: SampleInfo[] = h264Object.frames.map(x => ({
+        // Try to remove the SEI NAL. If we can't, then it might be needed, and that might be why our video isn't playing.
+        //  Or maybe there is an offset somewhere that instructs the data to be read starting after the SEI, which I am missing
+        //  and accidentally adding to the other video, breaking it.
+
+
+        let frameObjs = parseObject(new LargeBuffer(frames.map(x => x.buffer)), NALList(4, sps, pps)).NALs;
+        frameObjs = frameObjs.slice(1);
+
+        frameObjs.forEach((x, i) => {
+            let obj = x.nalObject;
+            if(obj.type !== "slice") return;
+            let header = obj.nal.slice_header;
+            console.log(header.sliceTypeStr, header.pic_order_cnt_lsb, frames[i].composition_offset);
+        });
+
+        ///*
+        frames = frameObjs
+            .map(x => writeObject(NALList(4, sps, pps), { NALs: [x] }))
+            .map((x, i) => ({
+                buffer: x,
+                // Hmm... maybe calculate this, and also try to speed up the video, or slow it down, and make sure time information
+                //  in the NALs is ignore, and doesn't break the video.
+                composition_offset: frameTimeInTimescale// frames[i].composition_offset,
+            }))
+        ;
+        //*/
+
+        //let newBytes = writeObject(NALList(4, sps, pps), { NALs: frameObjs });
+
+
+        let samples: SampleInfo[] = frames.map(x => ({
             sample_size: x.buffer.getLength(),
             sample_composition_time_offset: x.composition_offset
         }));
 
         let moov = createMoov({
             defaultFlags: nonKeyFrameSampleFlags,
-            durationInTimescale: samples.length * frameTimeInTimescale
+            timescale: timescale,
+            durationInTimescale: samples.length * frameTimeInTimescale,
+            frameTimeInTimescale: frameTimeInTimescale,
+            width: h264Object.width,
+            height: h264Object.height,
+            AVCProfileIndication: h264Object.AVCProfileIndication,
+            profile_compatibility: h264Object.profile_compatibility,
+            AVCLevelIndication: h264Object.AVCLevelIndication,
+            sps,
+            pps,
         });
 
         let moof = createMoof({
@@ -540,13 +656,22 @@ async function testRewriteMp4Fragment() {
                 type: "mdat"
             },
             type: "mdat",
-            bytes: new LargeBuffer(flatten(h264Object.frames.map(x => x.buffer.getInternalBufferList())))
+            bytes: new LargeBuffer(frames.map(x => x.buffer))
         };
 
-        let frames = h264Object.frames;
-        for(let i = 0; i < frames.length; i++) {
-            //writeFileSync(`frameTest${i}.h264`, Buffer.concat(frames[i].buffer.getInternalBufferList()));
-        }
+
+
+        //let frames = h264Object.frames;
+        //console.log(frames.length);
+
+        // Parse the mdat section ourself, and see if we get NALs that line up with the sample_sizes
+        //let frameObjs = parseObject(mdat.bytes, NALList(4, sps, pps)).NALs;
+        //let newBytes = writeObject(NALList(4, sps, pps), { NALs: frameObjs });
+        //testWrite(mdat.bytes, newBytes);
+
+        
+
+
         
         let moofBuf = writeObject(MoofBox, moof);
         let mdatBuf = writeObject(MdatBox, mdat);
@@ -554,304 +679,442 @@ async function testRewriteMp4Fragment() {
         let sidx = createSidx({
             moofSize: moofBuf.getLength(),
             mdatSize: mdatBuf.getLength(),
-            subsegmentDuration: samples.length * frameTimeInTimescale
+            subsegmentDuration: samples.length * frameTimeInTimescale,
+            timescale: timescale,
         });
 
+        let outputs: (O<typeof RootBox>["boxes"][0])[] = [];
         outputs.push(ftyp);
         outputs.push(moov);
         outputs.push(sidx);
-        outputs.push(moofBuf);
+        outputs.push(moof);
         outputs.push(mdat);
 
-        let buffers: Buffer[] = [];
-        for(let bufOrDat of outputs) {
-            let subBuffer: LargeBuffer;
-            if(bufOrDat instanceof LargeBuffer) {
-                subBuffer = bufOrDat;
-            } else {
-                // RootBox has no extra values, so it can be used directly to read a single box
-                subBuffer = writeObject(RootBox, { boxes: [bufOrDat] });
-            }
-            for(let b of subBuffer.getInternalBufferList()) {
-                buffers.push(b);
-            }
-        }
-
-        let finalBuffer = new LargeBuffer(buffers);
+        let finalBuffer = writeObject(RootBox, { boxes: outputs });
 
         console.log(finalBuffer.getLength());
 
         return finalBuffer;
+    }
+}
 
+const keyFrameSampleFlags: SampleFlags = {
+    reserved: 0,
+    is_leading: 0,
+    sample_depends_on: 0,
+    sample_is_depended_on: 0,
+    sample_has_redundancy: 0,
+    sample_padding_value: 0,
+    // This resets the default in trex which sets sample_is_non_sync_sample to 1.
+    //  So this essentially says this is a sync sample, AKA, a key frame (reading this
+    //  frames syncs the video, so we can just read forward from any sync frame).
+    sample_is_non_sync_sample: 0,
+    sample_degradation_priority: 0
+};
 
+const nonKeyFrameSampleFlags: SampleFlags = {
+    reserved: 0,
+    is_leading: 0,
+    sample_depends_on: 0,
+    sample_is_depended_on: 0,
+    sample_has_redundancy: 0,
+    sample_padding_value: 0,
+    sample_is_non_sync_sample: 1,
+    sample_degradation_priority: 0
+};
 
-        type SampleFlags = O<{x: typeof sample_flags}>["x"];
+type O<T extends SerialObject> = TemplateToObject<T>;
+type SampleFlags = O<{x: typeof sample_flags}>["x"];
 
-        function createMoov(
-            d: {
-                defaultFlags: SampleFlags;
-                durationInTimescale: number;
-            }
-        ): O<typeof MoovBox> {
-            return {
+function createMoov(
+    d: {
+        defaultFlags: SampleFlags;
+        timescale: number;
+        durationInTimescale: number;
+        frameTimeInTimescale: number;
+        width: number;
+        height: number;
+        AVCProfileIndication: number;
+        profile_compatibility: number;
+        AVCLevelIndication: number;
+        sps: SPS,
+        pps: PPS,
+    }
+): O<typeof MoovBox> {
+    return {
+        header: {
+            type: "moov"
+        },
+        type: "moov",
+        boxes: [
+            {
                 header: {
-                    type: "moov"
+                    type: "mvhd"
                 },
-                type: "moov",
+                type: "mvhd",
+                version: 0,
+                flags: 0,
+                times: {
+                    creation_time: 0,
+                    modification_time: 0,
+                    timescale: d.timescale,
+                    duration: d.durationInTimescale
+                },
+                rate: 1,
+                volume: 1,
+                reserved: 0,
+                reserved0: 0,
+                reserved1: 0,
+                matrix: [65536, 0, 0, 0, 6, 0, 0, 0, 4],
+                pre_defined: [0, 0, 0, 0, 0, 0],
+                next_track_ID: 2
+            },
+            {
+                header: {
+                    type: "mvex"
+                },
+                type: "mvex",
                 boxes: [
                     {
                         header: {
-                            type: "mvhd"
+                            type: "trex"
                         },
-                        type: "mvhd",
+                        type: "trex",
                         version: 0,
                         flags: 0,
+                        track_ID: 1,
+                        // Index of sample information in stsd. Could be used to change width/height?
+                        default_sample_description_index: 1,
+                        default_sample_duration: d.frameTimeInTimescale,
+                        default_sample_size: 0,
+                        default_sample_flags: d.defaultFlags
+                    }
+                ]
+            },
+            {
+                header: {
+                    type: "trak"
+                },
+                type: "trak",
+                boxes: [
+                    {
+                        header: {
+                            type: "tkhd"
+                        },
+                        type: "tkhd",
+                        version: 0,
+                        flags: {
+                            reserved: 0,
+                            track_size_is_aspect_ratio: 0,
+                            track_in_preview: 0,
+                            track_in_movie: 1,
+                            track_enabled: 1
+                        },
                         times: {
                             creation_time: 0,
                             modification_time: 0,
-                            timescale: timescale,
-                            duration: d.durationInTimescale
+                            track_ID: 1,
+                            reserved: 0,
+                            duration: 0
                         },
-                        rate: 1,
-                        volume: 1,
-                        reserved: 0,
                         reserved0: 0,
                         reserved1: 0,
-                        matrix: [65536, 0, 0, 0, 6, 0, 0, 0, 4],
-                        pre_defined: [0, 0, 0, 0, 0, 0],
-                        next_track_ID: 2
+                        layer: 0,
+                        alternate_group: 0,
+                        volume: 0,
+                        reserved2: 0,
+                        matrix: [65536, 0, 0, 0, 65536, 0, 0, 0, 1073741824],
+                        width: d.width,
+                        height: d.height,
                     },
                     {
                         header: {
-                            type: "mvex"
+                            type: "mdia"
                         },
-                        type: "mvex",
+                        type: "mdia",
                         boxes: [
                             {
                                 header: {
-                                    type: "trex"
+                                    type: "mdhd"
                                 },
-                                type: "trex",
+                                type: "mdhd",
                                 version: 0,
                                 flags: 0,
-                                track_ID: 1,
-                                // Index of sample information in stsd. Could be used to change width/height?
-                                default_sample_description_index: 1,
-                                default_sample_duration: frameTimeInTimescale,
-                                default_sample_size: 0,
-                                default_sample_flags: d.defaultFlags
-                            }
-                        ]
-                    },
-                    {
-                        header: {
-                            type: "trak"
-                        },
-                        type: "trak",
-                        boxes: [
-                            {
-                                header: {
-                                    type: "tkhd"
-                                },
-                                type: "tkhd",
-                                version: 0,
-                                flags: {
-                                    reserved: 0,
-                                    track_size_is_aspect_ratio: 0,
-                                    track_in_preview: 0,
-                                    track_in_movie: 1,
-                                    track_enabled: 1
-                                },
-                                times: {
-                                    creation_time: 0,
-                                    modification_time: 0,
-                                    track_ID: 1,
-                                    reserved: 0,
-                                    duration: 0
-                                },
-                                reserved0: 0,
-                                reserved1: 0,
-                                layer: 0,
-                                alternate_group: 0,
-                                volume: 0,
-                                reserved2: 0,
-                                matrix: [65536, 0, 0, 0, 65536, 0, 0, 0, 1073741824],
-                                width: width,
-                                height: height,
+                                creation_time: 0,
+                                modification_time: 0,
+                                timescale: d.timescale,
+                                duration: 0,
+                                language: "und",
+                                pre_defined: 0
                             },
                             {
                                 header: {
-                                    type: "mdia"
+                                    type: "hdlr"
                                 },
-                                type: "mdia",
+                                type: "hdlr",
+                                version: 0,
+                                flags: 0,
+                                pre_defined: 0,
+                                handler_type: "vide",
+                                reserved: [0,0,0],
+                                name: "VideoHandler"
+                            },
+                            {
+                                header: {
+                                    type: "minf"
+                                },
+                                type: "minf",
                                 boxes: [
                                     {
                                         header: {
-                                            type: "mdhd"
+                                            type: "vmhd"
                                         },
-                                        type: "mdhd",
+                                        type: "vmhd",
                                         version: 0,
-                                        flags: 0,
-                                        creation_time: 0,
-                                        modification_time: 0,
-                                        timescale: timescale,
-                                        duration: 0,
-                                        language: "und",
-                                        pre_defined: 0
+                                        flags: 1,
+                                        graphicsmode: 0,
+                                        opcolor: [0, 0, 0]
                                     },
                                     {
                                         header: {
-                                            type: "hdlr"
+                                            type: "dinf"
                                         },
-                                        type: "hdlr",
-                                        version: 0,
-                                        flags: 0,
-                                        pre_defined: 0,
-                                        handler_type: "vide",
-                                        reserved: [0,0,0],
-                                        name: "VideoHandler"
-                                    },
-                                    {
-                                        header: {
-                                            type: "minf"
-                                        },
-                                        type: "minf",
+                                        type: "dinf",
                                         boxes: [
                                             {
                                                 header: {
-                                                    type: "vmhd"
+                                                    type: "dref"
                                                 },
-                                                type: "vmhd",
+                                                type: "dref",
                                                 version: 0,
-                                                flags: 1,
-                                                graphicsmode: 0,
-                                                opcolor: [0, 0, 0]
-                                            },
-                                            {
-                                                header: {
-                                                    type: "dinf"
-                                                },
-                                                type: "dinf",
+                                                flags: 0,
+                                                entry_count: 1,
                                                 boxes: [
                                                     {
                                                         header: {
-                                                            type: "dref"
+                                                            type: "url "
                                                         },
-                                                        type: "dref",
+                                                        type: "url ",
                                                         version: 0,
-                                                        flags: 0,
-                                                        entry_count: 1,
-                                                        boxes: [
-                                                            {
-                                                                header: {
-                                                                    type: "url "
-                                                                },
-                                                                type: "url ",
-                                                                version: 0,
-                                                                flags: {
-                                                                    reserved: 0,
-                                                                    media_is_in_same_file: 1
-                                                                }
-                                                            }
-                                                        ]
+                                                        flags: {
+                                                            reserved: 0,
+                                                            media_is_in_same_file: 1
+                                                        }
                                                     }
                                                 ]
-                                            },
+                                            }
+                                        ]
+                                    },
+                                    {
+                                        header: {
+                                            type: "stbl"
+                                        },
+                                        type: "stbl",
+                                        boxes: [
                                             {
                                                 header: {
-                                                    type: "stbl"
+                                                    type: "stsd"
                                                 },
-                                                type: "stbl",
+                                                type: "stsd",
+                                                version: 0,
+                                                flags: 0,
+                                                entry_count: 1,
                                                 boxes: [
                                                     {
-                                                        header: {
-                                                            type: "stsd"
+                                                        "header": {
+                                                            "size": 153,
+                                                            "type": "avc1",
+                                                            "headerSize": 8
                                                         },
-                                                        type: "stsd",
-                                                        version: 0,
-                                                        flags: 0,
-                                                        entry_count: 1,
-                                                        boxes: [
+                                                        "type": "avc1",
+                                                        "reserved": [
+                                                            0,
+                                                            0,
+                                                            0,
+                                                            0,
+                                                            0,
+                                                            0
+                                                        ],
+                                                        "data_reference_index": 1,
+                                                        "pre_defined": 0,
+                                                        "reserved1": 0,
+                                                        "pre_defined1": [
+                                                            0,
+                                                            0,
+                                                            0
+                                                        ],
+                                                        width: d.width,
+                                                        height: d.height,
+                                                        // DPI. Useless, and always constant
+                                                        horizresolution: 0x00480000,
+                                                        vertresolution: 0x00480000,
+                                                        "reserved2": 0,
+                                                        "frame_count": 1,
+                                                        "compressorname": [
+                                                            0,
+                                                            0,
+                                                            0,
+                                                            0,
+                                                            0,
+                                                            0,
+                                                            0,
+                                                            0,
+                                                            0,
+                                                            0,
+                                                            0,
+                                                            0,
+                                                            0,
+                                                            0,
+                                                            0,
+                                                            0,
+                                                            0,
+                                                            0,
+                                                            0,
+                                                            0,
+                                                            0,
+                                                            0,
+                                                            0,
+                                                            0,
+                                                            0,
+                                                            0,
+                                                            0,
+                                                            0,
+                                                            0,
+                                                            0,
+                                                            0,
+                                                            0
+                                                        ],
+                                                        "depth": 24,
+                                                        "pre_defined2": -1,
+                                                        "boxes": [
                                                             {
-                                                                header: {
-                                                                    type: "avc1"
+                                                                "header": {
+                                                                    "size": 51,
+                                                                    "type": "avcC",
+                                                                    "headerSize": 8
                                                                 },
-                                                                type: "avc1",
-                                                                reserved: [0, 0, 0, 0, 0, 0],
-                                                                // Index into dref
-                                                                data_reference_index: 1,
-                                                                pre_defined: 0,
-                                                                reserved1: 0,
-                                                                pre_defined1: [0, 0, 0],
-                                                                width: width,
-                                                                height: height,
-                                                                // DPI. Useless, and always constant
-                                                                horizresolution: 0x00480000,
-                                                                vertresolution: 0x00480000,
-                                                                reserved2: 0,
-                                                                frame_count: 1,
-                                                                compressorname: [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
-                                                                depth: 24,
-                                                                pre_defined2: -1,
-                                                                config: [
+                                                                "type": "avcC",
+                                                                "configurationVersion": 1,
+                                                                AVCProfileIndication: d.AVCProfileIndication,
+                                                                profile_compatibility: d.profile_compatibility,
+                                                                AVCLevelIndication: d.AVCLevelIndication,
+                                                                "reserved0": [
+                                                                    1,
+                                                                    1,
+                                                                    1,
+                                                                    1,
+                                                                    1,
+                                                                    1
+                                                                ],
+                                                                "lengthSizeMinusOne": 3,
+                                                                "reserved1": [
+                                                                    1,
+                                                                    1,
+                                                                    1
+                                                                ],
+                                                                "numOfSequenceParameterSets": 1,
+                                                                "sequenceParameterSets": [
                                                                     {
-                                                                        header: {
-                                                                            type: "avcC"
-                                                                        },
-                                                                        type: "avcC",
-                                                                        configurationVersion: 1,
-                                                                        AVCProfileIndication: AVCProfileIndication,
-                                                                        profile_compatibility: profile_compatibility,
-                                                                        AVCLevelIndication: AVCLevelIndication,
-                                                                        notImportant: [255, 225, 0, 27, 103, 244, 0, 22, 145, 155, 40, 19, 6, 124, 79, 128, 182, 64, 0, 0, 3, 0, 64, 0, 0, 5, 3, 197, 139, 101, 128, 1, 0, 5, 104, 235, 227, 196, 72, 253, 248, 248, 0]
+                                                                        "sps": {
+                                                                            "NALLength": {
+                                                                                "size": 29
+                                                                            },
+                                                                            "bitHeader0": {
+                                                                                "forbidden_zero_bit": 0,
+                                                                                "nal_ref_idc": 3,
+                                                                                "nal_unit_type": 7
+                                                                            },
+                                                                            "forbidden_zero_bit_check": {},
+                                                                            "extension": {
+                                                                                "nalUnitHeaderBytes": 1
+                                                                            },
+                                                                            "nalObject": {
+                                                                                "type": "sps",
+                                                                                "nal": d.sps
+                                                                            }
+                                                                        }
                                                                     }
                                                                 ],
-                                                                notImportant: [0, 0, 0, 16, 112, 97, 115, 112, 0, 0, 0, 1, 0, 0, 0, 1]
+                                                                "test": 5,
+                                                                "numOfPictureParameterSets": 1,
+                                                                "pictureParameterSets": [
+                                                                    {
+                                                                        "pps": {
+                                                                            "NALLength": {
+                                                                                "size": 7
+                                                                            },
+                                                                            "bitHeader0": {
+                                                                                "forbidden_zero_bit": 0,
+                                                                                "nal_ref_idc": 3,
+                                                                                "nal_unit_type": 8
+                                                                            },
+                                                                            "forbidden_zero_bit_check": {},
+                                                                            "extension": {
+                                                                                "nalUnitHeaderBytes": 1
+                                                                            },
+                                                                            "nalObject": {
+                                                                                "type": "pps",
+                                                                                "nal": d.pps
+                                                                            }
+                                                                        }
+                                                                    }
+                                                                ],
+                                                                "remainingBytes": []
+                                                            },
+                                                            {
+                                                                "header": {
+                                                                    "size": 16,
+                                                                    "type": "pasp",
+                                                                    "headerSize": 8
+                                                                },
+                                                                "type": "pasp",
+                                                                "hSpacing": 1,
+                                                                "vSpacing": 1
                                                             }
                                                         ]
-                                                    },
-                                                    {
-                                                        header: {
-                                                            type: "stts"
-                                                        },
-                                                        type: "stts",
-                                                        version: 0,
-                                                        flags: 0,
-                                                        entry_count: 0,
-                                                        samples: []
-                                                    },
-                                                    {
-                                                        header: {
-                                                            type: "stsc"
-                                                        },
-                                                        type: "stsc",
-                                                        version: 0,
-                                                        flags: 0,
-                                                        entry_count: 0,
-                                                        entries: []
-                                                    },
-                                                    {
-                                                        header: {
-                                                            type: "stsz"
-                                                        },
-                                                        type: "stsz",
-                                                        version: 0,
-                                                        flags: 0,
-                                                        sample_size: 0,
-                                                        sample_count: 0,
-                                                        sample_sizes: []
-                                                    },
-                                                    {
-                                                        header: {
-                                                            type: "stco"
-                                                        },
-                                                        type: "stco",
-                                                        version: 0,
-                                                        flags: 0,
-                                                        entry_count: 0,
-                                                        chunk_offsets: []
                                                     }
                                                 ]
+                                            },
+                                            {
+                                                header: {
+                                                    type: "stts"
+                                                },
+                                                type: "stts",
+                                                version: 0,
+                                                flags: 0,
+                                                entry_count: 0,
+                                                samples: []
+                                            },
+                                            {
+                                                header: {
+                                                    type: "stsc"
+                                                },
+                                                type: "stsc",
+                                                version: 0,
+                                                flags: 0,
+                                                entry_count: 0,
+                                                entries: []
+                                            },
+                                            {
+                                                header: {
+                                                    type: "stsz"
+                                                },
+                                                type: "stsz",
+                                                version: 0,
+                                                flags: 0,
+                                                sample_size: 0,
+                                                sample_count: 0,
+                                                sample_sizes: []
+                                            },
+                                            {
+                                                header: {
+                                                    type: "stco"
+                                                },
+                                                type: "stco",
+                                                version: 0,
+                                                flags: 0,
+                                                entry_count: 0,
+                                                chunk_offsets: []
                                             }
                                         ]
                                     }
@@ -860,193 +1123,202 @@ async function testRewriteMp4Fragment() {
                         ]
                     }
                 ]
-            };
-        }
+            }
+        ]
+    };
+}
 
-        function createSidx(d: {moofSize: number, mdatSize: number, subsegmentDuration: number}): O<typeof SidxBox> {
-            // There is a sidx per moof and mdat.
-            return {
-                header: {
-                    type: "sidx"
+function createSidx(
+    d: {
+        moofSize: number;
+        mdatSize: number;
+        subsegmentDuration: number;
+        timescale: number;
+    }
+): O<typeof SidxBox> {
+    // There is a sidx per moof and mdat.
+    return {
+        header: {
+            type: "sidx"
+        },
+        type: "sidx",
+        version: 0,
+        flags: 0,
+        reference_ID: 1,
+        timescale: d.timescale,
+        times: {
+            // Not used, doesn't matter?
+            earliest_presentation_time: 0,
+            // Not useful, we can just use reference_offset
+            first_offset: 0
+        },
+        reserved: 0,
+        reference_count: 1,
+        ref: [
+            // Nothing in here matters except reference_offset, and MAYBE subsegment_duration, but I am not even convinced of that.
+            {
+                // The whole SAP and reference_type garbage doesn't matter. Just put 0s, which means "no information of SAPs is provided",
+                //  and use sample_is_non_sync_sample === 0 to indicate SAPs. Also, sample_is_non_sync_sample is used anyway, so these values
+                //  are overriden regardless of what we do.
+                a: {
+                    reference_type: 0,
+                    reference_offset: d.moofSize + d.mdatSize
                 },
-                type: "sidx",
-                version: 0,
-                flags: 0,
-                reference_ID: 1,
-                timescale: timescale,
-                times: {
-                    // Not used, doesn't matter?
-                    earliest_presentation_time: 0,
-                    // Not useful, we can just use reference_offset
-                    first_offset: 0
-                },
-                reserved: 0,
-                reference_count: 1,
-                ref: [
-                    // Nothing in here matters except reference_offset, and MAYBE subsegment_duration, but I am not even convinced of that.
-                    {
-                        // The whole SAP and reference_type garbage doesn't matter. Just put 0s, which means "no information of SAPs is provided",
-                        //  and use sample_is_non_sync_sample === 0 to indicate SAPs. Also, sample_is_non_sync_sample is used anyway, so these values
-                        //  are overriden regardless of what we do.
-                        a: {
-                            reference_type: 0,
-                            reference_offset: d.moofSize + d.mdatSize
-                        },
-                        // Looks like this isn't used. But we could calculate it correctly, instead of however it was calculated by mp4box
-                        subsegment_duration: d.subsegmentDuration,
-                        SAP: {
-                            starts_with_SAP: 0,
-                            // a SAP of type 1 or type 2 is indicated as a sync sample, or by "sample_is_non_sync_sample" equal to 0 in the movie fragments.
-                            //  So... we have sample_is_non_sync_sample === 0 in the movie fragments, so this can be 0 here.
-                            SAP_type: 0,
-                            SAP_delta_time: 0
-                        }
-                    }
-                ]
-            };
-        }
-
-        type SampleInfo = {
-            sample_duration?: number;
-            sample_size?: number;
-            sample_flags?: SampleFlags;
-            sample_composition_time_offset?: number;
-        }
-        function createMoof(d: {
-            // Order of the moof. Counting starts at 1.
-            sequenceNumber: number;
-            baseMediaDecodeTimeInTimescale: number;
-            samples: SampleInfo[];
-            forcedFirstSampleFlags?: SampleFlags;
-            defaultSampleDurationInTimescale?: number;
-            defaultSampleFlags?: SampleFlags;
-        }): O<typeof MoofBox> {
-
-            let sample_durations = d.samples.filter(x => x.sample_duration !== undefined).length;
-            let sample_sizes = d.samples.filter(x => x.sample_size !== undefined).length;
-            let sample_flagss = d.samples.filter(x => x.sample_flags !== undefined).length;
-            let sample_composition_time_offsets = d.samples.filter(x => x.sample_composition_time_offset !== undefined).length;
-
-            if(sample_durations !== 0 && sample_durations !== d.samples.length) {
-                throw new Error(`Some samples have sample_duration, others don't. This is invalid, samples must be consistent.`);
+                // Looks like this isn't used. But we could calculate it correctly, instead of however it was calculated by mp4box
+                subsegment_duration: d.subsegmentDuration,
+                SAP: {
+                    starts_with_SAP: 0,
+                    // a SAP of type 1 or type 2 is indicated as a sync sample, or by "sample_is_non_sync_sample" equal to 0 in the movie fragments.
+                    //  So... we have sample_is_non_sync_sample === 0 in the movie fragments, so this can be 0 here.
+                    SAP_type: 0,
+                    SAP_delta_time: 0
+                }
             }
-            if(sample_sizes !== 0 && sample_sizes !== d.samples.length) {
-                throw new Error(`Some samples have sample_size, others don't. This is invalid, samples must be consistent.`);
-            }
-            if(sample_flagss !== 0 && sample_flagss !== d.samples.length) {
-                throw new Error(`Some samples have sample_flags, others don't. This is invalid, samples must be consistent. Even if there is a forceFirstSampleFlags, either ever sample needs flags, or none should have it.`);
-            }
-            if(sample_composition_time_offsets !== 0 && sample_composition_time_offsets !== d.samples.length) {
-                throw new Error(`Some samples have sample_composition_time_offset, others don't. This is invalid, samples must be consistent.`);
-            }
+        ]
+    };
+}
 
-            let has_sample_durations = sample_durations > 0;
-            let has_sample_sizes = sample_sizes > 0;
-            let has_sample_flags = sample_flagss > 0;
-            let has_composition_offsets = sample_composition_time_offsets > 0;
+type SampleInfo = {
+    sample_duration?: number;
+    sample_size?: number;
+    sample_flags?: SampleFlags;
+    sample_composition_time_offset?: number;
+}
+function createMoof(
+    d: {
+        // Order of the moof. Counting starts at 1.
+        sequenceNumber: number;
+        baseMediaDecodeTimeInTimescale: number;
+        samples: SampleInfo[];
+        forcedFirstSampleFlags?: SampleFlags;
+        defaultSampleDurationInTimescale?: number;
+        defaultSampleFlags?: SampleFlags;
+    }
+): O<typeof MoofBox> {
 
-            function createMoofInternal(moofSize: number) {
-                let moof: O<typeof MoofBox> = {
+    let sample_durations = d.samples.filter(x => x.sample_duration !== undefined).length;
+    let sample_sizes = d.samples.filter(x => x.sample_size !== undefined).length;
+    let sample_flagss = d.samples.filter(x => x.sample_flags !== undefined).length;
+    let sample_composition_time_offsets = d.samples.filter(x => x.sample_composition_time_offset !== undefined).length;
+
+    if(sample_durations !== 0 && sample_durations !== d.samples.length) {
+        throw new Error(`Some samples have sample_duration, others don't. This is invalid, samples must be consistent.`);
+    }
+    if(sample_sizes !== 0 && sample_sizes !== d.samples.length) {
+        throw new Error(`Some samples have sample_size, others don't. This is invalid, samples must be consistent.`);
+    }
+    if(sample_flagss !== 0 && sample_flagss !== d.samples.length) {
+        throw new Error(`Some samples have sample_flags, others don't. This is invalid, samples must be consistent. Even if there is a forceFirstSampleFlags, either ever sample needs flags, or none should have it.`);
+    }
+    if(sample_composition_time_offsets !== 0 && sample_composition_time_offsets !== d.samples.length) {
+        throw new Error(`Some samples have sample_composition_time_offset, others don't. This is invalid, samples must be consistent.`);
+    }
+
+    let has_sample_durations = sample_durations > 0;
+    let has_sample_sizes = sample_sizes > 0;
+    let has_sample_flags = sample_flagss > 0;
+    let has_composition_offsets = sample_composition_time_offsets > 0;
+
+    function createMoofInternal(moofSize: number) {
+        let moof: O<typeof MoofBox> = {
+            header: {
+                type: "moof"
+            },
+            type: "moof",
+            boxes: [
+                {
                     header: {
-                        type: "moof"
+                        type: "mfhd"
                     },
-                    type: "moof",
+                    type: "mfhd",
+                    version: 0,
+                    flags: 0,
+                    sequence_number: d.sequenceNumber
+                },
+                {
+                    header: {
+                        type: "traf"
+                    },
+                    type: "traf",
                     boxes: [
                         {
                             header: {
-                                type: "mfhd"
+                                type: "tfhd"
                             },
-                            type: "mfhd",
+                            type: "tfhd",
                             version: 0,
-                            flags: 0,
-                            sequence_number: d.sequenceNumber
+                            flags: {
+                                reserved3: 0,
+                                default_base_is_moof: 1,
+                                duration_is_empty: 0,
+                                reserved2: 0,
+                                // Eh... there is no reason to set this, as we can set the default flags in the moov (trex) anyway.
+                                default_sample_flags_present: d.defaultSampleFlags === undefined ? 0 : 1,
+                                // I can't imagine all samples having the same size, so let's not even set this.
+                                default_sample_size_present: 0,
+                                //  Also set in trex, but we MAY have different durations for different chunks.
+                                default_sample_duration_present: d.defaultSampleDurationInTimescale === undefined ? 0 : 1,
+                                reserved1: 0,
+                                sample_description_index_present: 0,
+                                base_data_offset_present: 0
+                            },
+                            track_ID: 1,
+                            values: Object.assign({},
+                                d.defaultSampleDurationInTimescale === undefined ? {} : { default_sample_duration: d.defaultSampleDurationInTimescale },
+                                d.defaultSampleFlags === undefined ? {} : { default_sample_flags: d.defaultSampleFlags }
+                            )
                         },
                         {
                             header: {
-                                type: "traf"
+                                type: "tfdt"
                             },
-                            type: "traf",
-                            boxes: [
-                                {
-                                    header: {
-                                        type: "tfhd"
-                                    },
-                                    type: "tfhd",
-                                    version: 0,
-                                    flags: {
-                                        reserved3: 0,
-                                        default_base_is_moof: 1,
-                                        duration_is_empty: 0,
-                                        reserved2: 0,
-                                        // Eh... there is no reason to set this, as we can set the default flags in the moov (trex) anyway.
-                                        default_sample_flags_present: d.defaultSampleFlags === undefined ? 0 : 1,
-                                        // I can't imagine all samples having the same size, so let's not even set this.
-                                        default_sample_size_present: 0,
-                                        //  Also set in trex, but we MAY have different durations for different chunks.
-                                        default_sample_duration_present: d.defaultSampleDurationInTimescale === undefined ? 0 : 1,
-                                        reserved1: 0,
-                                        sample_description_index_present: 0,
-                                        base_data_offset_present: 0
-                                    },
-                                    track_ID: 1,
-                                    values: Object.assign({},
-                                        d.defaultSampleDurationInTimescale === undefined ? {} : { default_sample_duration: d.defaultSampleDurationInTimescale },
-                                        d.defaultSampleFlags === undefined ? {} : { default_sample_flags: d.defaultSampleFlags }
-                                    )
-                                },
-                                {
-                                    header: {
-                                        type: "tfdt"
-                                    },
-                                    type: "tfdt",
-                                    version: 0,
-                                    flags: 0,
-                                    values: {
-                                        baseMediaDecodeTime: d.baseMediaDecodeTimeInTimescale
-                                    }
-                                },
-                                {
-                                    header: {
-                                        type: "trun"
-                                    },
-                                    type: "trun",
-                                    version: 0,
-                                    flags: {
-                                        reserved2: 0,
-                                        sample_composition_time_offsets_present: has_composition_offsets ? 1 : 0,
-                                        sample_flags_present: has_sample_flags ? 1 : 0,
-                                        sample_size_present: has_sample_sizes ? 1 : 0,
-                                        sample_duration_present: has_sample_durations ? 1 : 0,
-                                        reserved1: 0,
-                                        first_sample_flags_present: d.forcedFirstSampleFlags === undefined ? 0 : 1,
-                                        reserved0: 0,
-                                        data_offset_present: 1
-                                    },
-                                    sample_count: d.samples.length,
-                                    values: Object.assign(
-                                        { data_offset: moofSize + 8 },
-                                        // Union assignment has bugs, so... this is sort of weird
-                                        d.forcedFirstSampleFlags === undefined ? {
-                                            first_sample_flags: undefined
-                                        } : {
-                                            first_sample_flags: d.forcedFirstSampleFlags
-                                        }
-                                    ),
-                                    sample_values: d.samples
+                            type: "tfdt",
+                            version: 0,
+                            flags: 0,
+                            values: {
+                                baseMediaDecodeTime: d.baseMediaDecodeTimeInTimescale
+                            }
+                        },
+                        {
+                            header: {
+                                type: "trun"
+                            },
+                            type: "trun",
+                            version: 0,
+                            flags: {
+                                reserved2: 0,
+                                sample_composition_time_offsets_present: has_composition_offsets ? 1 : 0,
+                                sample_flags_present: has_sample_flags ? 1 : 0,
+                                sample_size_present: has_sample_sizes ? 1 : 0,
+                                sample_duration_present: has_sample_durations ? 1 : 0,
+                                reserved1: 0,
+                                first_sample_flags_present: d.forcedFirstSampleFlags === undefined ? 0 : 1,
+                                reserved0: 0,
+                                data_offset_present: 1
+                            },
+                            sample_count: d.samples.length,
+                            values: Object.assign(
+                                { data_offset: moofSize + 8 },
+                                // Union assignment has bugs, so... this is sort of weird
+                                d.forcedFirstSampleFlags === undefined ? {
+                                    first_sample_flags: undefined
+                                } : {
+                                    first_sample_flags: d.forcedFirstSampleFlags
                                 }
-                            ]
+                            ),
+                            sample_values: d.samples
                         }
                     ]
-                };
-                return moof;
-            }
-
-            let size = writeObject(MoofBox, createMoofInternal(0)).getLength();
-            let moof = createMoofInternal(size);
-
-            return moof;
-        }
+                }
+            ]
+        };
+        return moof;
     }
+
+    let size = writeObject(MoofBox, createMoofInternal(0)).getLength();
+    let moof = createMoofInternal(size);
+
+    return moof;
 }
 
 function getFrames(path: string): LargeBuffer[] {
@@ -1194,8 +1466,6 @@ function getH264NALs(bufs: { buf: LargeBuffer, path: string }[]): NALType[] {
         let path = frameObj.path;
         let obj = parseObject(frame, NALList(4, sps, pps));
 
-        console.log(obj);
-
         // Must be a forEach loop, to disconnect the sps variable from these assignments. Otherwise typescript
         //  thinks the assignment (which insures sps is not undefined), maybe impact the output of parseObject,
         //  and so says it cannot determine the type.
@@ -1220,14 +1490,153 @@ function getH264NALs(bufs: { buf: LargeBuffer, path: string }[]): NALType[] {
 
 
 function encodeFrames(frames: LargeBuffer[]) {
-    // I am going to assume there is no frame reordering. 
+    // I am going to assume there is no frame reordering.
+}
+
+function printNals(nals: NALType[]): void {
+    for(let nal of nals) {
+        let n = nal.nalObject;
+        //if(n.type === "slice") continue;
+        console.log(n.type, nal.bitHeader0.nal_unit_type);
+        //console.log(n);
+    }
+}
+
+function testNALs(paths: string[]) {
+    let bufs = paths.map(x => ({ buf: LargeBuffer.FromFile(x), path: x }));
+    let entireBuf = new LargeBuffer(bufs.map(x => x.buf));
+    let nals = getH264NALs(bufs);
+    let output = writeObject(NALList(4, undefined, undefined), { NALs: nals });
+
+    testWrite(entireBuf, output);
 }
 
 //todonext
-// Okay. Now we can finally try taking the NALs from the generated video, putting the sps and pps where they belong, updating
-//  the frame reference stuff, and seeing if the video plays!
+// Simplify testRewriteMp4Fragment, add parameters for sps and pps to createMoov, and then
+//  make createVideo3 use all the regular create functions to create a video from some parameters,
+//  and paths to files containing NALs
 
-function modifyMP4(path: string): void {
+
+
+function createVideo3 (
+    outputFileName: string,
+    videoInfo: {
+
+    },
+    framePaths: string[],
+): void {
+
+    let ftyp: O<typeof FtypBox> = {
+        header: {
+            type: "ftyp"
+        },
+        type: "ftyp",
+        major_brand: "iso5",
+        minor_version: 1,
+        compatible_brands: [
+            "avc1",
+            "iso5",
+            "dash"
+        ]
+    };
+
+    let timescale = 10;
+    let frameTimeInTimescale = 1;
+    let width = 600;
+	let height = 400;
+
+    let NALs = getH264NALsFiles(framePaths);
+    let spsObject = NALs.filter(x => x.nalObject.type === "sps")[0];
+    if(spsObject.nalObject.type !== "sps") {
+        throw new Error("impossible");
+    }
+    let sps = spsObject.nalObject.nal;
+
+    let ppsObject = NALs.filter(x => x.nalObject.type === "pps")[0];
+    if(ppsObject.nalObject.type !== "pps") {
+        throw new Error("impossible");
+    }
+    let pps = ppsObject.nalObject.nal;
+
+    for(let NAL of NALs) {
+        if(NAL.nalObject.type !== "slice") continue;
+        let header = NAL.nalObject.nal.slice_header;
+        console.log(header.sliceTypeStr, header.pic_order_cnt_lsb);
+    }
+
+    //if(true as boolean) throw new Error("stop");
+
+    let frames = NALs.filter(x => x.nalObject.type === "slice").map(x => writeObject(NALList(4, sps, pps), { NALs: [ x ] }) );
+
+    let samples: SampleInfo[] = frames.map(x => ({
+        sample_size: x.getLength(),
+        // TODO: Calculate sample_composition_time_offset from frame reorder information.
+        sample_composition_time_offset: frameTimeInTimescale,
+    }));
+
+
+    let moov = createMoov({
+        defaultFlags: nonKeyFrameSampleFlags,
+        timescale: timescale,
+        durationInTimescale: samples.length * frameTimeInTimescale,
+        frameTimeInTimescale: frameTimeInTimescale,
+        width: width,
+        height: height,
+        AVCProfileIndication: sps.profile_idc,
+        profile_compatibility: 0,
+        AVCLevelIndication: sps.level_idc,
+        sps,
+        pps,
+    });
+    
+    let moof = createMoof({
+        sequenceNumber: 1,
+        baseMediaDecodeTimeInTimescale: 0,
+        samples,
+        forcedFirstSampleFlags: keyFrameSampleFlags,
+        // Set defaultFlags in moov, not moof
+        //defaultSampleFlags: nonKeyFrameSampleFlags
+    });
+    
+    let mdat: O<typeof MdatBox> = {
+        header: {
+            size: 0,
+            headerSize: 8,
+            type: "mdat"
+        },
+        type: "mdat",
+        bytes: new LargeBuffer(frames)
+    };
+    
+    let moofBuf = writeObject(MoofBox, moof);
+    let mdatBuf = writeObject(MdatBox, mdat);
+
+    let sidx = createSidx({
+        moofSize: moofBuf.getLength(),
+        mdatSize: mdatBuf.getLength(),
+        subsegmentDuration: samples.length * frameTimeInTimescale,
+        timescale: timescale,
+    });
+
+
+    let finalBuffer = writeObject(RootBox, { boxes: [
+        ftyp,
+        moov,
+        sidx,
+        moof,
+        mdat,
+    ] });
+
+    finalBuffer.WriteToFile(outputFileName);
+
+    /*
+    outputs.push(ftyp);
+    outputs.push(moov);
+    outputs.push(sidx);
+    outputs.push(moof);
+    outputs.push(mdat);
+    */
+    /*
     let mp4File = parseObject(LargeBuffer.FromFile(path), RootBox);
     let box = filterBox(mp4File);
     let mdia = box("moov")("trak")("mdia");
@@ -1251,26 +1660,22 @@ function modifyMP4(path: string): void {
     //avcC.pictureParameterSets = [];
 
     let newFileBuffer = writeObject(RootBox, mp4File);
-    writeFileSync(path + ".modified.mp4", Buffer.concat(newFileBuffer.getInternalBufferList()));
+    */
+    //writeFileSync(path + ".modified.mp4", Buffer.concat(newFileBuffer.getInternalBufferList()));
 }
 
-function printNals(nals: NALType[]): void {
-    for(let nal of nals) {
-        let n = nal.nalObject;
-        //if(n.type === "slice") continue;
-        console.log(n.type, nal.bitHeader0.nal_unit_type);
-        //console.log(n);
-    }
-}
 
-function testNALs(paths: string[]) {
-    let bufs = paths.map(x => ({ buf: LargeBuffer.FromFile(x), path: x }));
-    let entireBuf = new LargeBuffer(bufs.map(x => x.buf));
-    let nals = getH264NALs(bufs);
-    let output = writeObject(NALList(4, undefined, undefined), { NALs: nals });
+wrapAsync(testRewriteMp4Fragment);
 
-    testWrite(entireBuf, output);
-}
+
+createVideo3("final.mp4", { }, range(0, 50).map(i => `C:/Users/quent/Dropbox/camera/encoder/h264/h264/frame${i}.h264`));
+
+
+
+//todonext
+// Okay. Now we can finally try taking the NALs from the generated video, putting the sps and pps where they belong, updating
+//  the frame reference stuff, and seeing if the video plays!
+
 
 //testReadFile(`10fps.h264.mp4`);
 //testWriteFile(`10fps.h264.mp4`);

@@ -48,7 +48,7 @@ import { SerialObject,
 
 import { LargeBuffer, MaxUInt32 } from "./LargeBuffer";
 import { isArray, assertNumber } from "./util/type";
-import { mapObjectValues, keyBy, flatten } from "./util/misc";
+import { mapObjectValues, keyBy, flatten, unique } from "./util/misc";
 import { sum } from "./util/math";
 import { textFromUInt32, textToUInt32, writeUInt64BE } from "./util/serialExtension";
 import { WrapWithFunctionName } from "./debug";
@@ -143,10 +143,6 @@ function _parseBytes<T extends SerialObject>(buffer: LargeBuffer, rootObjectInfo
             debugPath.push(key);
             cleanup(() => debugPath.pop(), () => {
                 let child: SerialObject[""] = object[key];
-
-                if(key === "NALs") {
-                    console.log(child, ChooseLoop in (child as any));
-                }
 
                 if(child === undefined) {
                     throw debugError(`Child is undefined.`);
@@ -471,16 +467,19 @@ function _createIntermediateObject<T extends SerialObject>(template: T, data: _S
         let parentData = data;
         let finalOutput = {} as _SerialObjectOutput;
         for(let key in template) {
-            let child = template[key];
+            WrapWithFunctionName(key, () => {
+                let child = template[key];
+                
+                let childData;
+                if(isKeyErased(key)) {
+                    childData = data;
+                } else {
+                    childData = data[key];
+                }
+                if(!child) return;
             
-            let childData;
-            if(isKeyErased(key)) {
-                childData = data;
-            } else {
-                childData = data[key];
-            }
-            if(!child) continue;
-            finalOutput[key] = parseChild(child, childData);
+                finalOutput[key] = parseChild(child, childData);
+            })();
         }    
         return finalOutput;
 
@@ -520,6 +519,7 @@ function _createIntermediateObject<T extends SerialObject>(template: T, data: _S
         function parseChild(child: SerialObjectChild, data: SerialIntermediateChildToOutput): SerialObjectChildToOutput {
             if(isArray(child)) {
                 if(!isArray(data)) {
+                    console.log("template", child);
                     throw new Error(`Template is array, but data isn't. Data is ${data}`);
                 }
 
@@ -541,6 +541,7 @@ function _createIntermediateObject<T extends SerialObject>(template: T, data: _S
                     let count = GetBoxCount(child);
                     if(count !== undefined) {
                         if(data.length !== count) {
+                            console.log(child);
                             throw new Error(`Data length is different than expected. Was ${data.length}, expected ${count}`);
                         }
                     }
@@ -592,13 +593,55 @@ function _createIntermediateObject<T extends SerialObject>(template: T, data: _S
     }
 }
 
+// We need to do this at a byte level (at least).
 const WriteContextSymbol = Symbol();
-export function getBufferWriteContext(buffer: Readonly<Buffer>): string {
-    return (buffer as any)[WriteContextSymbol];
+export type WriteContextRange = {
+    start: number;
+    end: number;
+    context: string;
+};
+interface WriteContextObj {
+    [WriteContextSymbol]?: {
+        ranges: WriteContextRange[];
+    };
 }
-export function setBufferWriteContext(buffer: LargeBuffer, context: string): void {
+
+
+export function getBufferWriteContext(buffer: Readonly<Buffer>, bytePos = 0): string {
+    let ranges = getBufferWriteContextRanges(buffer, bytePos);
+    let contexts = ranges.map(x => x.context);
+    return contexts.join(", ");
+}
+export function getBufferWriteContextRanges(buffer: Readonly<Buffer>, bytePos = 0): WriteContextRange[] {
+    let obj = buffer as any as WriteContextObj;
+    let val = obj[WriteContextSymbol] = obj[WriteContextSymbol] || { ranges: [] };
+    return val.ranges.filter(x => bytePos >= x.start && bytePos < x.end);
+}
+export function getAllBufferWriteContextRanges(buffer: Readonly<Buffer>): WriteContextRange[] {
+    let obj = buffer as any as WriteContextObj;
+    let val = obj[WriteContextSymbol] = obj[WriteContextSymbol] || { ranges: [] };
+    return val.ranges;
+}
+export function setBufferWriteContext(buffer: LargeBuffer, context: string, range = { start: 0, end: Number.MAX_SAFE_INTEGER }): void {
+    let pos = 0;
     for(let buf of buffer.getInternalBufferList()) {
-        (buf as any)[WriteContextSymbol] = context;
+        let obj = buf as any as WriteContextObj;
+        let val = obj[WriteContextSymbol] = obj[WriteContextSymbol] || { ranges: [] };
+
+        let bufStart = pos;
+        let bufEnd = pos + buf.length;
+        // If they overlap, take the overlap range, and add it to the context.
+        if (bufEnd >= range.start && bufStart <= range.end) {
+            let start = Math.max(0, range.start - bufStart);
+            let end = Math.min(buf.length, range.end - bufStart);
+            val.ranges.push({
+                start,
+                end,
+                context
+            });
+        }
+        
+        pos = bufEnd;
     }
 }
 export function copyBufferWriteContext(oldBuf: LargeBuffer, newBuf: LargeBuffer): void {

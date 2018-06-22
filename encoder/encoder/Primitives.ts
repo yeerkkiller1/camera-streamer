@@ -1,7 +1,7 @@
 import { SerialObjectPrimitive, ReadContext, WriteContext, HandlesBitOffsets, SerialObject, TemplateToObject, SerialPrimitiveName } from "./SerialTypes";
 import { LargeBuffer, MaxUInt32 } from "./LargeBuffer";
 import { textFromUInt32, textToUInt32 } from "./util/serialExtension";
-import { decodeUTF8BytesToString, encodeAsUTF8Bytes, debugString } from "./util/UTF8";
+import { decodeUTF8BytesToString, encodeAsUTF8Bytes, debugString, debugStringToRawBytes } from "./util/UTF8";
 import { sum } from "./util/math";
 import { mapObjectValuesKeyof, range } from "./util/misc";
 //import { parseObject } from "./BinaryCoder";
@@ -145,12 +145,9 @@ export function DebugString(length: number): SerialObjectPrimitive<string> {
         },
         write(context) {
             let value = context.value;
+            let bytes = debugStringToRawBytes(value);
 
-            let output = new Buffer(value.length);
-            for(let i = 0; i < output.length; i++) {
-                let byte = output[i];
-                output.writeUInt8(byte, i);
-            }
+            let output = new Buffer(bytes);
 
             return new LargeBuffer([output]);
         }
@@ -492,3 +489,15 @@ export function RemainingData<T>(primitive: SerialObjectPrimitive<T>): SerialObj
         }
     };
 }
+
+export const RemainingDataRaw: SerialObjectPrimitive<LargeBuffer> = {
+    [SerialPrimitiveName]: "RemainingDataRaw",
+    read(context) {
+        let data = context.buffer.slice(context.pPos.v, context.end);
+        context.pPos.v = context.end;
+        return data;
+    },
+    write(context) {
+        return context.value;
+    }
+};

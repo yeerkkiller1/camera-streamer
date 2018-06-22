@@ -53,3 +53,20 @@ export function debugString(bytes: number[]): string {
     }
     return str;
 }
+
+export function debugStringToRawBytes(str: string): number[] {
+    let bytes: number[] = [];
+    for(let i = 0; i < str.length; i++) {
+        let ch = str[i];
+        let byte = ch.charCodeAt(0);
+        if(ch === "Ө") {
+            byte = 0;
+        } else if(ch === "П") {
+            byte = 13;
+        } else if(ch === "ϵ") {
+            byte = 10;
+        }
+        bytes[i] = byte;
+    }
+    return bytes;
+}
