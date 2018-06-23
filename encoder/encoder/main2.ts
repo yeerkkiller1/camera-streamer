@@ -539,9 +539,6 @@ async function testRewriteMp4Fragment() {
         //  the timescale still breaks things.
         // VLC just sucks.
 
-        //todonext
-        // Why won't this video play in chrome? The source video does? What did we change?
-        // The real question is, why does the 10fps.dash.mp4 work? It is the file that is the closest to our file format.
 
         //timescale = 10;
         //frameTimeInTimescale = 1;
@@ -1547,9 +1544,6 @@ function getH264NALs(bufs: { buf: LargeBuffer, path: string }[]): NALType[] {
         //  thinks the assignment (which insures sps is not undefined), maybe impact the output of parseObject,
         //  and so says it cannot determine the type.
         obj.NALs.forEach((nal, i) => {
-            //todonext
-            // NALList needs to pick up sps and pps while parsing? Because nal units won't always be in different files
-            //  and may require the sps and pps before parseObject returns.
             if(nal.nalObject.type === "sps") {
                 sps = nal.nalObject.nal;
             }
@@ -1588,20 +1582,14 @@ function testNALs(paths: string[]) {
     testWrite(entireBuf, output);
 }
 
-//todonext
-// Simplify testRewriteMp4Fragment, add parameters for sps and pps to createMoov, and then
-//  make createVideo3 use all the regular create functions to create a video from some parameters,
-//  and paths to files containing NALs
 
-
-
-function createVideo3 (
+async function createVideo3 (
     outputFileName: string,
     videoInfo: {
 
     },
     framePaths: string[],
-): void {
+) {
 
     let ftyp: O<typeof FtypBox> = {
         header: {
@@ -1617,10 +1605,7 @@ function createVideo3 (
         ]
     };
 
-    //todonext
-    // Okay, VLC can't play 1 fps h264 video. But chrome can. But chrome can't play our video, even though it plays
-    //  (at 10fps) in vlc. So... make our video play in chrome, forget about stupid vlc.
-    let timescale = 10;
+    let timescale = 1;
     let frameTimeInTimescale = 1;
     let width = 600;
 	let height = 400;
@@ -1708,7 +1693,7 @@ function createVideo3 (
         mdat,
     ] });
 
-    finalBuffer.WriteToFile(outputFileName);
+    await finalBuffer.WriteToFile(outputFileName);
 
     /*
     outputs.push(ftyp);
@@ -1746,7 +1731,7 @@ function createVideo3 (
 }
 
 
-wrapAsync(testRewriteMp4Fragment);
+//wrapAsync(testRewriteMp4Fragment);
 
 // VLC is just broken at low frame rates. Not my fault.
 // Re-encode 10fps video at 1/10th the speed, and see what the sps and pps look like after that.
@@ -1756,8 +1741,10 @@ wrapAsync(testRewriteMp4Fragment);
 //getMP4H624NALs(`10fps.h264.mp4`);
 //getMP4H624NALs(`1fps.h264.mp4`);
 
-
-createVideo3("final.mp4", { }, range(0, 50).map(i => `C:/Users/quent/Dropbox/camera/encoder/h264/h264/frame${i}.h264`));
+wrapAsync(async () => {
+    await createVideo3("final.mp4", { }, range(0, 1).map(i => `C:/Users/quent/Dropbox/camera/encoder/h264/h264/frame${i}.h264`));
+    testReadFile("final.mp4");
+});
 
 
 

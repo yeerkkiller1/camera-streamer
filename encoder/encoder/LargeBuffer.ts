@@ -249,15 +249,30 @@ export class LargeBuffer {
             throw new Error(`Buffer still had a bit offset, and so most operations are invalid on it. It can be combined with another BitBuffer in the constructor to make it valid. Buffer had ${LargeBuffer.GetBitCount(this)} bits, UID ${this.UID}`);
         }
     }
-    public WriteToFile(path: string) {
-        this.verifyByteAligned();
+    public WriteToFile(path: string): Promise<void> {
+        return new Promise((resolve, reject) => {
+            try {
+                this.verifyByteAligned();
 
-        let stream = createWriteStream(path);
-        stream.once("open", (fd) => {
-            for(let buf of this.buffers) {
-                stream.write(buf);
+                let stream = createWriteStream(path);
+                stream.once("open", (fd) => {
+                    try {
+                        for(let buf of this.buffers) {
+                            stream.write(buf);
+                        }
+                        stream.end();
+                        // Don't call close
+                        // (https://github.com/nodejs/node/issues/5631)
+                    } catch(e) {
+                        reject(e);
+                    }
+                });
+                stream.once("close", () => {
+                    resolve();
+                });
+            } catch(e) {
+                reject(e);
             }
-            stream.end();
         });
     }
 

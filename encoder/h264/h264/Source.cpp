@@ -17,102 +17,94 @@
 
 // https://www.itu.int/rec/T-REC-H.264-201704-I/en ("C:\Users\quent\Downloads\T-REC-H.264-201704-I!!PDF-E.pdf")
 
+// https://stackoverflow.com/questions/9296059/read-pixel-value-in-bmp-file
+
+
 //https://stackoverflow.com/questions/49397904/muxing-h264-into-mp4-using-libmp4v2-and-openh264
 void prepareFrame(int i, SSourcePicture* pic, int width, int height) {
+
+	std::ifstream file("C:/Users/quent/Dropbox/camera/encoder/frame1.bmp", std::ios::binary);
+	std::string content((std::istreambuf_iterator<char>(file)), (std::istreambuf_iterator<char>()));
+	int length = content.length();
+	unsigned char* info = (unsigned char*)content.c_str();
+
+	// extract image height and width from header
+	int width2 = *(int*)&info[18];
+	int height2 = *(int*)&info[22];
+
+	// BGR format
+	// data[((height - y - 1) * width + x) * 3]
+
+	int size = width * height * 3;
+	unsigned char* bmp = info + 54;
+
+	printf("R %d, G %d, B %d", (int)bmp[(10 * width + 10) * 3 + 2], (int)bmp[(10 * width + 10) * 3 + 1], (int)bmp[(10 * width + 10) * 3]);
+
+	double Kr = 0.299 * (235 - 16) / 256;
+	double Kg = 0.587 * (235 - 16) / 256;
+	double Kb = 0.114 * (235 - 16) / 256;
+
 	for (int y = 0; y < height; y++) {
 		for (int x = 0; x < width; x++) {
-			pic->pData[0][y * width + x] = x + y + i * 3;
+			int R = bmp[((height - y - 1) * width + x) * 3 + 2];
+			int G = bmp[((height - y - 1) * width + x) * 3 + 1];
+			int B = bmp[((height - y - 1) * width + x) * 3 + 0];
+			// http://gentlelogic.blogspot.com/2011/11/exploring-h264-part-1-color-models.html
+			// https://community.nxp.com/thread/453796
+			int Y = R * 0.299 + G * 0.587 + B * 0.114;
+			//Y = 16 + R * 0.257 + G * 0.504 + B * 0.098;
+			pic->pData[0][y * width + x] = Y;
 		}
 	}
 
-	for (int y = 0; y < height / 2; y++) {
-		for (int x = 0; x < width / 2; x++) {
-			pic->pData[1][y * (width / 2) + x] = 128 + y + i * 2;
-			pic->pData[2][y * (width / 2) + x] = 64 + x + i * 5;
-		}
-	}
-}
+	for (int y = 0; y < height; y += 2) {
+		for (int x = 0; x < width; x += 2) {
+			// XY
+			int R00 = bmp[((height - y - 1) * width + x) * 3 + 2];
+			int G00 = bmp[((height - y - 1) * width + x) * 3 + 1];
+			int B00 = bmp[((height - y - 1) * width + x) * 3 + 0];
 
-// https://cardinalpeak.com/blog/worlds-smallest-h-264-encoder/
+			int R01 = bmp[((height - (y + 1) - 1) * width + x) * 3 + 2];
+			int G01 = bmp[((height - (y + 1) - 1) * width + x) * 3 + 1];
+			int B01 = bmp[((height - (y + 1) - 1) * width + x) * 3 + 0];
 
-void macroblock(const int i, const int j, int frameNumber, std::ofstream& outputFile)
-{
-	int x, y;
-	if (!((i == 0) && (j == 0)))
-	{
-		const uint8_t macroblock_header[] = { 0x0d, 0x00 };
-		outputFile.write((const char*)&macroblock_header, sizeof(macroblock_header));
-	}
-	for (x = i * 16; x < (i + 1) * 16; x++)
-		for (y = j * 16; y < (j + 1) * 16; y++)
-			outputFile.put(x + y + frameNumber * 3);
-	for (x = i * 8; x < (i + 1) * 8; x++)
-		for (y = j * 8; y < (j + 1) * 8; y++)
-			outputFile.put(128 + y + frameNumber * 2);
-	for (x = i * 8; x < (i + 1) * 8; x++)
-		for (y = j * 8; y < (j + 1) * 8; y++)
-			outputFile.put(64 + x + frameNumber * 5);
-}
+			int R10 = bmp[((height - (y + 0) - 1) * width + x + 1) * 3 + 2];
+			int G10 = bmp[((height - (y + 0) - 1) * width + x + 1) * 3 + 1];
+			int B10 = bmp[((height - (y + 0) - 1) * width + x + 1) * 3 + 0];
 
-void main2() {
-	int width = 600;
-	int height = 400;
-	for (int num = 0; num < 50; num++) {
-		/*
-		len = len - 4;
-		char b1 = len >> 24;
-		char b2 = len << 8 >> 24;
-		char b3 = len << 16 >> 24;
-		char b4 = len << 24 >> 24;
-		const char lenBytes[4]{ b1, b2, b3, b4 };
-		outputFile.write(lenBytes, 4);
-		outputFile.write((const char*)layerInfo.pBsBuf + 4, len);
-		*/
+			int R11 = bmp[((height - (y + 1) - 1) * width + x + 1) * 3 + 2];
+			int G11 = bmp[((height - (y + 1) - 1) * width + x + 1) * 3 + 1];
+			int B11 = bmp[((height - (y + 1) - 1) * width + x + 1) * 3 + 0];
 
-		uint8_t sps[] = { 0x00, 0x00, 0x00, 0x01, 0x67, 0x42, 0x00,
-			0x0a, 0xf8, 0x41, 0xa2 };
-		uint8_t pps[] = { 0x00, 0x00, 0x00, 0x01, 0x68, 0xce,
-			0x38, 0x80 };
-		int8_t slice_header[] = { 0x00, 0x00, 0x00, 0x01, 0x05, 0x88,
-			0x84, 0x21, 0xa0 };
+			int Y00 = R00 * 0.299 + G00 * 0.587 + B00 * 0.114;
+			
+			int Cb00 = 128 + -0.168736 * R00 - 0.331264 * G00 + 0.5 * B00;
+			int Cr00 = 128 + 0.5 * R00 - 0.418688 * G00 + -0.081312 * B00;
 
-		int len = 3 * (int)ceil(width / 16.0) * (int)ceil(height / 16.0) + sizeof(sps) + sizeof(pps) + sizeof(slice_header);
+			//Cb00 = 128 + -0.148 * R00 - 0.291 * G00 + 0.439 * B00;
+			//Cr00 = 128 + 0.439 * R00 - 0.368 * G00 + -0.071 * B00;
 
-		auto fileName = std::string() + "frame" + std::to_string(num) + ".h264";
-		std::ofstream outputFile(fileName, std::ios_base::binary);
+			pic->pData[1][y / 2 * (width / 2) + x / 2] = Cb00;
+			pic->pData[2][y / 2 * (width / 2) + x / 2] = Cr00;
 
-		outputFile.write((const char*)sps, sizeof(sps));
-		outputFile.write((const char*)pps, sizeof(pps));
-		outputFile.write((const char*)slice_header, sizeof(slice_header));
+			//pic->pData[1][y * (width / 2) + x] = 128 + y + i * 2;
+			//pic->pData[2][y * (width / 2) + x] = 64 + x + i * 5;
 
-		int i = 0;
-		while (true) {
-			int j = 0;
-			while (true) {
-				// Prints 3 * width * height bytes
-				macroblock(i, j, num, outputFile);
-
-				if (j >= width) break;
-				j += 16;
+			/*
+			if (x > 100) {
+				pic->pData[2][y * (width / 2) + x] = 128;
 			}
-
-			if (i >= height) break;
-			i += 16;
+			*/
+			
 		}
-
-		outputFile.put(0x80);
 	}
 }
-
-//todonext
-//ugh... read about h264 enough to understand how to get the output of here, and maybe enough to see what is wrong with the ffmpeg data.
 
 void writeNALUnits(SFrameBSInfo& info, std::ofstream& outputFile) {
 
 	printf("size: %d, frame type %d\n", info.iFrameSizeInBytes, info.eFrameType);
 	printf("iLayerNum: %d, uiTimeStamp: %lld\n", info.iLayerNum, info.uiTimeStamp);
 	for (int i = 0; i < info.iLayerNum; i++) {
-		//for (int i = 0; i < 1; i++) {
 		SLayerBSInfo layerInfo = info.sLayerInfo[i];
 
 		int pos = 0;
@@ -143,48 +135,7 @@ void writeNALUnits(SFrameBSInfo& info, std::ofstream& outputFile) {
 			outputFile.write(lenBytes, 4);
 			outputFile.write((const char*)buf + 4, len);
 		}
-		
 
-		// Ignore the start code, and write a length prefixed start code.
-		/*
-		//if (i == 0) {
-			if (layerInfo.pBsBuf[0] != 0) {
-				throw "invalid start code";
-			}
-			if (layerInfo.pBsBuf[1] != 0) {
-				throw "invalid start code";
-			}
-			if (layerInfo.pBsBuf[2] != 0) {
-				throw "invalid start code";
-			}
-			if (layerInfo.pBsBuf[3] != 1) {
-				throw "invalid start code";
-			}
-			len = len - 4;
-			char b1 = len >> 24;
-			char b2 = len << 8 >> 24;
-			char b3 = len << 16 >> 24;
-			char b4 = len << 24 >> 24;
-			const char lenBytes[4]{ b1, b2, b3, b4 };
-			outputFile.write(lenBytes, 4);
-			outputFile.write((const char*)layerInfo.pBsBuf + 4, len);
-		//}
-		/*
-		else {
-			char b1 = len >> 24;
-			char b2 = len << 8 >> 24;
-			char b3 = len << 16 >> 24;
-			char b4 = len << 24 >> 24;
-			const char lenBytes[4]{ b1, b2, b3, b4 };
-			outputFile.write(lenBytes, 4);
-			outputFile.write((const char*)layerInfo.pBsBuf, len);
-		}
-		*/
-		//*/
-
-		//outputFile.write((const char*)layerInfo.pBsBuf, len);
-
-		//outputFile.write(test, 600);
 		printf("pBsBuf %lld, iNalCount: %d, pNalLengthInByte: %d, eFrameType: %d, sub seq id: %d, uiLayerType: %d, uiQualityId: %d, uiSpatialId: %d, uiTemporalId: %d\n",
 			layerInfo.pBsBuf,
 			layerInfo.iNalCount,
@@ -196,14 +147,16 @@ void writeNALUnits(SFrameBSInfo& info, std::ofstream& outputFile) {
 			(int)layerInfo.uiSpatialId,
 			(int)layerInfo.uiTemporalId
 		);
-		//break;
-
-		int breakhere = 5;
-		//}
 	}
 }
 
+
 void main() {
+	//todonext
+	// Can we get the encoder to accept RGB values?
+
+
+		
 	ISVCEncoder* encoder;
 	int rv = WelsCreateSVCEncoder(&encoder);
 
@@ -225,17 +178,13 @@ void main() {
 	//int add = 0;
 	//encoder->SetOption(ENCODER_OPTION_SPS_PPS_ID_STRATEGY, &add);
 
-	int profile = PRO_CAVLC444;
-	encoder->SetOption(ENCODER_OPTION_PROFILE, &profile);
+	// Hmm... only PRO_BASELINE is supported currently...
+	//int profile = PRO_CAVLC444;
+	//encoder->SetOption(ENCODER_OPTION_PROFILE, &profile);
 
 	int level = LEVEL_2_2;
 	encoder->SetOption(ENCODER_OPTION_LEVEL, &level);
 
-
-	std::ifstream file("C:/Users/quent/Dropbox/camera/encoder/frame0.bmp");
-	std::string content((std::istreambuf_iterator<char>(file)), (std::istreambuf_iterator<char>()));
-	int length = content.length();
-	unsigned char* data = (unsigned char*)content.c_str();
 
 	///*
 
@@ -260,7 +209,7 @@ void main() {
 	*/
 
 	printf("start\n");
-	for (int num = 0; num < 50; num++) {
+	for (int num = 0; num < 2; num++) {
 		pic.uiTimeStamp = num * 100;
 
 		prepareFrame(num, &pic, width, height);

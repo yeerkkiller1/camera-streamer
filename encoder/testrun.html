@@ -1,4 +1,4 @@
-<video id="vid" width="400" height="400"></video>
+<video id="vid"></video>
 <script>
     test();
     async function test() {
@@ -15,8 +15,8 @@
         //let result = await fetch("./test2.mp4");
         let result;
         let startTime = 0;
-        if(document.location.search.includes("youtube")) {
-            result = await fetch("./youtubeOUT.mp4");
+        if(document.location.search.includes("test")) {
+            result = await fetch("./final.mp4");
             //startTime = 38417946360 / 90000;
         } else {
             //todonext
