@@ -27,7 +27,7 @@ import { keyBy, mapObjectValues, repeat, flatten, filterObjectValues, mapObjectV
 import { writeFileSync, createWriteStream, readSync, fstat, readFileSync, writeSync } from "fs";
 import { basename } from "path";
 import { decodeUTF8BytesToString, encodeAsUTF8Bytes, debugString } from "./util/UTF8";
-import { sum } from "./util/math";
+import { sum, max, min } from "./util/math";
 
 import * as Jimp from "jimp";
 import { parseObject, filterBox, writeObject, getBufferWriteContext } from "./BinaryCoder";
@@ -359,16 +359,52 @@ async function testRewriteMjpeg() {
     }
 }
 
+function getSamples(NALs: NALType[], sps: SPS, pps: PPS, frameTimeInTimescale: number) {
+    let baseCount = 0;
+    let maxFrameOrderIndex = max(NALs.map(x => x.nalObject.type === "slice" ? x.nalObject.nal.slice_header.pic_order_cnt_lsb : 0));
+
+    return NALs
+        .filter(x => x.nalObject.type === "slice")
+        .map((input, i) => {
+            let obj = input.nalObject;
+            if(obj.type !== "slice") throw new Error("impossible");
+            let buffer = writeObject(NALList(4, sps, pps), { NALs: [input] });
+            let header = obj.nal.slice_header;
+
+            let picOrder = header.pic_order_cnt_lsb;
+
+            let fullPicOrder = picOrder + baseCount;
+
+            let calcIndex = fullPicOrder / 2 + 2;
+
+            let comp_off = (calcIndex - i) * frameTimeInTimescale;
+
+            if(picOrder === maxFrameOrderIndex) {
+                baseCount += maxFrameOrderIndex + 2;
+            }
+
+            return {
+                buffer: buffer,
+                // Hmm... maybe calculate this, and also try to speed up the video, or slow it down, and make sure time information
+                //  in the NALs is ignore, and doesn't break the video.
+                composition_offset: comp_off // frames[i].composition_offset,
+            };
+        })
+    ;
+}
+
 async function testRewriteMp4Fragment() {
-    let templateMp4 = "./10fps.h264.mp4";
+    let templateMp4 = "./10fps.dash.mp4";
     let outputFileName = templateMp4 + ".test.mp4";
 
-    //let oldBuf = LargeBuffer.FromFile(templateMp4);
-    //let newBuf = createVideoOutOfJpegs();
+    
+    testReadFile(templateMp4);
+
     let newBuf = createVideo2();
 
-
     newBuf.WriteToFile(outputFileName);
+
+    testReadFile(outputFileName);
     
     //testWrite(oldBuf, newBuf);
 
@@ -394,44 +430,69 @@ async function testRewriteMp4Fragment() {
 
         let stts = mdia("minf")("stbl")("stts")();
 
-        if(stts.samples.length !== 1) {
+        let mdat = box("mdat")();
+        let mdats: LargeBuffer[] = [];
+        let frameTimeInTimescale: number;
+        let frames: { buffer: LargeBuffer; composition_offset: number; }[] = [];
+
+        // If the length is 0, check for a moof.traf.trun
+        if(stts.samples.length === 0) {
+            let samples = box("moof")("traf")("trun")().sample_values;
+
+            frameTimeInTimescale = box("moov")("mvex")("trex")().default_sample_duration;
+            
+            let pos = 0;
+            for(let sample of samples) {
+                if(!("sample_size" in sample)) {
+                    throw new Error(`No sample_size in trun.sample_values sample. It may be in one of the defaults, but handling for that is not present yet.`);
+                }
+                if(!("sample_composition_time_offset" in sample)) {
+                    throw new Error(`No sample_composition_time_offset in trun.sample_values sample. It may be in one of the defaults, but handling for that is not present yet.`);
+                }
+                let sampleSize = sample.sample_size;
+                let dat = mdat.bytes.slice(pos, pos + sampleSize);
+                pos += sampleSize;
+
+                frames.push({
+                    buffer: dat,
+                    composition_offset: sample.sample_composition_time_offset,
+                });
+            }
+        }
+        else if(stts.samples.length === 1) {
+            let sampleInfo = stts.samples[0];
+
+            frameTimeInTimescale = sampleInfo.sample_delta;
+            //frameTimeInTimescale = timescale / 5;
+
+            // ctts table has times
+            // stsz table has sample byte sizes.
+
+            let stsz = mdia("minf")("stbl")("stsz")();
+
+            let pos = 0;
+            for(let sampleSize of stsz.sample_sizes) {
+                mdats.push(mdat.bytes.slice(pos, pos + sampleSize));
+                pos += sampleSize;
+            }
+
+            let ctts = mdia("minf")("stbl")("ctts")();
+        
+            let frameIndex = 0;
+            for(let cttsInfo of ctts.samples) {
+                for(let i = 0; i < cttsInfo.sample_count; i++) {
+                    frames.push({
+                        buffer: mdats[frameIndex],
+                        composition_offset: cttsInfo.sample_offset,
+                    });
+                    frameIndex++;
+                }
+            }
+        } else {
+            console.log(stts.samples);
             throw new Error(`Samples of varying duration. This is unexpected.`);
         }
 
-        let sampleInfo = stts.samples[0];
-
-        let frameTimeInTimescale = sampleInfo.sample_delta;
-        //frameTimeInTimescale = timescale / 5;
-
-        // ctts table has times
-        // stsz table has sample byte sizes.
-
-        let mdat = box("mdat")();
-        let stsz = mdia("minf")("stbl")("stsz")();
-        let mdats: LargeBuffer[] = [];
-
-        let pos = 0;
-        for(let sampleSize of stsz.sample_sizes) {
-            mdats.push(mdat.bytes.slice(pos, pos + sampleSize));
-            pos += sampleSize;
-        }
-        
-
-
-        let ctts = mdia("minf")("stbl")("ctts")();
-        
-        let frames: { buffer: LargeBuffer; composition_offset: number; }[] = [];
-
-        let frameIndex = 0;
-        for(let cttsInfo of ctts.samples) {
-            for(let i = 0; i < cttsInfo.sample_count; i++) {
-                frames.push({
-                    buffer: mdats[frameIndex],
-                    composition_offset: cttsInfo.sample_offset,
-                });
-                frameIndex++;
-            }
-        }
 
         
         //timescale = 5994;
@@ -461,8 +522,6 @@ async function testRewriteMp4Fragment() {
 
         let h264Object = readVideoInfo(h264Base);
 
-        //todonext
-        // So... there is timescale information in the SPS, and I can't figure out how to set it correctly.
         let timescale = h264Object.timescale;
         let frameTimeInTimescale = h264Object.frameTimeInTimescale;
         let width = h264Object.width;
@@ -471,8 +530,21 @@ async function testRewriteMp4Fragment() {
         let profile_compatibility = h264Object.profile_compatibility;
         let AVCLevelIndication = h264Object.AVCLevelIndication;
 
-        timescale = 1;
-        frameTimeInTimescale = 1;
+        // For 10fps.h264.mp4, why is there a pause at the beginning? There isn't in the source.
+        // VLC adds random pauses, because it sucks.
+
+        // Why does changing the timescale break everything! This should be fine!
+        // clockTimestamp = ( ( hH * 60 + mM ) * 60 + sS ) * time_scale + nFrames * ( num_units_in_tick * ( 1 + nuit_field_based_flag ) ) + tOffset
+        // Oh... SEI gives timing information. But... there must be timing information in the frames still, as removing the SEI and changing
+        //  the timescale still breaks things.
+        // VLC just sucks.
+
+        //todonext
+        // Why won't this video play in chrome? The source video does? What did we change?
+        // The real question is, why does the 10fps.dash.mp4 work? It is the file that is the closest to our file format.
+
+        //timescale = 10;
+        //frameTimeInTimescale = 1;
 
         let ftyp: O<typeof FtypBox> = {
             header: {
@@ -548,7 +620,7 @@ async function testRewriteMp4Fragment() {
             "chroma_loc_info_present_flag_check": {},
             "timing_info_present_flag": 1,
             "num_units_in_tick": frameTimeInTimescale,
-            "time_scale": timescale,
+            "time_scale": timescale * 2,
             "fixed_frame_rate_flag": 0,
             "nal_hrd_parameters_present_flag": 0,
             "data0": {},
@@ -592,32 +664,27 @@ async function testRewriteMp4Fragment() {
 
         let frames = h264Object.frames;
 
-        // Try to remove the SEI NAL. If we can't, then it might be needed, and that might be why our video isn't playing.
-        //  Or maybe there is an offset somewhere that instructs the data to be read starting after the SEI, which I am missing
-        //  and accidentally adding to the other video, breaking it.
 
-
+        /*
         let frameObjs = parseObject(new LargeBuffer(frames.map(x => x.buffer)), NALList(4, sps, pps)).NALs;
+        // Remove the SEI
+        let SEI = frameObjs[0];
         frameObjs = frameObjs.slice(1);
 
-        frameObjs.forEach((x, i) => {
-            let obj = x.nalObject;
-            if(obj.type !== "slice") return;
-            let header = obj.nal.slice_header;
-            console.log(header.sliceTypeStr, header.pic_order_cnt_lsb, frames[i].composition_offset);
+        let baseCount = 0;
+        let maxFrameOrderIndex = max(frameObjs.map(x => x.nalObject.type === "slice" ? x.nalObject.nal.slice_header.pic_order_cnt_lsb : 0));
+
+        frames = getSamples(frameObjs, sps, pps, frameTimeInTimescale);
+
+        let minOffset = min(frames.map(x => x.composition_offset));
+        frames.forEach((frame, i) => {
+            frame.composition_offset -= minOffset;
         });
 
-        ///*
-        frames = frameObjs
-            .map(x => writeObject(NALList(4, sps, pps), { NALs: [x] }))
-            .map((x, i) => ({
-                buffer: x,
-                // Hmm... maybe calculate this, and also try to speed up the video, or slow it down, and make sure time information
-                //  in the NALs is ignore, and doesn't break the video.
-                composition_offset: frameTimeInTimescale// frames[i].composition_offset,
-            }))
-        ;
-        //*/
+        frames[0].buffer = new LargeBuffer([frames[0].buffer, writeObject(NALList(4, sps, pps), { NALs: [SEI] })])
+        */
+
+        // 
 
         //let newBytes = writeObject(NALList(4, sps, pps), { NALs: frameObjs });
 
@@ -630,7 +697,7 @@ async function testRewriteMp4Fragment() {
         let moov = createMoov({
             defaultFlags: nonKeyFrameSampleFlags,
             timescale: timescale,
-            durationInTimescale: samples.length * frameTimeInTimescale,
+            durationInTimescale: 0, //samples.length * frameTimeInTimescale,
             frameTimeInTimescale: frameTimeInTimescale,
             width: h264Object.width,
             height: h264Object.height,
@@ -765,7 +832,7 @@ function createMoov(
                 reserved: 0,
                 reserved0: 0,
                 reserved1: 0,
-                matrix: [65536, 0, 0, 0, 6, 0, 0, 0, 4],
+                matrix: [65536, 0, 0, 0, 65536, 0, 0, 0, 1073741824],
                 pre_defined: [0, 0, 0, 0, 0, 0],
                 next_track_ID: 2
             },
@@ -1331,6 +1398,7 @@ function getFrames(path: string): LargeBuffer[] {
     let stts = mdia("minf")("stbl")("stts")();
 
     if(stts.samples.length !== 1) {
+        console.log(stts.samples);
         throw new Error(`Samples of varying duration. This is unexpected.`);
     }
 
@@ -1442,10 +1510,19 @@ function getMP4H624NALs(path: string): NALType[] {
     }
     let pps = spsObject0.nal;
 
-    return flatten(getFrames(path).map(frame => {
+    let NALs = flatten(getFrames(path).map(frame => {
         let obj = parseObject(frame, NALList(4, sps, pps));
         return obj.NALs;
     }));
+
+    writeFileSync(path + `.sps.nal`, prettyPrint(sps));
+    writeFileSync(path + `.pps.nal`, prettyPrint(pps));
+
+    for(let i = 0; i < Math.min(2, NALs.length); i++) {
+        writeFileSync(path + `.${i}.nal`, prettyPrint(NALs[i]));
+    }
+
+    return NALs;
 }
 
 function getOpenH264NALs() {
@@ -1540,6 +1617,9 @@ function createVideo3 (
         ]
     };
 
+    //todonext
+    // Okay, VLC can't play 1 fps h264 video. But chrome can. But chrome can't play our video, even though it plays
+    //  (at 10fps) in vlc. So... make our video play in chrome, forget about stupid vlc.
     let timescale = 10;
     let frameTimeInTimescale = 1;
     let width = 600;
@@ -1566,12 +1646,13 @@ function createVideo3 (
 
     //if(true as boolean) throw new Error("stop");
 
-    let frames = NALs.filter(x => x.nalObject.type === "slice").map(x => writeObject(NALList(4, sps, pps), { NALs: [ x ] }) );
+    let frames = NALs.filter(x => x.nalObject.type === "slice");
+    let frameInfos = getSamples(frames, sps, pps, frameTimeInTimescale);
 
-    let samples: SampleInfo[] = frames.map(x => ({
-        sample_size: x.getLength(),
+    let samples: SampleInfo[] = frameInfos.map(x => ({
+        sample_size: x.buffer.getLength(),
         // TODO: Calculate sample_composition_time_offset from frame reorder information.
-        sample_composition_time_offset: frameTimeInTimescale,
+        sample_composition_time_offset: x.composition_offset,
     }));
 
 
@@ -1605,7 +1686,7 @@ function createVideo3 (
             type: "mdat"
         },
         type: "mdat",
-        bytes: new LargeBuffer(frames)
+        bytes: new LargeBuffer(frameInfos.map(x => x.buffer))
     };
     
     let moofBuf = writeObject(MoofBox, moof);
@@ -1667,14 +1748,20 @@ function createVideo3 (
 
 wrapAsync(testRewriteMp4Fragment);
 
+// VLC is just broken at low frame rates. Not my fault.
+// Re-encode 10fps video at 1/10th the speed, and see what the sps and pps look like after that.
+// ffmpeg -r 10 -y -i 10fps.h264.mp4 -vf "setpts=PTS*10" -r 1 1fps.h264.mp4
+// Maybe fixed_frame_rate_flag?
+
+//getMP4H624NALs(`10fps.h264.mp4`);
+//getMP4H624NALs(`1fps.h264.mp4`);
+
 
 createVideo3("final.mp4", { }, range(0, 50).map(i => `C:/Users/quent/Dropbox/camera/encoder/h264/h264/frame${i}.h264`));
 
 
 
-//todonext
-// Okay. Now we can finally try taking the NALs from the generated video, putting the sps and pps where they belong, updating
-//  the frame reference stuff, and seeing if the video plays!
+
 
 
 //testReadFile(`10fps.h264.mp4`);

@@ -2,6 +2,9 @@
 export function max(values: number[], defaultValue = Number.NEGATIVE_INFINITY): number {
     return values.reduce((a, b) => Math.max(a, b), defaultValue);
 }
+export function min(values: number[], defaultValue = Number.POSITIVE_INFINITY): number {
+    return values.reduce((a, b) => Math.min(a, b), defaultValue);
+}
 
 export function sum(nums: number[]): number {
     let result = 0;
