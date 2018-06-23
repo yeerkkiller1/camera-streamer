@@ -1,4 +1,4 @@
-<video id="vid"></video>
+<video id="vid" controls></video>
 <script>
     test();
     async function test() {
@@ -11,7 +11,8 @@
 
             if(document.location.search.includes("test")) {
                 await addVideo("./final0.mp4");
-                //await addVideo("./final1.mp4");
+                await addVideo("./final1.mp4");
+                await addVideo("./final2.mp4");
                 //startTime = 38417946360 / 90000;
             } else if(document.location.search.includes("2")) {
                 await addVideo("./dash0.mp4");

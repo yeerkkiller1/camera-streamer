@@ -21,7 +21,7 @@
 
 
 //https://stackoverflow.com/questions/49397904/muxing-h264-into-mp4-using-libmp4v2-and-openh264
-void prepareFrame(int i, SSourcePicture* pic, int width, int height, std::ifstream& file) {
+void prepareFrame(SSourcePicture* pic, int width, int height, std::ifstream& file) {
 	std::string content((std::istreambuf_iterator<char>(file)), (std::istreambuf_iterator<char>()));
 	int length = content.length();
 	unsigned char* info = (unsigned char*)content.c_str();
@@ -149,23 +149,24 @@ void main() {
 
 
 		
-	ISVCEncoder* encoder;
-	int rv = WelsCreateSVCEncoder(&encoder);
+	
 
 	int width = 600;
 	int height = 400;
+
+	
 
 	SEncParamBase param;
 	memset(&param, 0, sizeof(SEncParamBase));
 	param.iUsageType = (EUsageType)CAMERA_VIDEO_REAL_TIME;
 	param.fMaxFrameRate = 10;
-	param.iPicWidth = 600;
-	param.iPicHeight = 400;
+	param.iPicWidth = width;
+	param.iPicHeight = height;
 	param.iTargetBitrate = 5000000;
-	encoder->Initialize(&param);
+	
 
-	int uiTraceLevel = WELS_LOG_DETAIL;
-	encoder->SetOption(ENCODER_OPTION_TRACE_LEVEL, &uiTraceLevel);
+	//int uiTraceLevel = WELS_LOG_DETAIL;
+	//encoder->SetOption(ENCODER_OPTION_TRACE_LEVEL, &uiTraceLevel);
 
 	//int add = 0;
 	//encoder->SetOption(ENCODER_OPTION_SPS_PPS_ID_STRATEGY, &add);
@@ -174,8 +175,6 @@ void main() {
 	//int profile = PRO_CAVLC444;
 	//encoder->SetOption(ENCODER_OPTION_PROFILE, &profile);
 
-	int level = LEVEL_2_2;
-	encoder->SetOption(ENCODER_OPTION_LEVEL, &level);
 
 
 	///*
@@ -196,26 +195,36 @@ void main() {
 	pic.pData[2] = new unsigned char[width * height / 2];
 
 	printf("start\n");
-	for (int num = 0; num < 100; num++) {
-		pic.uiTimeStamp = 0;
+	for (int base = 0; base < 10; base++) {
+		ISVCEncoder* encoder;
+		int rv = WelsCreateSVCEncoder(&encoder);
+		int level = LEVEL_2_2;
+		encoder->SetOption(ENCODER_OPTION_LEVEL, &level);
+		encoder->Initialize(&param);
 
-		auto inputFileName = std::string() + "C:/Users/quent/Dropbox/camera/encoder/frame" + std::to_string(num) + ".bmp";
-		//auto inputFileName = std::string() + "C:/Users/quent/Dropbox/camera/encoder/frame5.bmp";
-		std::ifstream inputFile(inputFileName, std::ios::binary);
+		for (int num = 0; num < 10; num++) {
+			pic.uiTimeStamp = 0;
 
-		prepareFrame(num, &pic, width, height, inputFile);
+			int frameNum = base * 10 + num;
 
-		//prepare input data
-		rv = encoder->EncodeFrame(&pic, &info);
+			auto inputFileName = std::string() + "C:/Users/quent/Dropbox/camera/encoder/frame" + std::to_string(frameNum) + ".bmp";
+			//auto inputFileName = std::string() + "C:/Users/quent/Dropbox/camera/encoder/frame5.bmp";
+			std::ifstream inputFile(inputFileName, std::ios::binary);
 
-		auto fileName = std::string() + "frame" + std::to_string(num) + ".h264";
-		std::ofstream outputFile(fileName, std::ios_base::binary);
+			prepareFrame(&pic, width, height, inputFile);
 
-		if (rv != cmResultSuccess) {
-			throw "failed";
+			//prepare input data
+			rv = encoder->EncodeFrame(&pic, &info);
+
+			auto fileName = std::string() + "frame" + std::to_string(frameNum) + ".h264";
+			std::ofstream outputFile(fileName, std::ios_base::binary);
+
+			if (rv != cmResultSuccess) {
+				throw "failed";
+			}
+
+			writeNALUnits(info, outputFile);
 		}
-
-		writeNALUnits(info, outputFile);
 	}
 	//*/
 

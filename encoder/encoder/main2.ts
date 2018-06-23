@@ -377,14 +377,14 @@ function getSamples(NALs: NALType[], sps: SPS, pps: PPS, frameTimeInTimescale: n
 
             let fullPicOrder = picOrder + baseCount;
 
-            let calcIndex = fullPicOrder / 2 + 2;
+            let calcIndex = fullPicOrder / 2;
 
             let comp_off = (calcIndex - i) * frameTimeInTimescale;
 
             if(comp_off === -27) {
                 comp_off = 5;
             }
-            console.log({calcIndex, i, baseCount, comp_off});
+            console.log({calcIndex, i, picOrder, baseCount, comp_off});
 
             if(picOrder === maxFrameOrderIndex) {
                 baseCount += maxFrameOrderIndex + 2;
@@ -862,6 +862,22 @@ function createMoov(
                 },
                 type: "mvex",
                 boxes: [
+                    // Gives the total time of the video in the browser
+                    /*
+                    {
+                        header: {
+                            size: 16,
+                            type: "mehd",
+                            headerSize: 8
+                        },
+                        type: "mehd",
+                        version: 0,
+                        flags: 0,
+                        time: {
+                            fragment_duration: d.frameTimeInTimescale * 30
+                        }
+                    },
+                    //*/
                     {
                         header: {
                             type: "trex"
@@ -1680,6 +1696,7 @@ function testNALs(paths: string[]) {
     testWrite(entireBuf, output);
 }
 
+/*
 async function createVideo3Files (
     outputFileName: string,
     videoInfo: {
@@ -1702,11 +1719,15 @@ async function createVideo3Files (
         pps
     );
 }
+*/
 
 async function createVideo3 (
     outputFileName: string,
     videoInfo: {
-
+        timescale: number;
+        frameTimeInTimescale: number;
+        width: number;
+        height: number;
     },
     NALs: NALType[],
     baseMediaDecodeTimeInTimescale: number,
@@ -1716,10 +1737,10 @@ async function createVideo3 (
     sps: SPS;
     pps: PPS;
 }> {
-    let timescale = 10;
-    let frameTimeInTimescale = 1;
-    let width = 600;
-	let height = 400;
+    let timescale = videoInfo.timescale;
+    let frameTimeInTimescale = videoInfo.frameTimeInTimescale;
+    let width = videoInfo.width;
+    let height = videoInfo.height;
 
     let spsObject = NALs.filter(x => x.nalObject.type === "sps")[0];
     if(spsObject && spsObject.nalObject.type === "sps") {
@@ -1926,7 +1947,7 @@ range(0, 100).forEach(i => {
 // Well... we are going to have to take the NALs out of 10fps.dash.mp4 and 10fps.dash_2.m4s, put them in our own containers
 //  and see if that plays. So close...
 
-///*
+/*
 {
     wrapAsync(async () => {
         let NALs1 = getMP4H624NALs("10fps.dash.mp4");
@@ -1966,25 +1987,29 @@ testReadFile("10fps.dash_2.m4s");
 
 //testReadFile("final1.mp4");
 
-/*
+///*
 wrapAsync(async () => {
     let sps: SPS|undefined = undefined;
     let pps: PPS|undefined = undefined;
-    {
-        let files = range(0, 10).map(i => `C:/Users/quent/Dropbox/camera/encoder/h264/h264/frame${i}.h264`);
-        //files = files.concat(range(0, 10).map(i => `C:/Users/quent/Dropbox/camera/encoder/h264/h264/frame${i}.h264`));
-        await createVideo3(`final0.mp4`, { }, files, 0, sps, pps);
+    let timescale = 1;
+    let frameTimeInTimescale = 1;
+    let width = 600;
+    let height = 400;
+    for(let i = 0; i < 3; i++) {
+        let files = range(i * 10, i * 10 + 10).map(i => `C:/Users/quent/Dropbox/camera/encoder/h264/h264/frame${i}.h264`);
+        let NALs = getH264NALsFiles(files, sps, pps);
+        let outputName = `final${i}.mp4`;
+        let obj: {sps: SPS, pps: PPS} = await createVideo3(outputName, {
+            timescale,
+            frameTimeInTimescale,
+            width,
+            height
+        }, NALs, i * 10 * frameTimeInTimescale, sps, pps);
+        sps = obj.sps;
+        pps = obj.pps;
+
+        testReadFile(outputName);
     }
-    {
-        let files = range(0, 10).map(i => `C:/Users/quent/Dropbox/camera/encoder/h264/h264/frame${i}.h264`);
-        await createVideo3(`final1.mp4`, { }, files, 10 * 10, sps, pps);
-    }
-    //for(let i = 0; i < 10; i++) {
-    //    let files = range(i * 10, i * 10 + 10).map(i => `C:/Users/quent/Dropbox/camera/encoder/h264/h264/frame${i}.h264`);
-    //    let obj: {sps: SPS, pps: PPS} = await createVideo3(`final${i}.mp4`, { }, files, i * 100, sps, pps);
-    //    sps = obj.sps;
-    //    pps = obj.pps;
-    //}
 });
 //*/
 
