@@ -21,9 +21,7 @@
 
 
 //https://stackoverflow.com/questions/49397904/muxing-h264-into-mp4-using-libmp4v2-and-openh264
-void prepareFrame(int i, SSourcePicture* pic, int width, int height) {
-
-	std::ifstream file("C:/Users/quent/Dropbox/camera/encoder/frame1.bmp", std::ios::binary);
+void prepareFrame(int i, SSourcePicture* pic, int width, int height, std::ifstream& file) {
 	std::string content((std::istreambuf_iterator<char>(file)), (std::istreambuf_iterator<char>()));
 	int length = content.length();
 	unsigned char* info = (unsigned char*)content.c_str();
@@ -76,6 +74,7 @@ void prepareFrame(int i, SSourcePicture* pic, int width, int height) {
 			int G11 = bmp[((height - (y + 1) - 1) * width + x + 1) * 3 + 1];
 			int B11 = bmp[((height - (y + 1) - 1) * width + x + 1) * 3 + 0];
 
+			// Should probably look at other bytes, and maybe average them? I am not sure... but this looks okay for now...
 			int Y00 = R00 * 0.299 + G00 * 0.587 + B00 * 0.114;
 			
 			int Cb00 = 128 + -0.168736 * R00 - 0.331264 * G00 + 0.5 * B00;
@@ -89,13 +88,6 @@ void prepareFrame(int i, SSourcePicture* pic, int width, int height) {
 
 			//pic->pData[1][y * (width / 2) + x] = 128 + y + i * 2;
 			//pic->pData[2][y * (width / 2) + x] = 64 + x + i * 5;
-
-			/*
-			if (x > 100) {
-				pic->pData[2][y * (width / 2) + x] = 128;
-			}
-			*/
-			
 		}
 	}
 }
@@ -202,17 +194,16 @@ void main() {
 	pic.pData[0] = new unsigned char[width * height];
 	pic.pData[1] = new unsigned char[width * height / 2];
 	pic.pData[2] = new unsigned char[width * height / 2];
-	/*
-	pic.pData[0] = data;
-	pic.pData[1] = pic.pData[0] + width * height;
-	pic.pData[2] = pic.pData[1] + (width * height / 4);
-	*/
 
 	printf("start\n");
-	for (int num = 0; num < 2; num++) {
-		pic.uiTimeStamp = num * 100;
+	for (int num = 0; num < 100; num++) {
+		pic.uiTimeStamp = 0;
 
-		prepareFrame(num, &pic, width, height);
+		auto inputFileName = std::string() + "C:/Users/quent/Dropbox/camera/encoder/frame" + std::to_string(num) + ".bmp";
+		//auto inputFileName = std::string() + "C:/Users/quent/Dropbox/camera/encoder/frame5.bmp";
+		std::ifstream inputFile(inputFileName, std::ios::binary);
+
+		prepareFrame(num, &pic, width, height, inputFile);
 
 		//prepare input data
 		rv = encoder->EncodeFrame(&pic, &info);

@@ -270,8 +270,7 @@ export const AvcCBox = ChooseInfer()({
         //  is even used for, but it appears to be wrong?
         lengthSizeMinusOne = 2 - 1;
         return repeat({sps: NALCreate(2, undefined, undefined)}, numOfSequenceParameterSets);
-    },
-    [ErasedKey]: CodeOnlyValue({test: 5}),
+    }
 })({
     numOfPictureParameterSets: IntBitN(8),
 })({

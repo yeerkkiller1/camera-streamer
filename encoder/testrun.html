@@ -2,44 +2,31 @@
 <script>
     test();
     async function test() {
-        //todonext
-        // Test rewriting the test.h264.mp4 file with forced profile_compatiblity, and then just forced AVCProfileIndication,
-        //  to see if the browser will take it.
-
-        // TODO:
-        //  - Uh... figure out how to calculate the start time
-        //      - start time should be from baseMediaDecodeTime (moof.traf.tfdt)
-        //  - Test appendBuffering test.h264.mp4, and whether or not it works, calculate the codec from the stsd.avc1.avcC data (to make sure we can)
-        //      and then use it with test.h264.mp4, and test2.mp4 (to see how much the codec matters).
-        //  - Create segments h264.mp4 files, and make sure they work.
-        //let result = await fetch("./test2.mp4");
-        let result;
-        let startTime = 0;
-        if(document.location.search.includes("test")) {
-            result = await fetch("./final.mp4");
-            //startTime = 38417946360 / 90000;
-        } else {
-            //todonext
-            // Okay, this should work if we use all the metadata containers from youtube.mp4. It looks like we need to have
-            //  certain boxes to trigger an initialization of the video.
-            result = await fetch("./10fps.dash.mp4");
-        }
-
-         
-        //let result = await fetch("./test.h264.mp4");
-        let raw = await result.arrayBuffer()
         var push = new MediaSource();
+        var buf;
         vid.src = URL.createObjectURL(push);
-        push.addEventListener("sourceopen", () => {
+        push.addEventListener("sourceopen", async () => {
+            // TODO: Get this codec from the video file, so we know it is correct
+            buf = push.addSourceBuffer('video/mp4; codecs="avc1.420029"');
 
-            //var buf = push.addSourceBuffer('video/mp4; codecs="avc1.4d401e"');
+            if(document.location.search.includes("test")) {
+                await addVideo("./final0.mp4");
+                //await addVideo("./final1.mp4");
+                //startTime = 38417946360 / 90000;
+            } else if(document.location.search.includes("2")) {
+                await addVideo("./dash0.mp4");
+                await addVideo("./dash1.mp4");
+            } else {
+                //todonext
+                // Okay, this should work if we use all the metadata containers from youtube.mp4. It looks like we need to have
+                //  certain boxes to trigger an initialization of the video.
+                await addVideo("./10fps.dash.mp4");
+                await addVideo("./10fps.dash_2.m4s");
+            }
 
-            // ffmpeg -y -i test.mp4 -c libx264 -pix_fmt yuv420p -profile:v main -level:v 3.0 test.h264.mp4
-            var buf = push.addSourceBuffer('video/mp4; codecs="avc1.4d401e"');
-
-            //var buf = push.addSourceBuffer('video/mp4; codecs="avc1.42c01e"');
-            //var buf = push.addSourceBuffer('video/mp4;codecs="avc1.4D4001"');
+            let startTime = 0;
             buf.addEventListener("updateend", () => {
+                console.log("Trying to play");
                 //vid.currentTime = (778184112 / 90000);
                 //vid.currentTime = 114 * 60 * 60 + 50 * 60 + 13;
                 vid.currentTime = startTime;
@@ -48,8 +35,13 @@
 
                 console.log(buf.videoTracks);
             });
-            
-            buf.appendBuffer(raw);
         });
+
+        async function addVideo(path) {
+            let result = await fetch(path);
+            //let result = await fetch("./test.h264.mp4");
+            let raw = await result.arrayBuffer();
+            buf.appendBuffer(raw);
+        }
     }
 </script>

@@ -31,7 +31,7 @@ import { sum, max, min } from "./util/math";
 
 import * as Jimp from "jimp";
 import { parseObject, filterBox, writeObject, getBufferWriteContext } from "./BinaryCoder";
-import { RootBox, MoofBox, MdatBox, FtypBox, MoovBox, sample_flags, SidxBox } from "./BoxObjects";
+import { RootBox, MoofBox, MdatBox, FtypBox, MoovBox, sample_flags, SidxBox, StypBox } from "./BoxObjects";
 import { SerialObject, _SerialObjectOutput, _SerialIntermediateToFinal, TemplateToObject } from "./SerialTypes";
 import { NALList, parserTest, NALType, SPS, PPS } from "./NAL";
 import { byteToBits, bitsToByte } from "./Primitives";
@@ -359,11 +359,11 @@ async function testRewriteMjpeg() {
     }
 }
 
-function getSamples(NALs: NALType[], sps: SPS, pps: PPS, frameTimeInTimescale: number) {
+function getSamples(NALs: NALType[], sps: SPS, pps: PPS, frameTimeInTimescale: number, lastIndex = 0) {
     let baseCount = 0;
     let maxFrameOrderIndex = max(NALs.map(x => x.nalObject.type === "slice" ? x.nalObject.nal.slice_header.pic_order_cnt_lsb : 0));
 
-    return NALs
+    let samples = NALs
         .filter(x => x.nalObject.type === "slice")
         .map((input, i) => {
             let obj = input.nalObject;
@@ -373,11 +373,18 @@ function getSamples(NALs: NALType[], sps: SPS, pps: PPS, frameTimeInTimescale: n
 
             let picOrder = header.pic_order_cnt_lsb;
 
+            i += lastIndex;
+
             let fullPicOrder = picOrder + baseCount;
 
             let calcIndex = fullPicOrder / 2 + 2;
 
             let comp_off = (calcIndex - i) * frameTimeInTimescale;
+
+            if(comp_off === -27) {
+                comp_off = 5;
+            }
+            console.log({calcIndex, i, baseCount, comp_off});
 
             if(picOrder === maxFrameOrderIndex) {
                 baseCount += maxFrameOrderIndex + 2;
@@ -391,6 +398,15 @@ function getSamples(NALs: NALType[], sps: SPS, pps: PPS, frameTimeInTimescale: n
             };
         })
     ;
+
+    let negativeOffset = min(samples.map(x => x.composition_offset));
+    if(negativeOffset < 0) {
+        samples.forEach(sample => {
+            sample.composition_offset -= negativeOffset;
+        });
+    }
+
+    return samples;
 }
 
 async function testRewriteMp4Fragment() {
@@ -805,6 +821,13 @@ function createMoov(
         pps: PPS,
     }
 ): O<typeof MoovBox> {
+    if("time_scale" in d.sps) {
+        d.sps.time_scale = d.timescale * 2;
+    }
+    if("num_units_in_tick" in d.sps) {
+        d.sps.num_units_in_tick = d.frameTimeInTimescale;
+    }
+    
     return {
         header: {
             type: "moov"
@@ -1198,6 +1221,7 @@ function createSidx(
         mdatSize: number;
         subsegmentDuration: number;
         timescale: number;
+        earliest_presentation_time?: number;
     }
 ): O<typeof SidxBox> {
     // There is a sidx per moof and mdat.
@@ -1212,7 +1236,7 @@ function createSidx(
         timescale: d.timescale,
         times: {
             // Not used, doesn't matter?
-            earliest_presentation_time: 0,
+            earliest_presentation_time: d.earliest_presentation_time || 0,
             // Not useful, we can just use reference_offset
             first_offset: 0
         },
@@ -1231,10 +1255,10 @@ function createSidx(
                 // Looks like this isn't used. But we could calculate it correctly, instead of however it was calculated by mp4box
                 subsegment_duration: d.subsegmentDuration,
                 SAP: {
-                    starts_with_SAP: 0,
+                    starts_with_SAP: d.earliest_presentation_time ? 0 : 1,
                     // a SAP of type 1 or type 2 is indicated as a sync sample, or by "sample_is_non_sync_sample" equal to 0 in the movie fragments.
                     //  So... we have sample_is_non_sync_sample === 0 in the movie fragments, so this can be 0 here.
-                    SAP_type: 0,
+                    SAP_type: d.earliest_presentation_time ? 0 : 1,
                     SAP_delta_time: 0
                 }
             }
@@ -1390,31 +1414,103 @@ function getFrames(path: string): LargeBuffer[] {
     let h264Object = parseObject(buffer, RootBox);
        
     let box = filterBox(h264Object);
-    let mdia = box("moov")("trak")("mdia");
 
-    let stts = mdia("minf")("stbl")("stts")();
+    let frames: { buffer: LargeBuffer; composition_offset: number; }[] = [];
 
-    if(stts.samples.length !== 1) {
-        console.log(stts.samples);
-        throw new Error(`Samples of varying duration. This is unexpected.`);
+    if(h264Object.boxes.some(x => x.type === "moov")) {
+        let mdia = box("moov")("trak")("mdia");
+
+        let stts = mdia("minf")("stbl")("stts")();
+
+        let mdat = box("mdat")();
+        let frameTimeInTimescale: number;
+
+        // If the length is 0, check for a moof.traf.trun
+        if(stts.samples.length === 0) {
+            let samples = box("moof")("traf")("trun")().sample_values;
+
+            frameTimeInTimescale = box("moov")("mvex")("trex")().default_sample_duration;
+            
+            let pos = 0;
+            for(let sample of samples) {
+                if(!("sample_size" in sample)) {
+                    throw new Error(`No sample_size in trun.sample_values sample. It may be in one of the defaults, but handling for that is not present yet.`);
+                }
+                if(!("sample_composition_time_offset" in sample)) {
+                    throw new Error(`No sample_composition_time_offset in trun.sample_values sample. It may be in one of the defaults, but handling for that is not present yet.`);
+                }
+                let sampleSize = sample.sample_size;
+                let dat = mdat.bytes.slice(pos, pos + sampleSize);
+                pos += sampleSize;
+
+                frames.push({
+                    buffer: dat,
+                    composition_offset: sample.sample_composition_time_offset,
+                });
+            }
+        }
+        else if(stts.samples.length === 1) {
+            let sampleInfo = stts.samples[0];
+
+            frameTimeInTimescale = sampleInfo.sample_delta;
+            //frameTimeInTimescale = timescale / 5;
+
+            // ctts table has times
+            // stsz table has sample byte sizes.
+
+            let stsz = mdia("minf")("stbl")("stsz")();
+            let mdats: LargeBuffer[] = [];
+
+            let pos = 0;
+            for(let sampleSize of stsz.sample_sizes) {
+                mdats.push(mdat.bytes.slice(pos, pos + sampleSize));
+                pos += sampleSize;
+            }
+
+            let ctts = mdia("minf")("stbl")("ctts")();
+        
+            let frameIndex = 0;
+            for(let cttsInfo of ctts.samples) {
+                for(let i = 0; i < cttsInfo.sample_count; i++) {
+                    frames.push({
+                        buffer: mdats[frameIndex],
+                        composition_offset: cttsInfo.sample_offset,
+                    });
+                    frameIndex++;
+                }
+            }
+        } else {
+            console.log(stts.samples);
+            throw new Error(`Samples of varying duration. This is unexpected.`);
+        }
+
+    } else {
+        let box = filterBox(h264Object);
+
+        let mdat = box("mdat")();
+
+        let trun = box("moof")("traf")("trun")();
+        let pos = 0;
+        for(let sample of trun.sample_values) {
+            if(!("sample_size" in sample)) {
+                throw new Error(`No sample_size in trun.sample_values sample. It may be in one of the defaults, but handling for that is not present yet.`);
+            }
+            if(!("sample_composition_time_offset" in sample)) {
+                throw new Error(`No sample_composition_time_offset in trun.sample_values sample. It may be in one of the defaults, but handling for that is not present yet.`);
+            }
+            let sampleSize = sample.sample_size;
+            let dat = mdat.bytes.slice(pos, pos + sampleSize);
+            pos += sampleSize;
+
+            frames.push({
+                buffer: dat,
+                composition_offset: sample.sample_composition_time_offset,
+            });
+        }
     }
 
-    // ctts table has times
-    // stsz table has sample byte sizes.
-
-    let mdat = box("mdat")();
-    let stsz = mdia("minf")("stbl")("stsz")();
-    let mdats: LargeBuffer[] = [];
-
-    let bufs: LargeBuffer[] = [];
-    let pos = 0;
-    for(let sampleSize of stsz.sample_sizes) {
-        bufs.push(mdat.bytes.slice(pos, pos + sampleSize));
-        mdats.push();
-        pos += sampleSize;
-    }
-
-    return bufs;
+    // Throw out composition_offset. We can calculate this later from the NALs.
+    return frames.map(x => x.buffer);
 }
 
 process.on('uncaughtException', (x: any) => console.log(x));
@@ -1480,44 +1576,48 @@ function frameTest() {
     //wrapAsync(testRewriteMp4Fragment);
 }
 
-function getMP4H624NALs(path: string): NALType[] {
-    let mp4File = parseObject(LargeBuffer.FromFile(path), RootBox);
-    let box = filterBox(mp4File);
-    let mdia = box("moov")("trak")("mdia");
-    let avcC = mdia("minf")("stbl")("stsd")("avc1")("avcC")();
+function getMP4H624NALs(path: string, sps: SPS|undefined = undefined, pps: PPS|undefined = undefined): NALType[] {
+    if(sps === undefined || pps === undefined) {
+        let mp4File = parseObject(LargeBuffer.FromFile(path), RootBox);
+        let box = filterBox(mp4File);
+        let mdia = box("moov")("trak")("mdia");
+        let avcC = mdia("minf")("stbl")("stsd")("avc1")("avcC")();
 
-    if(avcC.sequenceParameterSets.length !== 1) {
-        throw new Error(`Multiple sequenceParameterSets`);
-    }
-    let nalObject = avcC.sequenceParameterSets[0].sps.nalObject;
-    let spsObject = nalObject;
-    if(spsObject.type !== "sps") {
-        throw new Error(`sequenceParameterSet not sps`);
-    }
-    let sps = spsObject.nal;
+        if(avcC.sequenceParameterSets.length !== 1) {
+            throw new Error(`Multiple sequenceParameterSets`);
+        }
+        let nalObject = avcC.sequenceParameterSets[0].sps.nalObject;
+        let spsObject = nalObject;
+        if(spsObject.type !== "sps") {
+            throw new Error(`sequenceParameterSet not sps`);
+        }
+        sps = spsObject.nal;
 
-    if(avcC.pictureParameterSets.length !== 1) {
-        throw new Error(`Multiple pictureParameterSets`);
+        if(avcC.pictureParameterSets.length !== 1) {
+            throw new Error(`Multiple pictureParameterSets`);
+        }
+        let nalObject0 = avcC.pictureParameterSets[0].pps.nalObject;
+        let spsObject0 = nalObject0;
+        if(spsObject0.type !== "pps") {
+            console.log(spsObject0);
+            throw new Error(`pictureParameterSets not pps`);
+        }
+        pps = spsObject0.nal;
     }
-    let nalObject0 = avcC.pictureParameterSets[0].pps.nalObject;
-    let spsObject0 = nalObject0;
-    if(spsObject0.type !== "pps") {
-        console.log(spsObject0);
-        throw new Error(`pictureParameterSets not pps`);
-    }
-    let pps = spsObject0.nal;
 
     let NALs = flatten(getFrames(path).map(frame => {
         let obj = parseObject(frame, NALList(4, sps, pps));
         return obj.NALs;
     }));
 
+    /*
     writeFileSync(path + `.sps.nal`, prettyPrint(sps));
     writeFileSync(path + `.pps.nal`, prettyPrint(pps));
 
     for(let i = 0; i < Math.min(2, NALs.length); i++) {
         writeFileSync(path + `.${i}.nal`, prettyPrint(NALs[i]));
     }
+    */
 
     return NALs;
 }
@@ -1526,18 +1626,16 @@ function getOpenH264NALs() {
     return getH264NALsFiles(range(0, 10).map(i => `C:/Users/quent/Dropbox/camera/encoder/h264/h264/frame${i}.h264`));
 }
 
-function getH264NALsFiles(files: string[]): NALType[] {
-    return getH264NALs(files.map(file => ({ buf: LargeBuffer.FromFile(file), path: file })));
+function getH264NALsFiles(files: string[], sps: SPS|undefined = undefined, pps: PPS|undefined = undefined): NALType[] {
+    return getH264NALs(files.map(file => ({ buf: LargeBuffer.FromFile(file), path: file })), sps, pps);
 }
-function getH264NALs(bufs: { buf: LargeBuffer, path: string }[]): NALType[] {
+function getH264NALs(bufs: { buf: LargeBuffer, path: string }[], sps: SPS|undefined = undefined, pps: PPS|undefined = undefined): NALType[] {
     let nals: NALType[] = [];
-
-    let sps: SPS|undefined = undefined;
-    let pps: PPS|undefined = undefined;
 
     for(let frameObj of bufs) {
         let frame = frameObj.buf;
         let path = frameObj.path;
+        console.log(`Frame length ${frame.getLength()}`)
         let obj = parseObject(frame, NALList(4, sps, pps));
 
         // Must be a forEach loop, to disconnect the sps variable from these assignments. Otherwise typescript
@@ -1582,46 +1680,56 @@ function testNALs(paths: string[]) {
     testWrite(entireBuf, output);
 }
 
+async function createVideo3Files (
+    outputFileName: string,
+    videoInfo: {
+
+    },
+    framePaths: string[],
+    baseMediaDecodeTimeInTimescale: number,
+    sps: SPS|undefined = undefined,
+    pps: PPS|undefined = undefined
+): Promise<{
+    sps: SPS;
+    pps: PPS;
+}> {
+    return createVideo3(
+        outputFileName,
+        videoInfo,
+        getH264NALsFiles(framePaths, sps, pps),
+        baseMediaDecodeTimeInTimescale,
+        sps,
+        pps
+    );
+}
 
 async function createVideo3 (
     outputFileName: string,
     videoInfo: {
 
     },
-    framePaths: string[],
-) {
-
-    let ftyp: O<typeof FtypBox> = {
-        header: {
-            type: "ftyp"
-        },
-        type: "ftyp",
-        major_brand: "iso5",
-        minor_version: 1,
-        compatible_brands: [
-            "avc1",
-            "iso5",
-            "dash"
-        ]
-    };
-
-    let timescale = 1;
+    NALs: NALType[],
+    baseMediaDecodeTimeInTimescale: number,
+    sps: SPS|undefined = undefined,
+    pps: PPS|undefined = undefined
+): Promise<{
+    sps: SPS;
+    pps: PPS;
+}> {
+    let timescale = 10;
     let frameTimeInTimescale = 1;
     let width = 600;
 	let height = 400;
 
-    let NALs = getH264NALsFiles(framePaths);
     let spsObject = NALs.filter(x => x.nalObject.type === "sps")[0];
-    if(spsObject.nalObject.type !== "sps") {
-        throw new Error("impossible");
+    if(spsObject && spsObject.nalObject.type === "sps") {
+        sps = spsObject.nalObject.nal;
     }
-    let sps = spsObject.nalObject.nal;
 
     let ppsObject = NALs.filter(x => x.nalObject.type === "pps")[0];
-    if(ppsObject.nalObject.type !== "pps") {
-        throw new Error("impossible");
+    if(ppsObject && ppsObject.nalObject.type === "pps") {
+        pps = ppsObject.nalObject.nal;
     }
-    let pps = ppsObject.nalObject.nal;
 
     for(let NAL of NALs) {
         if(NAL.nalObject.type !== "slice") continue;
@@ -1629,35 +1737,63 @@ async function createVideo3 (
         console.log(header.sliceTypeStr, header.pic_order_cnt_lsb);
     }
 
+    if(!sps) {
+        throw new Error("sps required");
+    }
+    if(!pps) {
+        throw new Error("pps required");
+    }
+
     //if(true as boolean) throw new Error("stop");
 
     let frames = NALs.filter(x => x.nalObject.type === "slice");
-    let frameInfos = getSamples(frames, sps, pps, frameTimeInTimescale);
+    let frameInfos = getSamples(frames, sps, pps, frameTimeInTimescale, baseMediaDecodeTimeInTimescale / frameTimeInTimescale);
 
     let samples: SampleInfo[] = frameInfos.map(x => ({
         sample_size: x.buffer.getLength(),
-        // TODO: Calculate sample_composition_time_offset from frame reorder information.
         sample_composition_time_offset: x.composition_offset,
     }));
 
+    console.log(samples);
 
-    let moov = createMoov({
-        defaultFlags: nonKeyFrameSampleFlags,
-        timescale: timescale,
-        durationInTimescale: samples.length * frameTimeInTimescale,
-        frameTimeInTimescale: frameTimeInTimescale,
-        width: width,
-        height: height,
-        AVCProfileIndication: sps.profile_idc,
-        profile_compatibility: 0,
-        AVCLevelIndication: sps.level_idc,
-        sps,
-        pps,
-    });
+    let boxes: TemplateToObject<typeof RootBox>["boxes"][0][] = [];
+
+
+    if(baseMediaDecodeTimeInTimescale === 0) {
+        let ftyp: O<typeof FtypBox> = {
+            header: {
+                type: "ftyp"
+            },
+            type: "ftyp",
+            major_brand: "iso5",
+            minor_version: 1,
+            compatible_brands: [
+                "avc1",
+                "iso5",
+                "dash"
+            ]
+        };
+        boxes.push(ftyp);
+    
+        let moov = createMoov({
+            defaultFlags: nonKeyFrameSampleFlags,
+            timescale: timescale,
+            durationInTimescale: 0,
+            frameTimeInTimescale: frameTimeInTimescale,
+            width: width,
+            height: height,
+            AVCProfileIndication: sps.profile_idc,
+            profile_compatibility: 0,
+            AVCLevelIndication: sps.level_idc,
+            sps,
+            pps,
+        });
+        boxes.push(moov);
+    }
     
     let moof = createMoof({
         sequenceNumber: 1,
-        baseMediaDecodeTimeInTimescale: 0,
+        baseMediaDecodeTimeInTimescale: baseMediaDecodeTimeInTimescale,
         samples,
         forcedFirstSampleFlags: keyFrameSampleFlags,
         // Set defaultFlags in moov, not moof
@@ -1673,7 +1809,7 @@ async function createVideo3 (
         type: "mdat",
         bytes: new LargeBuffer(frameInfos.map(x => x.buffer))
     };
-    
+
     let moofBuf = writeObject(MoofBox, moof);
     let mdatBuf = writeObject(MdatBox, mdat);
 
@@ -1682,16 +1818,31 @@ async function createVideo3 (
         mdatSize: mdatBuf.getLength(),
         subsegmentDuration: samples.length * frameTimeInTimescale,
         timescale: timescale,
+        earliest_presentation_time: baseMediaDecodeTimeInTimescale
     });
 
+    let styp: O<typeof StypBox> = {
+        header: {
+            size: 24,
+            type: "styp",
+            headerSize: 8
+        },
+        type: "styp",
+        major_brand: "msdh",
+        minor_version: 0,
+        compatible_brands: [
+            "msdh",
+            "msix"
+        ]
+    };
+    boxes.push(styp);
 
-    let finalBuffer = writeObject(RootBox, { boxes: [
-        ftyp,
-        moov,
-        sidx,
-        moof,
-        mdat,
-    ] });
+    boxes.push(sidx);
+    boxes.push(moof);
+    boxes.push(mdat);
+
+
+    let finalBuffer = writeObject(RootBox, { boxes });
 
     await finalBuffer.WriteToFile(outputFileName);
 
@@ -1728,8 +1879,37 @@ async function createVideo3 (
     let newFileBuffer = writeObject(RootBox, mp4File);
     */
     //writeFileSync(path + ".modified.mp4", Buffer.concat(newFileBuffer.getInternalBufferList()));
+
+    return {
+        sps,
+        pps,
+    };
 }
 
+
+function jpegToBmp(jpegPath: string, bmpPath: string) {
+
+    let jimpAny = Jimp as any;    
+    let width = 600;
+    let height = 400;
+    jimpAny.read(jpegPath, (err: any, image: any) => {
+        if(err) throw new Error(`Error ${err}`);
+        image.write(bmpPath);
+    });
+
+    //let image = new jimpAny(width, height, 0xFF0000FF, () => {});
+    
+    //Jimp.read(jpegs[0], (err: any, x: any) => {
+    //    if(err) throw new Error(`Error ${err}`);
+    //    image = x;
+    //});
+}
+
+/*
+range(0, 100).forEach(i => {
+    jpegToBmp(`C:/Users/quent/Dropbox/camera/encoder/frame${i}.jpeg`, `C:/Users/quent/Dropbox/camera/encoder/frame${i}.bmp`);
+});
+*/
 
 //wrapAsync(testRewriteMp4Fragment);
 
@@ -1741,11 +1921,72 @@ async function createVideo3 (
 //getMP4H624NALs(`10fps.h264.mp4`);
 //getMP4H624NALs(`1fps.h264.mp4`);
 
-wrapAsync(async () => {
-    await createVideo3("final.mp4", { }, range(0, 1).map(i => `C:/Users/quent/Dropbox/camera/encoder/h264/h264/frame${i}.h264`));
-    testReadFile("final.mp4");
-});
+//todonext
+// 10fps.dash.mp4 and then 10fps.dash_2.m4s work, but our second file when added does nothing. Why?
+// Well... we are going to have to take the NALs out of 10fps.dash.mp4 and 10fps.dash_2.m4s, put them in our own containers
+//  and see if that plays. So close...
 
+///*
+{
+    wrapAsync(async () => {
+        let NALs1 = getMP4H624NALs("10fps.dash.mp4");
+        let spsObj = NALs1.filter(x => x.nalObject.type === "sps")[0];
+        if(spsObj.nalObject.type !== "sps") {
+            throw new Error("impossible");
+        }
+        let sps = spsObj.nalObject.nal;
+        let ppsObj = NALs1.filter(x => x.nalObject.type === "pps")[0];
+        if(ppsObj.nalObject.type !== "pps") {
+            throw new Error("impossible");
+        }
+        let pps = ppsObj.nalObject.nal;
+
+        let NALs2 = getMP4H624NALs("10fps.dash_2.m4s", sps, pps);
+
+        let frames = NALs1.filter(x => x.nalObject.type === "slice").length;
+        console.log(`1 frames ${frames}`);
+
+        await createVideo3(`dash0.mp4`, { }, NALs1, 0, sps, pps);
+        await createVideo3(`dash1.mp4`, { }, NALs2, frames, sps, pps);
+    });
+}
+//*/
+
+/*
+testReadFile("10fps.dash_2.m4s");
+testReadFile("final1.mp4");
+
+testReadFile("10fps.dash.mp4");
+testReadFile("final0.mp4");
+//*/
+
+// Okay, dash1 doesn't work, but 10fps.dash_2.m4s does. But they have the same h264 content! So... the problem must be in our container.
+testReadFile("dash1.mp4");
+testReadFile("10fps.dash_2.m4s");
+
+//testReadFile("final1.mp4");
+
+/*
+wrapAsync(async () => {
+    let sps: SPS|undefined = undefined;
+    let pps: PPS|undefined = undefined;
+    {
+        let files = range(0, 10).map(i => `C:/Users/quent/Dropbox/camera/encoder/h264/h264/frame${i}.h264`);
+        //files = files.concat(range(0, 10).map(i => `C:/Users/quent/Dropbox/camera/encoder/h264/h264/frame${i}.h264`));
+        await createVideo3(`final0.mp4`, { }, files, 0, sps, pps);
+    }
+    {
+        let files = range(0, 10).map(i => `C:/Users/quent/Dropbox/camera/encoder/h264/h264/frame${i}.h264`);
+        await createVideo3(`final1.mp4`, { }, files, 10 * 10, sps, pps);
+    }
+    //for(let i = 0; i < 10; i++) {
+    //    let files = range(i * 10, i * 10 + 10).map(i => `C:/Users/quent/Dropbox/camera/encoder/h264/h264/frame${i}.h264`);
+    //    let obj: {sps: SPS, pps: PPS} = await createVideo3(`final${i}.mp4`, { }, files, i * 100, sps, pps);
+    //    sps = obj.sps;
+    //    pps = obj.pps;
+    //}
+});
+//*/
 
 
 
@@ -1790,10 +2031,8 @@ testReadFile(`10fps.h264.mp4`);
 */
 
 
-//todonext
-// - Modify the frames inside test5.mp4 (the payload is just a mjpeg), so ensure we can still play it.
-// - Make sure writeIntermediate works for youtube.mp4 (and add parsing for any new boxes)
-// - Make sure we can put a payload from a full mp4 (test.h264.mp4) into a frament mp4 (youtube.mp4), and get a playable file.
+
+
 
 //testYoutube();
 
@@ -1829,7 +2068,6 @@ testReadFile(`10fps.h264.mp4`);
 }
 //*/
 
-// 
 
 //wrapAsync(testRewriteMjpeg);
 
