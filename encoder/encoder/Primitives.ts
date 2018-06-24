@@ -181,6 +181,17 @@ export function DebugStringRemaining(): SerialObjectPrimitive<string> {
     };
 };
 
+export function CallOnReadPos(read: (pos: number) => void): SerialObjectPrimitive<void> {
+    return {
+        read({pPos, buffer, end}) {
+            read(pPos.v);
+        },
+        write(context) {
+            return new LargeBuffer([]);
+        }
+    };
+};
+
 
 /** Big endian */
 export function bitsToByte(bits: number[]): number {

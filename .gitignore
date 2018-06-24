@@ -10,10 +10,11 @@
 *.exp
 .vs
 x64
+x264
 Debug
 digest.txt
 node_modules
 dist
-stats.html
+stats*.html
 *.frame*
 *.nal

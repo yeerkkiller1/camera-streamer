@@ -23,7 +23,7 @@
 import { textFromUInt32, readUInt64BE, textToUInt32, writeUInt64BE } from "./util/serialExtension";
 import { LargeBuffer, MaxUInt32 } from "./LargeBuffer";
 import { isArray, throwValue, assertNumber } from "./util/type";
-import { keyBy, mapObjectValues, repeat, flatten, filterObjectValues, mapObjectValuesKeyof, range } from "./util/misc";
+import { keyBy, mapObjectValues, repeat, flatten, filterObjectValues, mapObjectValuesKeyof, range, sort } from "./util/misc";
 import { writeFileSync, createWriteStream, readSync, fstat, readFileSync, writeSync } from "fs";
 import { basename } from "path";
 import { decodeUTF8BytesToString, encodeAsUTF8Bytes, debugString } from "./util/UTF8";
@@ -33,7 +33,7 @@ import * as Jimp from "jimp";
 import { parseObject, filterBox, writeObject, getBufferWriteContext } from "./BinaryCoder";
 import { RootBox, MoofBox, MdatBox, FtypBox, MoovBox, sample_flags, SidxBox, StypBox } from "./BoxObjects";
 import { SerialObject, _SerialObjectOutput, _SerialIntermediateToFinal, TemplateToObject } from "./SerialTypes";
-import { NALList, parserTest, NALType, SPS, PPS } from "./NAL";
+import { NALList, parserTest, NALType, SPS, PPS, ConvertAnnexBToAVCC } from "./NAL";
 import { byteToBits, bitsToByte } from "./Primitives";
 
 
@@ -360,44 +360,70 @@ async function testRewriteMjpeg() {
 }
 
 function getSamples(NALs: NALType[], sps: SPS, pps: PPS, frameTimeInTimescale: number, lastIndex = 0) {
-    let baseCount = 0;
-    let maxFrameOrderIndex = max(NALs.map(x => x.nalObject.type === "slice" ? x.nalObject.nal.slice_header.pic_order_cnt_lsb : 0));
+    let frames = NALs.filter(x => x.nalObject.type === "slice");
 
-    let samples = NALs
-        .filter(x => x.nalObject.type === "slice")
-        .map((input, i) => {
-            let obj = input.nalObject;
-            if(obj.type !== "slice") throw new Error("impossible");
-            let buffer = writeObject(NALList(4, sps, pps), { NALs: [input] });
-            let header = obj.nal.slice_header;
+    let picOrders: { fileIndex: number; picOrder: number }[] = [];
 
-            let picOrder = header.pic_order_cnt_lsb;
+    if("log2_max_pic_order_cnt_lsb_minus4" in sps && sps.log2_max_pic_order_cnt_lsb_minus4 ) {
+        let MaxPicOrderCntLsb = Math.pow(2, sps.log2_max_pic_order_cnt_lsb_minus4 + 4);
+        let prevPicOrderCntLsb = 0;
+        let prevPicOrderCntMsb = 0;
+        //sps.max_num_reorder_frames
+        frames.forEach((obj, i) => {
+            let input = obj.nalObject;
+            if(input.type !== "slice") throw new Error("impossible");
+            let pic_order_cnt_lsb = input.nal.slice_header.pic_order_cnt_lsb;
 
-            i += lastIndex;
+            let PicOrderCntMsb: number;
 
-            let fullPicOrder = picOrder + baseCount;
-
-            let calcIndex = fullPicOrder / 2;
-
-            let comp_off = (calcIndex - i) * frameTimeInTimescale;
-
-            if(comp_off === -27) {
-                comp_off = 5;
+            // This is the algorithm from the spec
+            if (pic_order_cnt_lsb < prevPicOrderCntLsb && (prevPicOrderCntLsb - pic_order_cnt_lsb) >= (MaxPicOrderCntLsb / 2)) {
+                PicOrderCntMsb = prevPicOrderCntMsb + MaxPicOrderCntLsb;
             }
-            console.log({calcIndex, i, picOrder, baseCount, comp_off});
-
-            if(picOrder === maxFrameOrderIndex) {
-                baseCount += maxFrameOrderIndex + 2;
+            else if( ( pic_order_cnt_lsb > prevPicOrderCntLsb ) &&
+                ( ( pic_order_cnt_lsb - prevPicOrderCntLsb ) > ( MaxPicOrderCntLsb / 2 ) ) ) {
+                PicOrderCntMsb = prevPicOrderCntMsb - MaxPicOrderCntLsb;
+            } else {
+                PicOrderCntMsb = prevPicOrderCntMsb;
             }
 
-            return {
-                buffer: buffer,
-                // Hmm... maybe calculate this, and also try to speed up the video, or slow it down, and make sure time information
-                //  in the NALs is ignore, and doesn't break the video.
-                composition_offset: comp_off // frames[i].composition_offset,
-            };
-        })
-    ;
+            prevPicOrderCntLsb = pic_order_cnt_lsb;
+            prevPicOrderCntMsb = PicOrderCntMsb;
+
+            let picOrder = prevPicOrderCntMsb + prevPicOrderCntLsb;
+
+            picOrders.push({
+                fileIndex: i,
+                picOrder: picOrder,
+            });
+        });
+
+        sort(picOrders, x => x.picOrder);
+    }
+
+    let orderOffsets = keyBy(
+        picOrders.map((x, finalIndex) => ({
+            offset: finalIndex - x.fileIndex,
+            fileIndex: x.fileIndex,
+        })),
+        x => x.fileIndex.toString()
+    );
+
+    let samples = frames.map((input, i) => {
+        let obj = input.nalObject;
+        if(obj.type !== "slice") throw new Error("impossible");
+        let buffer = writeObject(NALList(4, sps, pps), { NALs: [input] });
+        let header = obj.nal.slice_header;
+
+        let comp_off = i in orderOffsets ? orderOffsets[i].offset * frameTimeInTimescale : 0;
+
+        return {
+            buffer: buffer,
+            // Hmm... maybe calculate this, and also try to speed up the video, or slow it down, and make sure time information
+            //  in the NALs is ignore, and doesn't break the video.
+            composition_offset: comp_off // frames[i].composition_offset,
+        };
+    });
 
     let negativeOffset = min(samples.map(x => x.composition_offset));
     if(negativeOffset < 0) {
@@ -598,7 +624,6 @@ async function testRewriteMp4Fragment() {
             "seq_scaling_matrix_present_flag_check": {},
             "log2_max_frame_num_minus4": 0,
             "pic_order_cnt_type": 0,
-            "pic_order_cnt_type_check": {},
             "log2_max_pic_order_cnt_lsb_minus4": 2,
             "max_num_ref_frames": 4,
             "gaps_in_frame_num_value_allowed_flag": 0,
@@ -1651,7 +1676,6 @@ function getH264NALs(bufs: { buf: LargeBuffer, path: string }[], sps: SPS|undefi
     for(let frameObj of bufs) {
         let frame = frameObj.buf;
         let path = frameObj.path;
-        console.log(`Frame length ${frame.getLength()}`)
         let obj = parseObject(frame, NALList(4, sps, pps));
 
         // Must be a forEach loop, to disconnect the sps variable from these assignments. Otherwise typescript
@@ -1682,7 +1706,12 @@ function printNals(nals: NALType[]): void {
     for(let nal of nals) {
         let n = nal.nalObject;
         //if(n.type === "slice") continue;
-        console.log(n.type, nal.bitHeader0.nal_unit_type);
+        let type = "";
+        if(n.type === "slice") {
+            type = n.nal.slice_header.sliceTypeStr;
+        }
+        console.log(n.type, nal.bitHeader0.nal_unit_type, type);
+        
         //console.log(n);
     }
 }
@@ -1755,7 +1784,7 @@ async function createVideo3 (
     for(let NAL of NALs) {
         if(NAL.nalObject.type !== "slice") continue;
         let header = NAL.nalObject.nal.slice_header;
-        console.log(header.sliceTypeStr, header.pic_order_cnt_lsb);
+        //console.log(header.sliceTypeStr, header.pic_order_cnt_lsb);
     }
 
     if(!sps) {
@@ -1764,6 +1793,10 @@ async function createVideo3 (
     if(!pps) {
         throw new Error("pps required");
     }
+
+    let profile_idc = sps.profile_idc;
+    let level_idc = sps.level_idc;
+    console.log(`avc1.${profile_idc.toString(16)}00${level_idc.toString(16)}`);
 
     //if(true as boolean) throw new Error("stop");
 
@@ -1775,7 +1808,6 @@ async function createVideo3 (
         sample_composition_time_offset: x.composition_offset,
     }));
 
-    console.log(samples);
 
     let boxes: TemplateToObject<typeof RootBox>["boxes"][0][] = [];
 
@@ -1867,40 +1899,6 @@ async function createVideo3 (
 
     await finalBuffer.WriteToFile(outputFileName);
 
-    /*
-    outputs.push(ftyp);
-    outputs.push(moov);
-    outputs.push(sidx);
-    outputs.push(moof);
-    outputs.push(mdat);
-    */
-    /*
-    let mp4File = parseObject(LargeBuffer.FromFile(path), RootBox);
-    let box = filterBox(mp4File);
-    let mdia = box("moov")("trak")("mdia");
-    let avcC = mdia("minf")("stbl")("stsd")("avc1")("avcC")();
-
-    if(avcC.sequenceParameterSets.length !== 1) {
-        throw new Error(`Multiple sequenceParameterSets`);
-    }
-    let nalObject = avcC.sequenceParameterSets[0].sps.nalObject;
-    let spsObject = nalObject;
-    if(spsObject.type !== "sps") {
-        throw new Error(`sequenceParameterSet not sps`);
-    }
-    let sps = spsObject.nal;
-
-    if(avcC.pictureParameterSets.length !== 1) {
-        throw new Error(`Multiple pictureParameterSets`);
-    }
-
-    //avcC.numOfPictureParameterSets = 0;
-    //avcC.pictureParameterSets = [];
-
-    let newFileBuffer = writeObject(RootBox, mp4File);
-    */
-    //writeFileSync(path + ".modified.mp4", Buffer.concat(newFileBuffer.getInternalBufferList()));
-
     return {
         sps,
         pps,
@@ -1942,10 +1940,6 @@ range(0, 100).forEach(i => {
 //getMP4H624NALs(`10fps.h264.mp4`);
 //getMP4H624NALs(`1fps.h264.mp4`);
 
-//todonext
-// 10fps.dash.mp4 and then 10fps.dash_2.m4s work, but our second file when added does nothing. Why?
-// Well... we are going to have to take the NALs out of 10fps.dash.mp4 and 10fps.dash_2.m4s, put them in our own containers
-//  and see if that plays. So close...
 
 /*
 {
@@ -1982,12 +1976,12 @@ testReadFile("final0.mp4");
 //*/
 
 // Okay, dash1 doesn't work, but 10fps.dash_2.m4s does. But they have the same h264 content! So... the problem must be in our container.
-testReadFile("dash1.mp4");
-testReadFile("10fps.dash_2.m4s");
+//testReadFile("dash1.mp4");
+//testReadFile("10fps.dash_2.m4s");
 
 //testReadFile("final1.mp4");
 
-///*
+/*
 wrapAsync(async () => {
     let sps: SPS|undefined = undefined;
     let pps: PPS|undefined = undefined;
@@ -2013,7 +2007,41 @@ wrapAsync(async () => {
 });
 //*/
 
+wrapAsync(async () => {
+    let buf = LargeBuffer.FromFile("frame0.x264.nal");
+    buf = ConvertAnnexBToAVCC(buf);
 
+    /*
+    for(let i = 0; i < 8; i++) {
+        let byte = buf.readUInt8(i);
+        console.log(byte);
+    }
+    */
+
+    //todonext
+    // Get multiple frames encoding with x264
+    //  ./x264 ./frame0.bmp --output frame0.x264.nal
+    //  ./x264 --output frame0.x264.nal frame%d.jpeg -bframes 0
+
+    //*
+    let NALs = getH264NALs([{
+        buf: buf,
+        path: "frame0.x264.nal"
+    }]);
+
+    // 1 frame videos don't seem to play. I'm not sure why, but it's probably due to a setting somewhere in here?
+    //  They work if played natively in chrome, but not with MSE.
+
+    printNals(NALs);
+
+    await createVideo3("x264.mp4", {
+        timescale: 1,
+        frameTimeInTimescale: 1,
+        width: 600,
+        height: 400,
+    }, NALs, 0);
+    //*/
+});
 
 
 

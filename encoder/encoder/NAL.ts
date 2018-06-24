@@ -1,6 +1,6 @@
 import { SerialObjectPrimitive, ArrayInfinite, SerialObjectPrimitiveLength, LengthObjectSymbol, ChooseInfer, SerialObject, _SerialObjectOutput, TemplateToObject, ReadContext, ErasedKey, ErasedKey0, ErasedKey1, ErasedKey2, ErasedKey3, HandlesBitOffsets, ErasedKey4, ErasedKey5, ErasedKey6, ErasedKey7, ErasedKey8, ErasedKey9, ErasedKey10 } from "./SerialTypes";
 import { LargeBuffer } from "./LargeBuffer";
-import { RawData, UInt8, bitMapping, VoidParse, PeekPrimitive, byteToBits, bitsToByte, UInt16, UInt64, UInt32, CString, DebugString, readBit, UExpGolomb, BitPrimitive, BitPrimitiveN, IntBitN, SExpGolomb, AlignmentBits, Bit, RemainingData, RemainingDataRaw } from "./Primitives";
+import { RawData, UInt8, bitMapping, VoidParse, PeekPrimitive, byteToBits, bitsToByte, UInt16, UInt64, UInt32, CString, DebugString, readBit, UExpGolomb, BitPrimitive, BitPrimitiveN, IntBitN, SExpGolomb, AlignmentBits, Bit, RemainingData, RemainingDataRaw, CallOnReadPos } from "./Primitives";
 import { CodeOnlyValue, parseObject, writeObject, Iterate, getBufferWriteContext, getBufferWriteContextRanges, getAllBufferWriteContextRanges, WriteContextRange, setBufferWriteContext } from "./BinaryCoder";
 import { repeat, range } from "./util/misc";
 
@@ -23,6 +23,66 @@ typedef enum {
 } ProfileIDC;
 */
 
+/** Make a AVCC format buffer, from annex b. */
+export function ConvertAnnexBToAVCC(buf: LargeBuffer): LargeBuffer {
+    let annexB3BytesPositions: {pos: number, size: number}[] = [];
+
+    let len = buf.getLength();
+    let zeroCount = 0;
+
+    
+
+    // Wait! Variable length start codes!? Dammit, we need to handle this...
+    for(let i = 0; i < len; i++) {
+        let byte = buf.readUInt8(i);
+        if((zeroCount === 3 || zeroCount === 2) && byte === 0x01) {
+            annexB3BytesPositions.push({pos: i - zeroCount, size: zeroCount + 1});
+        }
+        
+        if(byte === 0) {
+            zeroCount++;
+            if(zeroCount >= 4) {
+                throw new Error(`Too many zero bytes encountered? These should have been escaped`);
+            }
+        } else {
+            zeroCount = 0;
+        }
+    }
+
+    let nakedNals: LargeBuffer[] = [];
+
+    for(let i = 0; i < annexB3BytesPositions.length; i++) {
+        let pos = annexB3BytesPositions[i];
+        let nextStartPos = (i + 1) < annexB3BytesPositions.length ? annexB3BytesPositions[i + 1].pos : len;
+
+        let start = pos.pos + pos.size;
+        let end = nextStartPos;
+        nakedNals.push(buf.slice(start, end));
+    }
+
+    let index = 0;
+    let pos = 0;
+    let nalsAndLengths: LargeBuffer[] = [];
+    for(let nakedNal of nakedNals) {
+        let size = nakedNal.getLength();
+        console.log({size, pos, index});
+        pos += size + 4;
+        index++;
+
+        let b1 = ~~(size / Math.pow(2, 24));
+        size -= b1 * Math.pow(2, 24);
+        let b2 = ~~(size / Math.pow(2, 16));
+        size -= b2 * Math.pow(2, 16);
+        let b3 = ~~(size / Math.pow(2, 8));
+        size -= b3 * Math.pow(2, 8);
+        let b4 = size;
+
+        nalsAndLengths.push(new LargeBuffer([new Buffer([b1, b2, b3, b4])]));
+        nalsAndLengths.push(nakedNal);
+    }
+
+    return new LargeBuffer(nalsAndLengths);
+}
 
 // There are NALs without start codes, as mentioned in: https://msdn.microsoft.com/en-us/library/windows/desktop/dd757808(v=vs.85).aspx,
 //  So they are length prefixed with a 4 byte length. Technically the length isn't part of the NAL... but whatever...
@@ -333,11 +393,16 @@ export const NAL_SPS = ChooseInfer()({
     pic_order_cnt_type: UExpGolomb,
 })
 ({
-    pic_order_cnt_type_check: InvariantCheck(({pic_order_cnt_type}) => pic_order_cnt_type === 0),
-    [ErasedKey3]: () => {
-        return {
-            log2_max_pic_order_cnt_lsb_minus4: UExpGolomb,
-        };
+    [ErasedKey3]: ({pic_order_cnt_type}) => {
+        if(pic_order_cnt_type === 1) {
+            throw new Error(`pic_order_cnt_type === 1 not handled`);
+        }
+        if(pic_order_cnt_type === 0) {
+            return {
+                log2_max_pic_order_cnt_lsb_minus4: UExpGolomb,
+            };
+        }
+        return {};
     },
 })({
     max_num_ref_frames: UExpGolomb,
@@ -768,21 +833,26 @@ function slice_header(nal_unit_type: number, sps: TemplateToObject<typeof NAL_SP
         frame_mbs_only_flag_check: InvariantCheck(() => sps.frame_mbs_only_flag === 1),
         idr_pic_id: () => nal_unit_type === 5 ? UExpGolomb : CodeOnlyValue(0),
     })({
-        pic_order_cnt_type_check: InvariantCheck(() => sps.pic_order_cnt_type === 0),
         [ErasedKey]: (obj) => {
-            return ChooseInfer()({
-                log2_max_pic_order_cnt_lsb_minus4: CodeOnlyValue(sps.log2_max_pic_order_cnt_lsb_minus4),
-                pic_order_cnt_lsb,
-                [ErasedKey]: () => {
-                    if(pps.bottom_field_pic_order_in_frame_present_flag && !("field_pic_flag" in obj && obj.field_pic_flag)) {
-                        return {
-                            delta_pic_order_cnt_bottom: SExpGolomb
+            if(sps.pic_order_cnt_type === 1) {
+                throw new Error(`sps.pic_order_cnt_type 1 not implemented`);
+            }
+            if(sps.pic_order_cnt_type === 0) {
+                return ChooseInfer()({
+                    log2_max_pic_order_cnt_lsb_minus4: CodeOnlyValue(sps.log2_max_pic_order_cnt_lsb_minus4),
+                    pic_order_cnt_lsb,
+                    [ErasedKey]: () => {
+                        if(pps.bottom_field_pic_order_in_frame_present_flag && !("field_pic_flag" in obj && obj.field_pic_flag)) {
+                            return {
+                                delta_pic_order_cnt_bottom: SExpGolomb
+                            }
                         }
+                        return {};
                     }
-                    return {};
-                }
-            })
-            ();
+                })
+                ();
+            }
+            return ChooseInfer()({ pic_order_cnt_lsb })();
         },
         [ErasedKey1]: () => {
             if(pps.redundant_pic_cnt_present_flag) {
@@ -817,11 +887,14 @@ function slice_header(nal_unit_type: number, sps: TemplateToObject<typeof NAL_SP
             }
             return ChooseInfer()({ [ErasedKey]: () => ({}) })();
         },
+        /*
         ref_pic_list_mvc_modification_check: InvariantCheck(() => nal_unit_type !== 20 && nal_unit_type !== 21),
         [ErasedKey4]: ({slice_type}) => ({
             ref_pic_list_modification: ref_pic_list_modification(slice_type),
         }),
+        */
     })({
+        /*
         [ErasedKey5]: (obj) => {
             let sliceStr = getSliceType(obj.slice_type);
             if(pps.weighted_pred_flag && (sliceStr === "P" || sliceStr === "SP")
@@ -908,19 +981,15 @@ function slice_header(nal_unit_type: number, sps: TemplateToObject<typeof NAL_SP
             }
             return {};
         }
+        */
+    })({
+        
     })
     ();
 }
 
 function slice_data(nal_unit_type: number, sps: TemplateToObject<typeof NAL_SPS>, pps: TemplateToObject<typeof NAL_PPS>, nal_ref_idc: number) {
     return ChooseInfer()({
-        [ErasedKey]: () => {
-            if(pps.entropy_coding_mode_flag) {
-                return { AlignmentBits };
-            }
-            return {};
-        }
-    })({
         align: AlignmentBits,
         remaining: RemainingDataRaw,
     })
@@ -943,6 +1012,7 @@ export type NALTemplate = ReturnType<typeof NALCreate>;
 export type NALType = TemplateToObject<NALTemplate>;
 export function NALCreate(sizeByteLength: number, sps: TemplateToObject<typeof NAL_SPS>|undefined, pps: TemplateToObject<typeof NAL_PPS>|undefined) {
     return ChooseInfer()({
+        PrintStart: CallOnReadPos(pos => console.log(`Started NAL at pos ${pos}`)),
         NALLength: NALLength(sizeByteLength)
     })({
         //data: ({NALLength}) => RawData(NALLength.size - 4)

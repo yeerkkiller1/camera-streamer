@@ -326,7 +326,8 @@ export class LargeBuffer {
     };
 
     public readUInt8: typeof Buffer.prototype.readUInt8 = (offset) => {
-        return this.getSmallBuffer(offset, 1).readUInt8(0);
+        let bufInfo = this.getBuffer(offset);
+        return bufInfo.buffer.readUInt8(bufInfo.bufferPos);
     };
 
     public readUInt32BE: typeof Buffer.prototype.readUInt32BE = (offset) => {
@@ -336,6 +337,11 @@ export class LargeBuffer {
     public readUInt64BE(offset: number) {
         let buf = this.getSmallBuffer(offset, 8);
         return readUInt64BE(buf, 0);
+    }
+
+    public setUInt8(pos: number, byte: number): void {
+        let bufInfo = this.getBuffer(pos);
+        bufInfo.buffer.writeUInt8(byte, bufInfo.bufferPos);
     }
 
     public slice(start: number, end: number): LargeBuffer {
