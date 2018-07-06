@@ -1,0 +1,66 @@
+<script>
+var ws = new WebSocket("ws://192.168.0.201:6070");
+
+ws.onopen = async () => {
+    for(let i = 0; i < 60; i++) {
+        console.log("open");
+        await download(`result${i}.jpg`);
+    }
+};
+ws.onerror = function() {
+    console.log("err");
+}
+
+async function download(image) {
+    return new Promise((resolve, reject) => {
+        ws.onmessage = function(e) {
+            console.log("onmessage");
+            var url = URL.createObjectURL(e.data);
+            var a = document.createElement("a");
+            a.href = url;
+            a.innerHTML = `<img src="${url}" />`;
+            a.download = image;
+            document.body.appendChild(a);
+            a.click();
+            console.log(url);
+
+            resolve();
+        };
+        
+        ws.send(`../camera-streamer/streaming/${image}`);
+    });
+}
+
+async function test() {
+    var log2size = 14;
+    var data = " ";
+    for(var i = 0; i < log2size; i++) {
+        data = data + data;
+    }
+
+    var start = +new Date();
+    var targetTotalTime = 10000;
+    var endTime;
+
+    var cycles = 0;
+
+    while(true) {
+        var result = await send(data);
+        console.log(result);
+        cycles++;
+
+        endTime = +new Date();
+        var totalTime = endTime - start;
+        if(totalTime >= targetTotalTime) {
+            break;
+        }
+    }
+
+    var cyclesPerMillisecond = (endTime - start) / cycles;
+
+    var dataPerMillisecond = cyclesPerMillisecond * data.length;
+    dataPerMillisecond /= 1024;
+
+    console.log(`${dataPerMillisecond}KB/s`);
+}
+</script>

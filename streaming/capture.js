@@ -1,7 +1,14 @@
 var v4l2camera = require("v4l2camera");
-var crypto = require('crypto');
 var fs = require("fs");
+//var crypto = require('crypto');
 
+import * as ws from "ws";
+
+//var ws = require("ws");
+
+//var websocket = new ws();
+
+//*
 var cam = new v4l2camera.Camera("/dev/video0");
 console.log(cam.formats);
 let format = cam.formats.filter(x => x.formatName === "MJPG")[0];
@@ -64,12 +71,6 @@ setInterval(() => {
         capturePending = null;
         //console.log(`Finished ${curCapture}`);
         
-        /*
-        if(max ++> 100) {
-            cam.stop();
-            return;
-        }
-        */
         var frame = cam.frameRaw();
         let buffer = Buffer.from(frame);
 
@@ -105,3 +106,4 @@ setInterval(() => {
 setInterval(() => {
     console.log("keep alive");
 }, 1000 * 1000);
+//*/

@@ -1,1 +1,1 @@
-node node_modules/webpack-dev-server/bin/webpack-dev-server --progress  #--host 0.0.0.0
+node node_modules/webpack/bin/webpack --progress --watch --env.node --display-error-details

@@ -36,6 +36,7 @@ import { SerialObject, _SerialObjectOutput, _SerialIntermediateToFinal, Template
 import { NALList, parserTest, NALType, SPS, PPS, ConvertAnnexBToAVCC } from "./NAL";
 import { byteToBits, bitsToByte } from "./Primitives";
 
+import { x264 } from "x264-npm";
 
 function testReadFile(path: string) {
     let buf = LargeBuffer.FromFile(path);
@@ -1691,7 +1692,7 @@ function getH264NALs(bufs: { buf: LargeBuffer, path: string }[], sps: SPS|undefi
             nals.push(nal);
 
             let outputText = JSON.stringify(nal, null, "    ");
-            writeFileSync(path + `.${i}.nal`, outputText);
+            //writeFileSync(path + `.${i}.nal`, outputText);
         });
     }
     return nals;
@@ -1757,11 +1758,12 @@ async function createVideo3 (
         frameTimeInTimescale: number;
         width: number;
         height: number;
+        baseMediaDecodeTimeInTimescale: number;
+        alwaysAddMoov?: boolean;
     },
     NALs: NALType[],
-    baseMediaDecodeTimeInTimescale: number,
     sps: SPS|undefined = undefined,
-    pps: PPS|undefined = undefined
+    pps: PPS|undefined = undefined,
 ): Promise<{
     sps: SPS;
     pps: PPS;
@@ -1770,6 +1772,7 @@ async function createVideo3 (
     let frameTimeInTimescale = videoInfo.frameTimeInTimescale;
     let width = videoInfo.width;
     let height = videoInfo.height;
+    let baseMediaDecodeTimeInTimescale = videoInfo.baseMediaDecodeTimeInTimescale;
 
     let spsObject = NALs.filter(x => x.nalObject.type === "sps")[0];
     if(spsObject && spsObject.nalObject.type === "sps") {
@@ -1812,7 +1815,7 @@ async function createVideo3 (
     let boxes: TemplateToObject<typeof RootBox>["boxes"][0][] = [];
 
 
-    if(baseMediaDecodeTimeInTimescale === 0) {
+    if(baseMediaDecodeTimeInTimescale === 0 || videoInfo.alwaysAddMoov) {
         let ftyp: O<typeof FtypBox> = {
             header: {
                 type: "ftyp"
@@ -2008,8 +2011,9 @@ wrapAsync(async () => {
 //*/
 
 wrapAsync(async () => {
-    let buf = LargeBuffer.FromFile("frame0.x264.nal");
-    buf = ConvertAnnexBToAVCC(buf);
+
+    let result = await x264("--help");
+    console.log(result);
 
     /*
     for(let i = 0; i < 8; i++) {
@@ -2019,28 +2023,71 @@ wrapAsync(async () => {
     */
 
     //todonext
-    // Get multiple frames encoding with x264
-    //  ./x264 ./frame0.bmp --output frame0.x264.nal
-    //  ./x264 --output frame0.x264.nal frame%d.jpeg -bframes 0
+    // jpeg streaming from server (pick back up streaming project)
+    //  - hmm... do we want server to be really smart about FPS (also in regards to bandwidth),
+    //      or should it just understand how to achieve an FPS, but not care about bandwidth?
+    // jpeg storage (with time information, maybe time information comes from server?)
+    //  - 4KB is a common fs block size, but jpegs are probably around 40KB? Actually a lot more if the images are
+    //      1080p. So... maybe one frame per file is fine.
+    //      - But... this also raises the question of storage size. We are basically storing an i frame per frame...
+    //      do we have disk space? Should we combine the jpegs and compress them (like in a zip)?
+    // Test possible zip compression (or other compressions) of jpegs, just to save disk space, but still allow lossless access.
+    // jpeg to mp4 video
+    //  - multiple speeds per day
+    //  - multi-day rolling video of really high speed. Segmented, but possibly infinite speed?
+    //  - also, maybe always add the moov? It will mean each segment is playable by itself, so any segment
+    //      can start the playback. Or maybe... store a shared moov? The moov won't change anyway... it just has
+    //      profile information stuff, width, height and timescale.
 
-    //*
-    let NALs = getH264NALs([{
-        buf: buf,
-        path: "frame0.x264.nal"
-    }]);
+
+    // The video will play over time gaps, BUT we can seek around time gaps manually.
+
+    // This is how we encode multiple frames (with the expression matching the frames we want to encode,
+    //  so we'll need to make sure the jpeg names are named such that we can group them easily by an expression)
+    //  ./x264 --output frame1.x264.nal frame5%d.jpeg --bframes 0
 
     // 1 frame videos don't seem to play. I'm not sure why, but it's probably due to a setting somewhere in here?
     //  They work if played natively in chrome, but not with MSE.
 
-    printNals(NALs);
 
-    await createVideo3("x264.mp4", {
-        timescale: 1,
-        frameTimeInTimescale: 1,
-        width: 600,
-        height: 400,
-    }, NALs, 0);
-    //*/
+
+    /*
+    {
+        let NALs = getH264NALs([{
+            buf: ConvertAnnexBToAVCC(LargeBuffer.FromFile("frame1.x264.nal")),
+            path: "frame1.x264.nal"
+        }]);
+
+        printNals(NALs);
+
+        await createVideo3("x264.1.mp4", {
+            timescale: 1,
+            frameTimeInTimescale: 1,
+            baseMediaDecodeTimeInTimescale: 0,
+            alwaysAddMoov: true,
+            width: 600,
+            height: 400,
+        }, NALs);
+    }
+
+    {
+        let NALs = getH264NALs([{
+            buf: ConvertAnnexBToAVCC(LargeBuffer.FromFile("frame2.x264.nal")),
+            path: "frame2.x264.nal"
+        }]);
+
+        printNals(NALs);
+
+        await createVideo3("x264.2.mp4", {
+            timescale: 1,
+            frameTimeInTimescale: 1,
+            baseMediaDecodeTimeInTimescale: 10,
+            alwaysAddMoov: true,
+            width: 600,
+            height: 400,
+        }, NALs);
+    }
+    */
 });
 
 

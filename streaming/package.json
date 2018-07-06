@@ -1,6 +1,34 @@
 {
-    "dependencies": {
-      "v4l2camera": "git+https://github.com/yeerkkiller1/node-v4l2camera.git"
-    }
+  "scripts": {
+    "start": "bash build.sh",
+    "receive": "node ./dist/receiver.js",
+    "send": "node ./dist/sender.js"
+  },
+  "dependencies": {
+    "@types/node": "^7.0.12",
+    "@types/prop-types": "^15.5.2",
+    "@types/react": "^16.3.4",
+    "@types/react-dom": "^0.14.23",
+    "@types/ws": "^3.2.0",
+    "css-loader": "^0.25.0",
+    "less": "^2.7.1",
+    "less-loader": "^2.2.3",
+    "prop-types": "^15.6.0",
+    "react": "^16.2.0",
+    "react-dom": "^16.2.0",
+    "react-konva": "^1.7.1",
+    "react-test-renderer": "^16.3.0",
+    "source-map-loader": "^0.2.3",
+    "style-loader": "^0.13.1",
+    "ts-loader": "^3.1.1",
+    "typescript": "^2.8.1",
+    "webpack": "^3.8.1",
+    "webpack-dev-server": "^2.9.4",
+    "webpack-visualizer-plugin": "^0.1.11",
+    "ws": "^3.2.0",
+    "ws-class": "^0.2.7"
+  },
+  "optionalDependencies": {
+    "v4l2camera": "git+https://github.com/yeerkkiller1/node-v4l2camera.git"
   }
-  
+}

@@ -4,8 +4,8 @@ var UglifyJsPlugin = require("uglifyjs-webpack-plugin");
 var Visualizer = require('webpack-visualizer-plugin');
 
 var entryPoints = {
-    main: "./encoder/main.ts",
-    main2: "./encoder/main2.ts"
+    sender: "./src/sender.ts",
+    receiver: "./src/receiver.ts"
 };
 
 console.log(entryPoints);
@@ -56,7 +56,6 @@ function getConfig (env) {
         resolveLoader: {
             modules: ['node_modules', './loaders']
         },
-
     };
 
     if (node) {
