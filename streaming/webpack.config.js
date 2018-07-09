@@ -5,7 +5,8 @@ var Visualizer = require('webpack-visualizer-plugin');
 
 var entryPoints = {
     sender: "./src/sender.ts",
-    receiver: "./src/receiver.ts"
+    receiver: "./src/receiver.ts",
+    main: "./src/site/main.tsx",
 };
 
 console.log(entryPoints);

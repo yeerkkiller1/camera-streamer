@@ -166,7 +166,7 @@ async function testRewriteMjpeg() {
         });
     }
 
-    let jimpAny = Jimp as any;    
+    let jimpAny = Jimp as any;
     let width = 600;
     let height = 400;
     //let image = new jimpAny(width, height, 0xFF0000FF, () => {});

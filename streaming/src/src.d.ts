@@ -18,3 +18,7 @@ interface IReceiver extends Bidirect<IReceiver, ISender> {
 
     cameraPing(): void;
 }
+
+interface IHost extends Controller<IHost> {
+    testGetLastFrame(): Promise<Buffer|null>;
+}

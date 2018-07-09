@@ -4,29 +4,29 @@ import * as wsClass from "ws-class";
 
 // Okay... there is a solution for low bit rates. We CAN encode at a 5 to 1 ratio at a rate of about 230KB/s in. So for very slow
 //  connections encoding first is viable. So if the connection maximum drops below 230KB/s, encoding is worth it. But... if the
-//  connection is around 20KB/s, nothing is really worth it, because that is really really bad.
+//  connection is around 40KB/s, nothing is really worth it, because then even with encoding we won't get even 1 FPS.
 // But... that is so niche, so screw it, let's just but ethernet cables and wire it in.
 
-//todonext
-// First we want to determine the characteristics of the network. Does sending a lot of data overload it?
-// UDP packets? Support dynamic and fixed rates? I guess we can verify dynamic rate works by
-//  setting a fixed rate, and seeing if it changes the loss rate? Or latency by a lot?
-// It needs to be push, because the camera will be inside the network.
-
-// Hmm... UDP let's us detect packet loss... at least retroactively, which is nice....
-//  But really... what is wrong with our network? Is there high packet loss
-
-class Receiver implements IReceiver {
+class Receiver implements IReceiver, IHost {
     client!: ISender;
 
+    lastFrame: Buffer|null = null;
     acceptFrame(frame: {
         buffer: Buffer;
         format: v4l2camera.Format;
         eventTime: number;
     }): void {
-        todonext
+        //todonext
+        // Host a server ourself, to hack in streaming of these pictures, and then create a client so
+        //  we can view the pictures.
+        //todonext
         // Dynamically set stream format (only fps), to keep the frames from getting behind (because the connection is overwhelmed.)
         console.log(`Recieved frame ${frame.buffer.length}`);
+        this.lastFrame = frame.buffer;
+    }
+
+    async testGetLastFrame(): Promise<Buffer|null> {
+        return this.lastFrame;
     }
 
     async cameraPing() {
@@ -39,8 +39,6 @@ class Receiver implements IReceiver {
 }
 
 wsClass.HostServer(7060, new Receiver());
-
-
 
 
 function clock() {

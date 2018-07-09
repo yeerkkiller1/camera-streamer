@@ -1,5 +1,54 @@
 import * as wsClass from "ws-class";
 
+import * as Jimp from "jimp";
+
+let jimpAny = Jimp as any;
+
+async function loadFont(type: string): Promise<any> {
+    return new Promise((resolve, reject) => {
+        let jimpAny = Jimp as any;    
+        jimpAny.loadFont(type, (err: any, font: any) => {
+            if(err) {
+                reject(err);
+            } else {
+                resolve(font);
+            }
+        });
+    });
+}
+async function createSimulateFrame(time: number, width: number, height: number): Promise<Buffer> {
+    let image: any;
+    image = new jimpAny(width, height, 0xFF00FFFF, () => {});
+    
+    image.resize(width, height);
+
+    let data: Buffer = image.bitmap.data;
+    let frameNumber = ~~time;
+    for(let i = 0; i < width * height; i++) {
+        let k = i * 4;
+        let seed = (frameNumber + 1) * i;
+        data[k] = seed % 256;
+        data[k + 1] = (seed * 67) % 256;
+        data[k + 2] = (seed * 679) % 256;
+        data[k + 3] = 255;
+    }
+
+    let imageColor = new jimpAny(width, 64, 0x000000AF, () => {});
+    image.composite(imageColor, 0, 0);
+
+    let path = "./node_modules/jimp/fonts/open-sans/open-sans-64-white/open-sans-64-white.fnt";
+    let font = await loadFont(path);
+    image.print(font, 0, 0, `frame time ${time.toFixed(2)}ms`, width);
+    
+    let jpegBuffer!: Buffer;
+    image.quality(75).getBuffer(Jimp.MIME_JPEG, (err: any, buffer: Buffer) => {
+        if(err) throw err;
+        jpegBuffer = buffer;
+    });
+
+    return jpegBuffer;
+}
+
 
 class Sender implements ISender {
     server!: IReceiver;
@@ -9,15 +58,19 @@ class Sender implements ISender {
 
         // Start the frame loop, and send the results to the server
 
-        setInterval(() => {
-            todonext
+        setInterval(async () => {
+            //todonext
             // Create and send a real jpeg, with timestamped info, so we can test everything downstream
             //  locally, without having to actually use the camera on the raspberry pi.
 
             console.log("Sending frame");
+
+            let time = +new Date();
+            let frame = await createSimulateFrame(time, format.width, format.height);
+
             this.server.acceptFrame({
-                buffer: new Buffer(200 * 1000),
-                eventTime: +new Date(),
+                buffer: frame,
+                eventTime: time,
                 fps: fps,
                 format: format,
             });
@@ -46,13 +99,13 @@ class Sender implements ISender {
 let sender = new Sender();
 let server!: IReceiver;
 
-wsClass.ThrottleConnections({ kbPerSecond: 200, latencyMs: 100 }, () => {
+//wsClass.ThrottleConnections({ kbPerSecond: 200, latencyMs: 100 }, () => {
     server = wsClass.ConnectToServer<IReceiver>({
         port: 7060,
         host: "localhost",
         bidirectionController: sender
     });
-});
+//});
 
 sender.server = server;
 server.cameraPing();
