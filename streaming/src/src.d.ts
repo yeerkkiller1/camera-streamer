@@ -1,3 +1,7 @@
+/// <reference path="../node_modules/ws-class/dist/ws-class.d.ts" />
+
+declare var NODE_CONSTANT: boolean;
+
 interface ISender extends Controller<ISender> {
     setStreamFormat(
         /** This overrides the fps given in format. */
@@ -19,6 +23,24 @@ interface IReceiver extends Bidirect<IReceiver, ISender> {
     cameraPing(): void;
 }
 
-interface IHost extends Controller<IHost> {
-    testGetLastFrame(): Promise<Buffer|null>;
+
+interface IHost extends Bidirect<IHost, IBrowserReceiver> {
+    subscribeToWebcamFrameInfo(): Promise<void>;
+}
+interface WebcamFrameInfo {
+    webcamSourceTime: number;
+    serverReceivedTime: number;
+}
+interface IBrowserReceiver extends Controller<IBrowserReceiver> {
+    acceptWebcamFrameInfo_VOID(info: WebcamFrameInfo): void;
+}
+
+
+
+interface IEncodeCamera extends Bidirect<IEncodeCamera, IEncoder> {
+
+}
+
+interface IEncoder {
+
 }

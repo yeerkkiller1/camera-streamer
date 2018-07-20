@@ -3,20 +3,25 @@ var webpack = require("webpack");
 var UglifyJsPlugin = require("uglifyjs-webpack-plugin");
 var Visualizer = require('webpack-visualizer-plugin');
 
-var entryPoints = {
-    sender: "./src/sender.ts",
-    receiver: "./src/receiver.ts",
-    main: "./src/site/main.tsx",
-};
-
-console.log(entryPoints);
-
 module.exports = env => {
     return [getConfig(env)];
 }
 
 function getConfig (env) {
     let node = env && !!env.node || false;
+
+    var entryPoints;
+    if(!node) {
+        entryPoints = {
+            main: "./src/site/main.tsx",
+        };
+    } else {
+        entryPoints = {
+            sender: "./src/sender.ts",
+            receiver: "./src/receiver.ts",
+            senderWrap: "./src/deploy/senderWrap.ts",
+        };
+    }
 
     let obj = {
         entry: entryPoints,
@@ -34,7 +39,11 @@ function getConfig (env) {
 
         resolve: {
             // Add '.ts' and '.tsx' as resolvable extensions.
-            extensions: [".webpack.js", ".web.js", ".ts", ".tsx", ".js"]
+            extensions: [".webpack.js", ".web.js", ".ts", ".tsx", ".js"],
+        },
+
+        resolveLoader: {
+            modules: ['node_modules', './loaders'],
         },
 
         module: {
@@ -43,6 +52,7 @@ function getConfig (env) {
                 { test: /\.tsx?$/, loader: "ts-loader" },
                 { test: /\.less$/, loader: "style-loader!css-loader!less-loader" },
                 { enforce: 'pre', test: /\.js$/, loader: "source-map-loader" },
+                { test: /\.tsx?$/, loader: `define-loader?node=${node}` },
             ]
         },
 
@@ -54,9 +64,10 @@ function getConfig (env) {
             new Visualizer()
         ],
 
-        resolveLoader: {
-            modules: ['node_modules', './loaders']
-        },
+        externals: {
+            //"fs": "fs",
+            //"child_process": "child_process",
+        }
     };
 
     if (node) {

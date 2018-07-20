@@ -1,4 +1,4 @@
-import { g } from "../misc";
+import { g } from "pchannel";
 g.NODE =  false;
 
 import * as React from "react";
@@ -6,8 +6,6 @@ import * as ReactDOM from "react-dom";
 
 import "./main.less";
 import { ConnectToServer } from "ws-class";
-
-g.NODE = false;
 
 interface IState {
     url?: string;
@@ -17,22 +15,20 @@ class Main extends React.Component<{}, IState> {
     componentWillMount() {
         let server = ConnectToServer<IHost>({
             port: 7060,
-            host: "localhost"
+            host: "localhost",
+            bidirectionController: this
         });
 
-        let component = this;
-        setTimeout(async function getFrame(){
-            let frame = await server.testGetLastFrame();
-            if(frame !== null) {
-                let blob = new Blob([frame], { type: "image/jpeg" });
-                let url = URL.createObjectURL(blob);
-
-                component.setState({ url });
-            }
-
-            setTimeout(getFrame, 1000);
-        }, 1000);
+        server.subscribeToWebcamFrameInfo();
     }
+
+    acceptWebcamFrameInfo_VOID(info: WebcamFrameInfo): void {
+        //todonext
+        // Graph these times, so we can see lag happening
+        //  - Then package up encoder into another package, encode the video, play it, and get statistics on that too.
+        console.log(info);
+    }
+
     render() {
         let { url } = this.state;
         return (
