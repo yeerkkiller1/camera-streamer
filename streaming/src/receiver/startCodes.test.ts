@@ -104,5 +104,29 @@ describe("startCodes", () => {
             ThrowIfNotImplementsData(Array.from(await chan.GetPromise()).map(x => x), [1, 2, 0, 0]);
             ThrowIfNotImplementsData(chan.IsClosed(), true);
         });
+
+
+        it("handles trailing zeros properly", async () => {
+            let chan = splitByStartCodes(PChanFromArray(
+                new Buffer([2, 0]),
+                new Buffer([2, 0]),
+                new Buffer([2, 0]),
+                new Buffer([2, 0]),
+                new Buffer([2, 0]),
+                new Buffer([2, 0]),
+                new Buffer([2, 0]),
+            ));
+
+            ThrowIfNotImplementsData(Array.from(await chan.GetPromise()).map(x => x), [
+                2, 0,
+                2, 0,
+                2, 0,
+                2, 0,
+                2, 0,
+                2, 0,
+                2, 0
+            ]);
+            ThrowIfNotImplementsData(chan.IsClosed(), true);
+        });
     });
 });

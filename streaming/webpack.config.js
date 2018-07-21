@@ -53,7 +53,7 @@ function getConfig (env) {
                 { test: /\.less$/, loader: "style-loader!css-loader!less-loader" },
                 { enforce: 'pre', test: /\.js$/, loader: "source-map-loader" },
                 { test: /\.tsx?$/, loader: `define-loader?node=${node}` },
-            ]
+            ],
         },
 
         plugins: [
@@ -65,8 +65,7 @@ function getConfig (env) {
         ],
 
         externals: {
-            //"fs": "fs",
-            //"child_process": "child_process",
+            "v4l2camera": "require('v4l2camera')"
         }
     };
 

@@ -1,61 +1,124 @@
 import * as wsClass from "ws-class";
 
-import * as Jimp from "jimp";
 import { readFileSync, writeFileSync } from "fs";
 import { execFileSync, spawn, execSync } from "child_process";
 import { makeProcessSingle } from "./util/singleton";
 
-let jimpAny = Jimp as any;
+import * as v4l2camera from "v4l2camera";
+import { PChanReceive, PChanSend } from "controlFlow/pChan";
+import { TransformChannelAsync, PChan, Range } from "pchannel";
+import { splitByStartCodes } from "./receiver/startCodes";
+import { encodeJpegFrames } from "./receiver/encodeNals";
+import { clock } from "./util/time";
+
+import { ParseNalHeaderByte } from "mp4-typescript";
 
 // Make sure we kill any previous instances
 console.log("pid", process.pid);
 makeProcessSingle("sender");
 
 
-async function createSimulateFrame(time: number, width: number, height: number): Promise<Buffer> {
-    async function loadFont(type: string): Promise<any> {
-        return new Promise((resolve, reject) => {
-            let jimpAny = Jimp as any;    
-            jimpAny.loadFont(type, (err: any, font: any) => {
-                if(err) {
-                    reject(err);
-                } else {
-                    resolve(font);
-                }
-            });
-        });
+/*
+let time = +new Date();
+
+// cat frame*.jpeg | gst-launch-1.0 -vv -e fdsrc fd=0 ! capsfilter caps="image/jpeg,width=1920,height=1080,framerate=30/1" ! jpegdec ! omxh264enc target-bitrate=15000000 control-rate=variable ! video/x-h264,profile=high ! filesink location=/dev/stdout | cat > frames.nal
+
+let proc = spawn(
+    "gst-launch-1.0",
+    `-vv -e fdsrc fd=0 ! capsfilter caps="image/jpeg,width=1920,height=1080,framerate=30/1" ! jpegdec ! omxh264enc target-bitrate=15000000 control-rate=variable ! video/x-h264,profile=high ! fdsink fd=1`.split(" "),{ stdio: "pipe" }
+);
+
+proc.stdout.on("close", () => {
+    time = +new Date() - time;
+    console.log(`out closed after ${time}`);
+});
+proc.stdout.on("error", () => {
+    console.log("error");
+});
+proc.stdout.on("data", (data: Buffer) => {
+    //console.log(data.toString());
+    console.log(data.length);
+});
+
+for(let i = 0; i < 10; i++) {
+    let frame = readFileSync(`./result${i}.jpeg`);
+    console.log(`Sending ${frame.length}`);
+    proc.stdin.write(frame);
+}
+//proc.stdin.end();
+//*/
+
+
+/*
+let jpegStream = new PChan<Buffer>();
+
+let encodeChan = encodeJpegFrames({
+    width: 1920,
+    height: 1080,
+    frameNumerator: 30,
+    frameDenominator: 1,
+    fps: 1,
+    iFrameRate: 10,
+    jpegStream: jpegStream
+});
+
+for(let i = 0; i < 10; i++) {
+    let frame = readFileSync(`./result${i}.jpeg`);
+    console.log(`Sending ${frame.length}`);
+    jpegStream.SendValue(frame);
+}
+
+(async () => {
+    console.log(`Starting loop`);
+    try {
+        while(true) {
+            let input = await encodeChan.GetPromise();
+            console.log(`Got nals ${input.length}`);
+        }
+    } catch(e) {
+        console.log(`Closing pipe because ${String(e)}`);
     }
+})();
+*/
 
-    let image: any;
-    image = new jimpAny(width, height, 0xFF00FFFF, () => {});
-    
-    image.resize(width, height);
 
-    let data: Buffer = image.bitmap.data;
-    let frameNumber = ~~time;
-    for(let i = 0; i < width * height; i++) {
-        let k = i * 4;
-        let seed = (frameNumber + 1) * i;
-        data[k] = seed % 256;
-        data[k + 1] = (seed * 67) % 256;
-        data[k + 2] = (seed * 679) % 256;
-        data[k + 3] = 255;
+function pipeChannel<T>(inputChan: PChanReceive<T>, output: PChanSend<T>): void {
+    (async () => {
+        try {
+            while(true) {
+                let input = await inputChan.GetPromise();
+                output.SendValue(input);
+            }
+        } catch(e) {
+            if(!output.IsClosedError(e)) {
+                output.SendError(e);
+            }
+            console.log(`Closing pipe because ${String(e)}`);
+        }
+
+        if(!output.IsClosed()) {
+            output.Close();
+        }
+    })();
+}
+
+// https://unix.stackexchange.com/questions/113893/how-do-i-find-out-which-process-is-using-my-v4l2-webcam
+// Kill anyone using /dev/video0
+try {
+    let pidsToKill = execFileSync("fuser", ["/dev/video0"]).toString().split(" ").filter(x => x).filter(x => String(parseInt(x)) === x);
+    console.log({pidsToKill});
+    for(let pid of pidsToKill) {
+        execSync(`kill -9 ${pid}`);
     }
+} catch(e) { }
 
-    let imageColor = new jimpAny(width, 64, 0x000000AF, () => {});
-    image.composite(imageColor, 0, 0);
-
-    let path = "./node_modules/jimp/fonts/open-sans/open-sans-64-white/open-sans-64-white.fnt";
-    let font = await loadFont(path);
-    image.print(font, 0, 0, `frame time ${time.toFixed(2)}ms`, width);
-    
-    let jpegBuffer!: Buffer;
-    image.quality(75).getBuffer(Jimp.MIME_JPEG, (err: any, buffer: Buffer) => {
-        if(err) throw err;
-        jpegBuffer = buffer;
-    });
-
-    return jpegBuffer;
+let camera!: v4l2camera.Camera;
+try {
+    camera = new v4l2camera.Camera("/dev/video0");
+} catch(e) {
+    console.error(e);
+    console.error(`Could not create v4l2camera.Camera on /dev/video0, closing process`);
+    process.exit();
 }
 
 class Sender implements ISender {
@@ -63,107 +126,157 @@ class Sender implements ISender {
 
     frameCount = 0;
 
+    curFrameLoop!: number;
+    curFramePipe: PChanReceive<Buffer>|undefined;
+
     setStreamFormat(fps: number, format: v4l2camera.Format): void {
-        let delay = format.interval.numerator / format.interval.denominator * 1000;
-        console.log("Set", format, delay);
+        if (format.formatName !== "MJPG") {
+            throw new Error("Format must use MJPG");
+        }
 
-        // Start the frame loop, and send the results to the server
+        let delay = 1000 / fps;
+        console.log("Set format", {fps, format, delay});
+        camera.configSet(format);
+        camera.start();
 
-        setInterval(async () => {
-            console.log("Camera has frame");
+        if(this.curFramePipe !== undefined) {
+            this.curFramePipe.Close();
+        }
+        clearInterval(this.curFrameLoop);
 
-            let time = +new Date();
-            let frame = await createSimulateFrame(this.frameCount++, format.width, format.height);
+        let frameTimes: number[] = [];
 
-            //todonext
-            // So... just get the video from gstreamer decoding (there are new box types), and then work from there,
-            //  maybe eventually going back to fix the openmax issues.
-
-            //todonext
-            // Maybe see if we can get: 
-            //  time gst-launch-1.0 -vv -e multifilesrc location="frame%d.jpeg" caps="image/jpeg,framerate=30/1" ! omxmjpegdec ! multifilesink location="frame%d.yuv"
-            // Working on digital ocean easily. If we can, then reflash the pi, until we put an OS on it that can do that easily.
-            // Ugh... no, it won't work on digital ocean, as digital ocean doesn't have hardware encoders!
-
-            // Create something to take all the frame%d.jpeg files on the pi to frame.yuv files.
-            //  Oh omxmjpegdec. But it gives me the same error my earlier openmax code gave. Which is not because the memory is too little,
-            //  as I the gpu memory set to 512.
-
-            // Actually... if we have a command to encode at 30fps from raw files on the disk, and we can write at 30fps in jpeg to the disk,
-            //  we can probably find something to convert jpegs to raw at 30fps on the disk?
-            //  Except... not on the disk, because the write speed isn't that fast. But definitely in memory? That's only 90MB/s
-
-            // ffmpeg is giving problems. Maybe it lied about it's speed?
-            /*
-            ffmpeg -f v4l2 -list_formats all -i /dev/video0
-            
-            ffmpeg -y -framerate 30 -f v4l2 -input_format mjpeg -video_size 1920x1080 -i /dev/video0 -b:v 17M -c:v h264_omx -r 30 output.mp4
-
-            avconv -y -framerate 30 -f v4l2 -input_format mjpeg -video_size 1920x1080 -i /dev/video0 -b:v 17M -c:v h264_omx -r 30 output.mp4
-
-            -f segment -segment_time 10 -r 10 "output%d.mp4"
-            
-            test.mp4
-            */
-            // -f segment -segment_time 10 -segment_format mp4 -r 10 "output%d.mp4"
-
-            //todonext
-            // Okay, with gstreamer is looks like we can encode at 30fps. BUT, gstreamer still uses cpu jpeg decoding, which means it is the same
-            //  speed as ffmpeg.
-            // Oh... ffmpeg is so close. It does it, BUT, it decodes the mjpeg frames on the CPU. Which can't handle more than ~10 fps.
-            //  Which... is probably fine. BUT, if I wanted to do it better, I would interface with openmax, and make the jpeg decoding and h264
-            //  encoding both happen on the GPU. BUT... that will be a lot more work, so for now... But then again, learning openmax would be
-            //  incredibly useful...
-
-            // Actually... hardware encoding. I hear the raspberry pi has it, and although it is finnicky, it will be way better
-            //  than spending actually money on more hardware AND power on running the beefy CPUs needed to encode 1080p 30fps.
-            //  If the pi can do it at a hardware level... that will solve all the problems.
-
-            // https://github.com/gagle/raspberrypi-openmax-h264
-            //  - Throwing an error, but maybe it is because we are trying to use the library to also get camera data. Maybe we could
-            //      only use it to encode?
-            // http://practicalrambler.blogspot.com/2015/01/resolving-1080p-playback-errors-on.html
-
-            // Encode servers
-            //  They connect to us, and we use them to encode frames. If there are no servers, we cannot send data, and should give errors.
-            //  At the very least an encode server should be launched on the same machine as us, with lower priority?
-
-            /*
-            This command works. It also encodes at a variable frame rate, which might be ideal. Still have to look at the container to see what time information it has.
-
-                time gst-launch-1.0 -vv -e \
-                v4l2src num-buffers=100 device=/dev/video0 ! capsfilter caps="image/jpeg,width=1920,height=1080,framerate=30/1" ! \
-                jpegdec ! \
-                omxh264enc target-bitrate=15000000 control-rate=variable ! video/x-h264, profile=high ! h264parse ! mp4mux ! filesink location=output.mp4
-            */
-
-            this.server.acceptFrame({
-                buffer: frame,
-                eventTime: time,
-                fps: fps,
-                format: format,
+        let jpegFramePipe = this.curFramePipe = new PChan<Buffer>();
+        // TODO: This timer is broken. Set a 1 second timer, and see the small bits (sort of) slowly drift. This should not drift, or at least not drift based on the local time!
+        this.curFrameLoop = setInterval(async () => {
+            camera.capture((success) => {
+                if(!success) {
+                    console.error("Failed to capture frame");
+                    return;
+                }
+                if(jpegFramePipe !== this.curFramePipe) {
+                    console.log(`Received capture on dead pipe, ignore capture.`);
+                    return;
+                }
+                let frame = camera.frameRaw() as Buffer;
+                console.log(`Got frame ${frame.length}`);
+                frameTimes.push(+new Date());
+                jpegFramePipe.SendValue(frame);
             });
-        }, delay);
-    }
-    async getStreamFormats(): Promise<v4l2camera.Format[]> {
-        return [
-            {
-                formatName: 'MJPG',
-                format: 1196444236,
-                width: 1920,
-                height: 1080,
-                interval: { numerator: 1, denominator: 1 }
-            },
-            {
-                formatName: 'MJPG',
-                format: 1196444237,
-                width: 1920,
-                height: 1080,
-                interval: { numerator: 1, denominator: 30 }
+        }, delay) as any;
+
+        
+        let nalPipe = encodeJpegFrames({
+            width: format.width,
+            height: format.height,
+            frameNumerator: format.interval.numerator,
+            frameDenominator: format.interval.denominator,
+            fps: fps,
+            iFrameRate: 10,
+            jpegStream: jpegFramePipe
+        });
+
+        // It is a lot easier to figure out frame times if we (the sender splits h264 data into nals)
+        let nalUnits = splitByStartCodes(nalPipe);
+
+        /*
+        bitHeader0: bitMapping({
+            forbidden_zero_bit: 1,
+            nal_ref_idc: 2,
+            nal_unit_type: 5,
+        }),
+
+        if(bitHeader0.nal_unit_type === 7) {
+            return {type: CodeOnlyValue("sps" as "sps"), nal: RawData(payloadLength)};
+        } else if(bitHeader0.nal_unit_type === 8) {
+            return {type: CodeOnlyValue("pps" as "pps"), nal: RawData(payloadLength)};
+        } else if(bitHeader0.nal_unit_type === 6) {
+            return {type: CodeOnlyValue("sei" as "sei"), nal: RawData(payloadLength)};
+        } else if(bitHeader0.nal_unit_type === 1 || bitHeader0.nal_unit_type === 5) {
+            return {type: CodeOnlyValue("slice" as "slice"), nal: RawData(payloadLength)};
+        }
+        */
+
+        (async () => {
+            try {
+                while(true) {
+                    let nalUnit = await nalUnits.GetPromise();
+
+                    let b = nalUnit[0];
+                    let type = ParseNalHeaderByte(b);
+                    if(type === "slice") {
+                        let frameTime = frameTimes.shift();
+                        if(frameTime === undefined) {
+                            console.error("Frames timings messed up, received more frames than frames pushed");
+                        } else if(frameTimes.length > 100) {
+                            // TODO: This likely means our encoder can't keep up. Reduce the fps!
+                            console.error("Frames timings messed up, pushed way more frames than frames received");
+                        }
+
+                        frameTime = frameTime || +new Date();
+
+                        this.server.acceptNAL({
+                            nal: nalUnit,
+                            type: { type: "slice", frameTime },
+                            senderConfig: {
+                                fps,
+                                format
+                            },
+                        });
+                    } else if(type === "sps" || type === "pps") {
+                        this.server.acceptNAL({
+                            nal: nalUnit,
+                            type: { type: type },
+                            senderConfig: {
+                                fps,
+                                format
+                            },
+                        });
+                    } else {
+                        console.log(`Unknown NAL of size ${nalUnit.length}, type ${type}. Not sending to receiver, as unknown types will probably break it.`);
+                    }
+                }
+            } catch(e) {
+                if(!nalPipe.IsClosedError(e)) {
+                    console.error(e);
+                }
             }
-        ];
+
+            console.log(`Finished nal pipe (this should never happen)`);
+        })();
+
+        /*
+        this.server.acceptFrame({
+            buffer: frame,
+            eventTime: +new Date(),
+            fps: fps,
+            format: format,
+        });
+        */
+    }
+
+    async getStreamFormats(): Promise<v4l2camera.Format[]> {
+        return camera.formats;
     }
 }
+
+
+//*
+let sender = new Sender();
+let server!: IReceiver;
+
+//wsClass.ThrottleConnections({ kbPerSecond: 200, latencyMs: 100 }, () => {
+    server = wsClass.ConnectToServer<IReceiver>({
+        port: 7060,
+        host: "192.168.0.202",
+        bidirectionController: sender
+    });
+//});
+
+sender.server = server;
+console.log("Calling ping");
+server.cameraPing();
+//*/
 
 
 /*
@@ -186,57 +299,19 @@ process.stdout.on("error", () => {
 process.stdout.on("data", (data: Buffer) => {
     console.log(data.length);
 });
-*/
+//*/
 
+//*
 setInterval(() => {
     console.log("alive");
-}, 1000);
+}, 60000);
 
-todonext
-// Emit h264 chunks at a fixed fps, and get the receiver to handle it, and pass it the client.
-//  - Move the code from capture.js required to get frames, and send them over Sender to receiver.
-//      - Then send the frames to the browser, and display them.
-//  - Then add metadata on things such a nal rates (maybe do start code parsing on output?), bit rate, fps, etc
-//  - Then make the sender have dynamic fps, with the limiting factor being encoding speed (and capped a certain fps).
-//  - We also want to measure bandwidth restrictions, and possibly restrict fps based on that. We should receive callbacks
-//      when a frame is received (or when every nth frame is received) so we can roughly estimate display lag. If display
-//      lag gets over a certain amount for a certain number of frames in a row, we should reduce the FPS.
-//      - We should also add limits on the number of unacknowledged frames we will send, and make sure we noticed
-//          lag on more frames then that. This will let us maintain the fps even if the network is flakey, as
-//          lowering the fps won't help at all if the network is flakey (and instead result in very low FPS,
-//          with no benefit). Eventually the buffer will get really big if our FPS is higher than the average bandwidth,
-//          causing the lag to continue even when the network is back up, which will allow our FPS to still be correct,
-//          just not to wildly drop every time the network goes down.
-//      It is impossible to passively tell the difference between very high latency and bandwidth limitations.
-//      If there is simply 10 second latency, irregardless of how much we send, it will make it look like we and bandwidth
-//      limited, unless we actively send less and find no difference in latency. So we should have a configurable max
-//      latency limit, to make it possible for very slow connections to still work.
-
-/*
-for(let i = 0; i < 30; i++) {
-    process.stdin.write(readFileSync(`./result${i}.jpeg`));
-}
-process.stdin.end();
-
-console.log("Sender");
-*/
+//*/
 
 
-/*
-let sender = new Sender();
-let server!: IReceiver;
 
-//wsClass.ThrottleConnections({ kbPerSecond: 200, latencyMs: 100 }, () => {
-    server = wsClass.ConnectToServer<IReceiver>({
-        port: 7060,
-        host: "localhost",
-        bidirectionController: sender
-    });
-//});
 
-sender.server = server;
-server.cameraPing();
-*/
+
 
 //console.log(wsClass.test() - 10);
 

@@ -13,7 +13,9 @@ x64
 x264
 Debug
 digest.txt
-node_modules
+/streaming/node_modules
+/browser/node_modules
+/encoder/node_modules
 dist
 stats*.html
 *.frame*

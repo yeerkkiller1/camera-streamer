@@ -1,10 +1,6 @@
+#node ./node_modules/nodemon/bin/nodemon.js ./dist/sender.js
+
 start bash -c "node ./dist/receiver.js"
-
-#scp ./dist/sender.js pi@192.168.0.205:~/
-# sender.js kills previous sender.js, which means the previous start bach ssh command will close,
-#   as the previous command will have finished. So... that's convenient
-#start bash -c "ssh pi@192.168.0.205 \"node ./sender.js\""
-
 start bash -c "node ./dist/senderWrap.js"
 
 

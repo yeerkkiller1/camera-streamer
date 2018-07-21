@@ -1,7 +1,12 @@
 import { PChanReceive } from "controlFlow/pChan";
 import { TransformChannelAsync, Range } from "pchannel";
 
+// Okay, so because the concept of "start codes" is such a shitty idea, here is something that has to happen.
+// IF you send a large piece of data, that happens to end in a 0, we cannot send this zero until we get another piece of
+//  data. If you close the stream we can (and should) send it, but if you just pause, or don't know the connection is ended...
+//  we will hang, waiting for more data. Ugh... So if a few trailing bytes appear to lag, that's why.
 
+/** Emits raw nals, without start codes or start lengths. */
 export const splitByStartCodes: (startCodeData: PChanReceive<Buffer>) => PChanReceive<Buffer> = (
     TransformChannelAsync<Buffer, Buffer>(
         async ({inputChan, outputChan}) => {
@@ -32,11 +37,15 @@ export const splitByStartCodes: (startCodeData: PChanReceive<Buffer>) => PChanRe
                 }
 
                 if(zerosFromLast > 0) {
+                    //console.log(`Zeros from last ${zerosFromLast}`);
                     input = Buffer.concat([new Buffer(Range(0, zerosFromLast).map(() => 0)), input]);
                 }
 
                 function addCurrent(start: number, end: number) {
-                    if(start >= end) return;
+                    if(start >= end) {
+                        //console.log(`Ignoring empty add`);
+                        return;
+                    }
                     let cur = input.slice(start, end);
                     curBuffers.push(cur);
                 }
@@ -49,7 +58,8 @@ export const splitByStartCodes: (startCodeData: PChanReceive<Buffer>) => PChanRe
                         zeroBytes++;
                         // The file will escape long sequences of 0s, so this is okay, and should never result in zeroBytes > 3
                         if(zeroBytes > 3) {
-                            throw new Error(`Too many zeroBytes in a row. Should never have more than 3, were ${zeroBytes}`);
+                            let message = `Too many zeroBytes in a row. Should never have more than 3, were ${zeroBytes}`;
+                            throw new Error(message);
                         }
                         continue;
                     }
@@ -60,13 +70,14 @@ export const splitByStartCodes: (startCodeData: PChanReceive<Buffer>) => PChanRe
                         emitCurrentBuffers();
                         
                         curStart = i + 1;
-                        zeroBytes = 0;
                     }
+                    zeroBytes = 0;
                 }
 
                 let end = input.length - zeroBytes;
                 zerosFromLast = zeroBytes;
 
+                //console.log(`Adding from ${curStart} to ${end}`);
                 addCurrent(curStart, end);
             }
 

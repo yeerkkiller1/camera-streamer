@@ -82,4 +82,4 @@ wrapAsync(async () => {
 
 // time gst-launch-1.0 -vv -e v4l2src device=/dev/video0 num-buffers=30 ! capsfilter caps="image/jpeg,width=1920,height=1080,framerate=30/1" ! multifilesink location=raw%d.jpeg
 
-// time gst-launch-1.0 -vv -e v4l2src device=/dev/video0 num-buffers=90 ! capsfilter caps="image/jpeg,width=1920,height=1080,framerate=30/1" ! omxmjpegdec ! omxh264enc target-bitrate=15000000 control-rate=variable periodicty-idr=10 ! video/x-h264, profile=high ! filesink location=test.mp4
+// time gst-launch-1.0 -vv -e multifilesrc location="result%d.jpeg" ! capsfilter caps="image/jpeg,width=1920,height=1080,framerate=30/1" ! jpegdec ! omxh264enc target-bitrate=15000000 control-rate=variable periodicty-idr=10 ! video/x-h264, profile=high ! filesink location=test.mp4

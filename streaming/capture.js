@@ -20,10 +20,7 @@ if (cam.configGet().formatName !== "MJPG") {
   process.exit(1);
 }
 
-function clock() {
-    var time = process.hrtime();
-    return time[0]*1000 + time[1] / 1000 / 1000;
-}
+
 
 var rollingFrameCount = 5;
 var rollingFrames = [];

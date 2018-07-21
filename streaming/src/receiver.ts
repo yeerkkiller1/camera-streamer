@@ -1,26 +1,47 @@
 import * as wsClass from "ws-class";
 
-import { PChan, pchan, TransformChannel, TransformChannelAsync } from "pchannel";
-import { clock } from "./misc";
+import { PChan, pchan, TransformChannel, TransformChannelAsync, Deferred } from "pchannel";
 
-import { CreateVideo } from "mp4-typescript";
+import { CreateVideo, MuxVideo } from "mp4-typescript";
 import { mkdir, writeFile, writeFileSync, readFileSync } from "fs";
 
 import * as net from "net";
 import { PChanReceive, PChanSend } from "controlFlow/pChan";
 import { makeProcessSingle } from "./util/singleton";
+import { clock } from "./util/time";
 
 console.log("pid", process.pid);
 makeProcessSingle("receiver");
 
 setInterval(() => {
     console.log("alive2");
-}, 1000);
+}, 60000);
 
-// Okay... there is a solution for low bit rates. We CAN encode at a 5 to 1 ratio at a rate of about 230KB/s in. So for very slow
-//  connections encoding first is viable. So if the connection maximum drops below 230KB/s, encoding is worth it. But... if the
-//  connection is around 40KB/s, nothing is really worth it, because then even with encoding we won't get even 1 FPS.
-// But... that is so niche, so screw it, let's just but ethernet cables and wire it in.
+
+//todonext
+// Bundle these and pass them to the client.
+//  - Then add metadata on things such a nal rates (maybe do start code parsing on output?), bit rate, fps, etc
+//  - Then make the sender have dynamic fps, with the limiting factor being encoding speed (and capped a certain fps).
+//  - We also want to measure bandwidth restrictions, and possibly restrict fps based on that. We should receive callbacks
+//      when a frame is received (or when every nth frame is received) so we can roughly estimate display lag. If display
+//      lag gets over a certain amount for a certain number of frames in a row, we should reduce the FPS.
+//      - We should also add limits on the number of unacknowledged frames we will send, and make sure we noticed
+//          lag on more frames then that. This will let us maintain the fps even if the network is flakey, as
+//          lowering the fps won't help at all if the network is flakey (and instead result in very low FPS,
+//          with no benefit). Eventually the buffer will get really big if our FPS is higher than the average bandwidth,
+//          causing the lag to continue even when the network is back up, which will allow our FPS to still be correct,
+//          just not to wildly drop every time the network goes down.
+//      It is impossible to passively tell the difference between very high latency and bandwidth limitations.
+//      If there is simply 10 second latency, irregardless of how much we send, it will make it look like we and bandwidth
+//      limited, unless we actively send less and find no difference in latency. So we should have a configurable max
+//      latency limit, to make it possible for very slow connections to still work.
+//  - We need to figure out time drift. Usually for long videos (like a few hours), you can just encode at a certain fps,
+//      and the video may play a few seconds? faster or slower. But... for video that plays continously, easily for
+//      weeks, we need a way to recover from time drift on the server being different than on the client.
+//      - Start by displaying the amount of lag. HOPEFULLY the client's clock is faster than the camera's, meaning
+//          sometimes the realtime video will pause and wait for the camera to give more data. Otherwise we will
+//          at least see the lag slowly build up over time, at which point we can add corrective measures.
+
 
 function mkdirPromise(path: string) {
     return new Promise<void>((resolve, reject) => {
@@ -45,42 +66,172 @@ async function getFinalStorageFolder() {
 }
 
 
+class PChannelMultiListen<T> implements PChanSend<T> {
+    callbacks: ((value: T) => void)[] = [];
+
+    /** Returns a close callback. And if callback throughs, we close the connection. */
+    public Subscribe(callback: (value: T) => void): () => void {
+        this.callbacks.push(callback);
+        return () => {
+            this.removeCallback(callback);
+        };
+    }
+
+    private removeCallback(callback: (value: T) => void) {
+        let index = this.callbacks.indexOf(callback);
+        if(index < 0) {
+            console.warn(`Could not callback on PChannelMultiListen. Maybe we are searching for it incorrectly?, in which case we will leak memory here, and probably throw lots of errors.`);
+        } else {
+            this.callbacks.splice(index, 1);
+        }
+    }
+
+    private closeDeferred = new Deferred<void>();
+    OnClosed: Promise<void> = this.closeDeferred.Promise();
+    IsClosed(): boolean { return !!this.closeDeferred.Value; }
+
+    SendValue(value: T): void {
+        let callbacks = this.callbacks.slice();
+        for(let callback of callbacks) {
+            try {
+                callback(value);    
+            } catch(e) {
+                console.error(`Error on calling callback. Assuming requested no longer wants data, and are removing it from callback list. Error ${String(e)}`);
+                this.removeCallback(callback);
+            }
+        }
+    }
+    SendError(err: any): void {
+        console.error(`Error on PChannelMultiListen. There isn't really anything to do with this (the clients don't want it), so just swallowing it?`, err);
+    }
+    
+    Close(): void {
+        this.closeDeferred.Resolve(undefined);
+    }
+    IsClosedError(err: any): boolean {
+        return false;
+    }
+}
+
 class Receiver implements IReceiver, IHost {
     // Eh... might as well use &, because we can't narrow the type anyway, as this property
     //  will be a proxy, and I haven't implemented the in operator yet!
     client!: ISender&IBrowserReceiver;
 
-    webcamFrameInfoRequesters: PChan<WebcamFrameInfo>[] = [];
+    clientVideoSegment = new PChannelMultiListen<VideoSegment>();
 
 
-    async cameraPing() {
+    public async cameraPing() {
+        console.log("setStreamFormat call");
+
         let client = this.client;
         let formats = await client.getStreamFormats();
-        console.log(formats);
+        //console.log(formats);
 
-        client.setStreamFormat(10, formats[0]);
+        //console.log("setStreamFormat call");
+        client.setStreamFormat(3, formats[formats.length - 1]);
     }
-    acceptFrame(frame: {
-        buffer: Buffer;
-        format: v4l2camera.Format;
-        eventTime: number;
-    }): void {
-        let receivedTime = clock();
 
-        //console.log(`Recieved frame ${frame.buffer.length}`);
+    public async subscribeToCamera() {
+        let client = this.client;
 
-        this.frameReceived.SendValue(frame.buffer);
+        this.clientVideoSegment.Subscribe(video => {
+            client.acceptVideoSegment_VOID(video);
+        });
+    }
 
-        let chans = this.webcamFrameInfoRequesters;
-        for(let i = chans.length - 1; i >= 0; i--) {
-            chans[i].SendValue({
-                webcamSourceTime: frame.eventTime,
-                serverReceivedTime: receivedTime,
-            });
+    
+    nalStream = new PChan<NALHolder>();
+    public acceptNAL(info: NALHolder): void {
+        console.log(`Recieved nal size ${info.nal.length}, type ${info.type.type} at ${+new Date()}`);
+
+        this.nalStream.SendValue(info);
+    }
+    muxLoop = (async () => {
+        let stream = this.nalStream;
+        try {
+            
+            let nextSps: NALHolder|undefined;
+            while(true) {
+                // TODO: Write either the NALs, or the muxed video to disk, and then to s3, so we have it forever.
+                //  And then expose function to allow seeking of the video.
+                //  - We also want to write some higher fps videos
+                //      - The issue here is that in theory the spses may change from video to video?
+                //          - We should check that, and if they seem to not change, we can just take the nals and 
+                //              make the videos ourselfs (verifying the spses don't change),
+                //          - If they do change often, we have to encode larger chunks, or perhaps re-encode on the remote server?
+                //              (as the frame rate will be so much lower, so encoding speeds can be fairly low.)
+                //  - And we want a low FPS video, for super long term storage. 
+                //      - We can just remux a high fps video to slow it down to get this, or just mux a high fps video twice...
+
+                let sps = nextSps || await stream.GetPromise();
+                if(sps.type.type !== "sps") {
+                    throw new Error(`Expected sps, got ${sps.type.type}`);
+                }
+
+                let pps = await stream.GetPromise();
+                if(pps.type.type !== "pps") {
+                    throw new Error(`Expected pps, got ${pps.type.type}`);
+                }
+
+                let startTime: number = +new Date();
+                let frames: NALHolder[] = [];
+                while(true) {
+                    let frame = await stream.GetPromise();
+                    if(frame.type.type === "sps") {
+                        nextSps = frame;
+                        break;
+                    }
+
+                    if(frame.type.type !== "slice") {
+                        throw new Error(`Expected slice, got ${frame.type.type}`);
+                    }
+                    frames.push(frame);
+                    startTime = frame.type.frameTime;
+                }
+
+                let buffers = [sps, pps].concat(frames).map(x => x.nal);
+
+                console.log(`Muxing video`);
+                //todonext
+                // Oh yeah, the last frame. Frame timings are going to be hard here. We need to guess an fps? We could also just give
+                //  every frame its own time, but... We don't know how long the last frame should last for? We might have to add a one
+                //  nal delay here...
+                let fps = sps.senderConfig.fps;
+                let video = await MuxVideo({
+                    nals: buffers,
+                    // TODO: This is multiplied by timescale and then rounded. Which means we only have second precision
+                    //  (and this is used for seeking). So, find a way to fix this, because we want frame level seeking precision?
+                    //  And we have to / fps, or else the number becomes too large for 32 bits, which is annoying.
+                    //  Actually... maybe we should just support 64 bits in the box where this is used?
+                    //baseMediaDecodeTimeInSeconds: startTime / 1000 / fps,
+                    baseMediaDecodeTimeInSeconds: 0,
+                    fps: fps,
+                    width: sps.senderConfig.format.width,
+                    height: sps.senderConfig.format.height,
+                });
+
+                writeFileSync("C:/scratch/test.mp4", video);
+
+                this.clientVideoSegment.SendValue({
+                    durationSeconds: frames.length * 1 / 10,
+                    mp4Video: video,
+                    startTime: startTime / fps
+                });
+
+                console.log(`Send muxed video`);
+            }
+        } catch(e) {
+            console.error(e);
+            console.error(`Mux loop died. This is bad... killing server in 30 seconds.`);
+            setTimeout(() => {
+                process.exit();
+            }, 30 * 1000);
         }
-    }
+    })();
 
 
+    /*
     frameReceived = new PChan<Buffer>();
     frameLoop = (async () => {
         try {
@@ -128,6 +279,7 @@ class Receiver implements IReceiver, IHost {
             process.exit();
         }
     })();
+    */
 
     //todonext
     // Actually encode the video, that way when we test throttling we can tell
@@ -147,35 +299,9 @@ class Receiver implements IReceiver, IHost {
     //          and if they exist they by the sender to encode before it sends frames.
     //          - Then the server has to accept both frames and just already encoded video? Then we can force the browser to generate thumbnails
     //              when seeking? (as the server won't have thumbnails)
-
-
-
-    async subscribeToWebcamFrameInfo() {
-        let client = this.client;
-
-        let frameInfoChan = new PChan<WebcamFrameInfo>();
-        this.webcamFrameInfoRequesters.push(frameInfoChan);
-
-        (async () => {
-            while(!frameInfoChan.IsClosed()) {
-                let info = await frameInfoChan.GetPromise();
-                try {
-                    client.acceptWebcamFrameInfo_VOID(info);
-                } catch(e) {
-                    console.error(`Error on sending acceptWebcamFrameInfo_VOID. Assuming the connection is down, so no longer sending frame info to this client.`);
-                    let index = this.webcamFrameInfoRequesters.indexOf(frameInfoChan);
-                    if(index < 0) {
-                        console.warn(`Could not remove channel from webcamFrameInfoRequesters, as we could not find it. Maybe we are searching for it incorrectly?, in which case we will leak memory here, and probably throw lots of errors.`);
-                    } else {
-                        this.webcamFrameInfoRequesters.splice(index, 1);
-                    }
-                }
-            }
-        })();
-    }
 }
 
-//wsClass.HostServer(7060, new Receiver());
+wsClass.HostServer(7060, new Receiver());
 
 //todonext
 /*

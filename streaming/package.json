@@ -16,8 +16,8 @@
     "jimp": "^0.2.28",
     "less": "^2.7.1",
     "less-loader": "^2.2.3",
-    "mp4-typescript": "^0.1.1",
-    "pchannel": "^0.4.1",
+    "mp4-typescript": "^0.1.11",
+    "pchannel": "^0.4.3",
     "prop-types": "^15.6.0",
     "react": "^16.2.0",
     "react-dom": "^16.2.0",
@@ -36,5 +36,8 @@
   },
   "optionalDependencies": {
     "v4l2camera": "git+https://github.com/yeerkkiller1/node-v4l2camera.git"
+  },
+  "devDependencies": {
+    "nodemon": "^1.18.3"
   }
 }
