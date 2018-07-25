@@ -3079,9 +3079,9 @@ mp4-typescript@^0.0.1:
   version "0.0.1"
   resolved "https://registry.yarnpkg.com/mp4-typescript/-/mp4-typescript-0.0.1.tgz#3301cd53d8aa0d7e519ec1dffa4448664e1553ee"
 
-mp4-typescript@^0.1.11:
-  version "0.1.11"
-  resolved "https://registry.yarnpkg.com/mp4-typescript/-/mp4-typescript-0.1.11.tgz#adc89ae3d3cd8b0fd314eaa940c0291fd1d29eea"
+mp4-typescript@^0.2.0:
+  version "0.2.0"
+  resolved "https://registry.yarnpkg.com/mp4-typescript/-/mp4-typescript-0.2.0.tgz#d0c3fe326f2f45f1d797114f878d874cd6754d63"
   dependencies:
     jimp "^0.2.28"
     mp4-typescript "^0.0.1"
@@ -3163,9 +3163,9 @@ node-forge@0.7.5:
   version "0.7.5"
   resolved "https://registry.yarnpkg.com/node-forge/-/node-forge-0.7.5.tgz#6c152c345ce11c52f465c2abd957e8639cd674df"
 
-"node-gyp@git+https://github.com/yeerkkiller1/node-gyp.git":
+"node-gyp@https://github.com/yeerkkiller1/node-gyp":
   version "4.0.0"
-  resolved "git+https://github.com/yeerkkiller1/node-gyp.git#4f1493a7d011fa17d39cd27b0c4911b26acf18bf"
+  resolved "https://github.com/yeerkkiller1/node-gyp#4f1493a7d011fa17d39cd27b0c4911b26acf18bf"
   dependencies:
     glob "^7.0.3"
     graceful-fs "^4.1.2"
@@ -3613,17 +3613,13 @@ pbkdf2@^3.0.3:
     safe-buffer "^5.0.1"
     sha.js "^2.4.8"
 
-pchannel@0.2.5:
-  version "0.2.5"
-  resolved "https://registry.yarnpkg.com/pchannel/-/pchannel-0.2.5.tgz#4b1af11846d1a526c040a279d00eb23f33a679f0"
-
 pchannel@^0.3.4:
   version "0.3.4"
   resolved "https://registry.yarnpkg.com/pchannel/-/pchannel-0.3.4.tgz#70ed287668496dac74ec4ec2e3525281d7b6e78b"
 
-pchannel@^0.4.3:
-  version "0.4.3"
-  resolved "https://registry.yarnpkg.com/pchannel/-/pchannel-0.4.3.tgz#588981b9481a25d1284ae600844600b9935eab1f"
+pchannel@^0.4.5:
+  version "0.4.5"
+  resolved "https://registry.yarnpkg.com/pchannel/-/pchannel-0.4.5.tgz#19b79992c824b438e0c02641891980045e932340"
 
 performance-now@^0.2.0:
   version "0.2.0"
@@ -5413,13 +5409,9 @@ write-file-atomic@^2.0.0:
     imurmurhash "^0.1.4"
     signal-exit "^3.0.2"
 
-ws-class@^0.5.2:
-  version "0.5.2"
-  resolved "https://registry.yarnpkg.com/ws-class/-/ws-class-0.5.2.tgz#16a9ca1c56f13795a81c7a61538f287f505498c1"
-  dependencies:
-    pchannel "0.2.5"
-    webpack-node-externals "^1.7.2"
-    ws "^3.2.0"
+ws-class@^0.5.3:
+  version "0.5.3"
+  resolved "https://registry.yarnpkg.com/ws-class/-/ws-class-0.5.3.tgz#8d58b7dd13377669a8759f9520b44e9707c0ecdf"
 
 ws@^3.2.0:
   version "3.3.3"

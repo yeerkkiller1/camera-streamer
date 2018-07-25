@@ -1,3 +1,8 @@
 body {
-    background: blue;
+    background: white;
+
+    color: hsl(0, 0%, 10%);
+    font-size: 14px;
+    font-style: Verdana;
 }
+

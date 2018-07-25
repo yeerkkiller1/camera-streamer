@@ -8,7 +8,8 @@ import { mkdir, writeFile, writeFileSync, readFileSync } from "fs";
 import * as net from "net";
 import { PChanReceive, PChanSend } from "controlFlow/pChan";
 import { makeProcessSingle } from "./util/singleton";
-import { clock } from "./util/time";
+import { clock, TimeServer, setTimeServer } from "./util/time";
+import { randomUID } from "./util/rand";
 
 console.log("pid", process.pid);
 makeProcessSingle("receiver");
@@ -113,29 +114,53 @@ class PChannelMultiListen<T> implements PChanSend<T> {
     }
 }
 
-class Receiver implements IReceiver, IHost {
+class Receiver extends TimeServer implements IReceiver, IHost {
     // Eh... might as well use &, because we can't narrow the type anyway, as this property
     //  will be a proxy, and I haven't implemented the in operator yet!
-    client!: ISender&IBrowserReceiver;
-
+    client!: ISender&IBrowserReceiver
     clientVideoSegment = new PChannelMultiListen<VideoSegment>();
 
+    cameraClient = new Deferred<ISender>();
+
+    curFormatId = randomUID("format");
+
+    public async getFormats(): Promise<v4l2camera.Format[]> {
+        return (await (await this.cameraClient.Promise()).getStreamFormats()).filter(x => x.formatName === "MJPG");
+    }
+    public async setFormat(
+        fps: number,
+        /** Frequency of i frames. */
+        iFrameRate: number,
+        bitRateMBPS: number,
+        format: v4l2camera.Format
+    ): Promise<void> {
+        this.curFormatId = randomUID("format");
+        await (await this.cameraClient.Promise()).setStreamFormat(fps, iFrameRate, bitRateMBPS, format, this.curFormatId);
+    }
 
     public async cameraPing() {
         console.log("setStreamFormat call");
-
+        
         let client = this.client;
-        let formats = await client.getStreamFormats();
-        //console.log(formats);
+        this.cameraClient.ForceResolve(client);
 
-        //console.log("setStreamFormat call");
-        client.setStreamFormat(3, formats[formats.length - 1]);
+        /*
+        let formats = await (await this.cameraClient.Promise()).getStreamFormats();
+        formats = formats.filter(x => x.formatName === "MJPG");
+        this.curFormatId = randomUID("format");
+        (await this.cameraClient.Promise()).setStreamFormat(3, formats[formats.length - 1], this.curFormatId);
+        */
     }
 
     public async subscribeToCamera() {
         let client = this.client;
 
         this.clientVideoSegment.Subscribe(video => {
+            if(video.sourceInfo.formatId !== this.curFormatId) {
+                console.log(`Ignoring encoded data because it was generated using a stale format id.`);
+                return;
+            }
+
             client.acceptVideoSegment_VOID(video);
         });
     }
@@ -143,7 +168,8 @@ class Receiver implements IReceiver, IHost {
     
     nalStream = new PChan<NALHolder>();
     public acceptNAL(info: NALHolder): void {
-        console.log(`Recieved nal size ${info.nal.length}, type ${info.type.type} at ${+new Date()}`);
+        console.log(`Received nal size ${info.nal.length}, type ${info.type.type} at ${+new Date()}, from time ${info.type.type === "slice" ? info.type.frameRecordTime : 0}`);
+        info.senderConfig.serverReceiveTime = +new Date();
 
         this.nalStream.SendValue(info);
     }
@@ -151,6 +177,8 @@ class Receiver implements IReceiver, IHost {
         let stream = this.nalStream;
         try {
             
+            // Okay... we want to get frame durations from frame times. So... 
+
             let nextSps: NALHolder|undefined;
             while(true) {
                 // TODO: Write either the NALs, or the muxed video to disk, and then to s3, so we have it forever.
@@ -174,7 +202,7 @@ class Receiver implements IReceiver, IHost {
                     throw new Error(`Expected pps, got ${pps.type.type}`);
                 }
 
-                let startTime: number = +new Date();
+                let startTime: number|undefined;
                 let frames: NALHolder[] = [];
                 while(true) {
                     let frame = await stream.GetPromise();
@@ -187,36 +215,80 @@ class Receiver implements IReceiver, IHost {
                         throw new Error(`Expected slice, got ${frame.type.type}`);
                     }
                     frames.push(frame);
-                    startTime = frame.type.frameTime;
+                    if(!startTime) {
+                        console.log(`Using frame record time ${frame.type.frameRecordTime}`);
+                        startTime = frame.type.frameRecordTime;
+                    }
+                }
+                startTime = startTime || +new Date();
+
+
+                if(sps.senderConfig.formatId !== this.curFormatId) {
+                    console.log(`Ignoring encoded data in muxer because it was generated using a stale format id.`);
+                    continue;
                 }
 
-                let buffers = [sps, pps].concat(frames).map(x => x.nal);
 
-                console.log(`Muxing video`);
                 //todonext
                 // Oh yeah, the last frame. Frame timings are going to be hard here. We need to guess an fps? We could also just give
                 //  every frame its own time, but... We don't know how long the last frame should last for? We might have to add a one
                 //  nal delay here...
                 let fps = sps.senderConfig.fps;
+
+                let baseMediaDecodeTimeInSeconds = startTime / 1000;
+
+                let frameInfos = frames.map((x, i) => {
+                    if(x.type.type !== "slice") {
+                        throw new Error(`Not possible`);
+                    }
+
+                    let frameDurationInSeconds = 0;
+                    if(i < frames.length - 1) {
+                        let next = frames[i + 1];
+                        if(next.type.type !== "slice") {
+                            throw new Error(`Not possible`);
+                        }
+                        frameDurationInSeconds = (next.type.frameRecordTime - x.type.frameRecordTime) / 1000;
+                        console.log({frameDurationInSeconds});
+                    }
+                    
+                    return {
+                        buf: x.nal,
+                        frameDurationInSeconds
+                    };
+                });
+                frameInfos[frameInfos.length - 1].frameDurationInSeconds = 0;
+
+                console.log(`Muxing video from ${JSON.stringify(sps.senderConfig)}`);
                 let video = await MuxVideo({
-                    nals: buffers,
+                    sps: sps.nal,
+                    pps: pps.nal,
+                    frames: frameInfos,
                     // TODO: This is multiplied by timescale and then rounded. Which means we only have second precision
                     //  (and this is used for seeking). So, find a way to fix this, because we want frame level seeking precision?
                     //  And we have to / fps, or else the number becomes too large for 32 bits, which is annoying.
                     //  Actually... maybe we should just support 64 bits in the box where this is used?
-                    //baseMediaDecodeTimeInSeconds: startTime / 1000 / fps,
-                    baseMediaDecodeTimeInSeconds: 0,
-                    fps: fps,
+                    baseMediaDecodeTimeInSeconds: baseMediaDecodeTimeInSeconds,
                     width: sps.senderConfig.format.width,
                     height: sps.senderConfig.format.height,
                 });
 
-                writeFileSync("C:/scratch/test.mp4", video);
-
                 this.clientVideoSegment.SendValue({
-                    durationSeconds: frames.length * 1 / 10,
                     mp4Video: video,
-                    startTime: startTime / fps
+                    baseMediaDecodeTimeInSeconds,
+                    durationSeconds: frameInfos.map(x => x.frameDurationInSeconds).reduce((x, y) => x + y, 0),
+                    cameraRecordTimes: frames.map(x => x.type.type === "slice" ? x.type.frameRecordTime : -1),
+                    frameSizes: frameInfos.map(x => x.buf.length),
+                    cameraRecordTimesLists: frames.map(x => x.type.type === "slice" ? x.type.frameRecordTimes : []),
+                    cameraSendTimes: frames.map(x => x.senderConfig.cameraSendTime),
+                    serverReceiveTime: frames.map(x => x.senderConfig.serverReceiveTime),
+                    serverSendTime: +new Date(),
+                    clientReceiveTime: 0,
+                    cameraTimeOffset: sps.senderConfig.timeOffset,
+                    sourceInfo: {
+                        fps: sps.senderConfig.fps,
+                        formatId: sps.senderConfig.formatId
+                    },
                 });
 
                 console.log(`Send muxed video`);
@@ -229,76 +301,6 @@ class Receiver implements IReceiver, IHost {
             }, 30 * 1000);
         }
     })();
-
-
-    /*
-    frameReceived = new PChan<Buffer>();
-    frameLoop = (async () => {
-        try {
-            while(true) {
-
-                //todonext
-                // Create frame and video file name format that gives information on them. Also store them in folders so we can seek easily.
-                //  Also, maybe write additional adjacent metadata files with all the frame info?
-
-                // So... it seems like the connection to the server is always going to be the bottleneck. In jpeg format you need
-                //  something like 45MB/s for 30fps 1080p video. So we are always going to be sending compressed video to the remote server.
-
-                const framesPerChunk = 10;
-
-                let finalFolder = await getFinalStorageFolder();
-                let jpegPattern = finalFolder + "frame%d.jpeg";
-
-                for(let i = 0; i < framesPerChunk; i++) {
-                    let frame = await this.frameReceived.GetPromise();
-                    await writeFilePromise(jpegPattern.replace(/%d/g, i.toString()), frame);
-                }              
-
-                let video = await CreateVideo({
-                    fps: 10,
-                    baseMediaDecodeTimeInSeconds: 0,
-                    jpegPattern: jpegPattern
-                });
-
-                await writeFilePromise(finalFolder + "video.mp4", video);
-
-
-                //todonext
-                // Write frames to files. This will be the final location for the files, used as storage. Eventually we need
-                //  to back up the frame jpeg storage with s3 so we have infinite storage space.
-                // Then create the video, and I guess store that on disk too?
-                // And then push that to some channel?
-                // Expose video encode quality settings, and video resolution settings.
-
-                //CreateVideo
-                console.log(`Finished chunk`)
-            }
-        } catch(e) {
-            console.error(e);
-            console.error(`Frame loop died. This is bad...`);
-            process.exit();
-        }
-    })();
-    */
-
-    //todonext
-    // Actually encode the video, that way when we test throttling we can tell
-    //  if our throttling code is working properly by seeing if the video looks good.
-    // Also send differences in last frame received in current time (lag) to the client
-    //  - And then graph this, so we can see lag over time
-    //      - Have the client run an animation loop to update this continously
-    //  - Maybe also do something like this with video data, even though that will be chunked so it is forcefully have lag, but at least
-    //      we could verify the video encoding isn't adding more lag than we expected
-    // And display current requested FPS.
-    // Add storing and retrieveing on S3
-    // Add throttling
-    //  - We need to throttle based on bandwidth to camera AND encoding speed of server.
-    //      - And... if we could encode on multiple servers, and dynamically add more servers to encode
-    //          at more FPS... that would be nice.
-    //      - I should make something called "local encoders", which have a high bandwidth connection to the webcam,
-    //          and if they exist they by the sender to encode before it sends frames.
-    //          - Then the server has to accept both frames and just already encoded video? Then we can force the browser to generate thumbnails
-    //              when seeking? (as the server won't have thumbnails)
 }
 
 wsClass.HostServer(7060, new Receiver());

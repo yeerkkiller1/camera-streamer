@@ -5,7 +5,7 @@ import { spawn } from "child_process";
 
 //type ThirdArgument<T> = T extends (a: any, b: any, c: infer X) => any ? X : never;
 //type SpawnOptions = ThirdArgument<typeof spawn>;
-function spawnChannel(command: string, args: string[]): (jpegStream: PChanReceive<Buffer>) => PChanReceive<Buffer> {
+function spawnChannel(command: string, args: string[], onProcClose: () => void): (jpegStream: PChanReceive<Buffer>) => PChanReceive<Buffer> {
     return TransformChannelAsync<Buffer, Buffer>(async ({inputChan, outputChan}) => {
         let proc = spawn(command, args, { stdio: "pipe" });
         proc.on("error", (err) => {
@@ -14,14 +14,20 @@ function spawnChannel(command: string, args: string[]): (jpegStream: PChanReceiv
         });
         proc.on("exit", () => {
             console.log(`Proc exit`);
+
+            onProcClose();
         });
         proc.on("close", () => {
             console.log(`Proc close`);
+
+            onProcClose();
         });
 
         proc.stdout.on("close", () => {
             console.log("Calling close because stdout called close");
-            outputChan.Close();
+            if(!outputChan.IsClosed()) {
+                outputChan.Close();
+            }
         });
         proc.stdout.on("error", (err: any) => {
             console.log(`Proc error ${String(err)}`);
@@ -29,6 +35,10 @@ function spawnChannel(command: string, args: string[]): (jpegStream: PChanReceiv
         });
         proc.stdout.on("data", (data: Buffer) => {
             //console.log(`Proc got data ${data.toString()}`);
+            if(outputChan.IsClosed()) {
+                console.warn(`Got data on closed channel, ignoring. ${data.length} bytes`);
+                return;
+            }
             outputChan.SendValue(data);
         });
 
@@ -58,33 +68,122 @@ export function encodeJpegFrames(info: {
     height: number;
     frameNumerator: number;
     frameDenominator: number;
-    /** We only use this to calculate bitrate */
-    fps: number;
     /** The rate of i frames. sps and pps are also spit out at this rate. */
     iFrameRate: number;
+    bitRateMBPS: number;
     jpegStream: PChanReceive<Buffer>;
+
+    /** I have noticed that gst-launch can use resources and cause problems if not closed properly. This happened
+     *      after process exit, but in theory it could happen in the same process, so we have this callback so you can
+     *      wait until the process actually exits.
+     */
+    onProcClose: () => void;
 }): PChanReceive<Buffer> {
-    let { width, height, frameNumerator, frameDenominator, fps, iFrameRate, jpegStream } = info;
+    let { width, height, frameNumerator, frameDenominator, iFrameRate, jpegStream, bitRateMBPS } = info;
 
-    // https://support.google.com/youtube/answer/1722171?hl=en (youtube recommend upload bitrates)
-    let lowFps = fps <= 30;
-    let bitRateMBPS: number;
-    if(height <= 360) {
-        bitRateMBPS = lowFps ? 1 : 1.5;
-    } else if(height <= 480) {
-        bitRateMBPS = lowFps ? 2.5 : 4;
-    } else if(height <= 720) {
-        bitRateMBPS = lowFps ? 5 : 7.5;
-    } else if(height <= 1080) {
-        bitRateMBPS = lowFps ? 8 : 12;
-    } else if(height <= 1440) {
-        bitRateMBPS = lowFps ? 16 : 24;
-    } else if(height <= 2160) {
-        bitRateMBPS = lowFps ? 40 : 60;
-    } else {
-        bitRateMBPS = lowFps ? 60 : 80;
-    }
-
-    let args = `-q fdsrc fd=0 ! capsfilter caps="image/jpeg,width=${width},height=${height},framerate=${frameNumerator}/${frameDenominator}" ! jpegdec ! omxh264enc target-bitrate=${bitRateMBPS * 1000 * 1000} control-rate=variable periodicty-idr=${iFrameRate} ! video/x-h264,profile=high ! fdsink fd=1`;
-    return spawnChannel("gst-launch-1.0", args.split(" "))(jpegStream);
+    let args = `-q fdsrc fd=0 ! capsfilter caps="image/jpeg,width=${width},height=${height},framerate=${frameNumerator}/${frameDenominator}" ! jpegdec ! omxh264enc target-bitrate=${Math.round(bitRateMBPS * 1000 * 1000)} control-rate=variable periodicty-idr=${iFrameRate} ! video/x-h264,profile=high ! fdsink fd=1`;
+    return spawnChannel("gst-launch-1.0", args.split(" "), info.onProcClose)(jpegStream);
 }
+
+/*
+pi@raspberrypi:~ $ gst-inspect-1.0 omxh264enc
+Factory Details:
+  Rank                     primary + 1 (257)
+  Long-name                OpenMAX H.264 Video Encoder
+  Klass                    Codec/Encoder/Video
+  Description              Encode H.264 video streams
+  Author                   Sebastian Dröge <sebastian.droege@collabora.co.uk>
+
+Plugin Details:
+  Name                     omx
+  Description              GStreamer OpenMAX Plug-ins
+  Filename                 /usr/lib/arm-linux-gnueabihf/gstreamer-1.0/libgstomx-rpi.so
+  Version                  1.10.4
+  License                  LGPL
+  Source module            gst-omx
+  Source release date      2017-02-23
+  Binary package           GStreamer OpenMAX Plug-ins source release
+  Origin URL               Unknown package origin
+
+GObject
+ +----GInitiallyUnowned
+       +----GstObject
+             +----GstElement
+                   +----GstVideoEncoder
+                         +----GstOMXVideoEnc
+                               +----GstOMXH264Enc
+                                     +----GstOMXH264Enc-omxh264enc
+
+Implemented Interfaces:
+  GstPreset
+
+Pad Templates:
+  SRC template: 'src'
+    Availability: Always
+    Capabilities:
+      video/x-h264
+                  width: [ 16, 4096 ]
+                 height: [ 16, 4096 ]
+
+  SINK template: 'sink'
+    Availability: Always
+    Capabilities:
+      video/x-raw
+                  width: [ 1, 2147483647 ]
+                 height: [ 1, 2147483647 ]
+              framerate: [ 0/1, 2147483647/1 ]
+
+
+Element Flags:
+  no flags set
+
+Element Implementation:
+  Has change_state() function: gst_omx_video_enc_change_state
+
+Element has no clocking capabilities.
+Element has no URI handling capabilities.
+
+Pads:
+  SINK: 'sink'
+    Pad Template: 'sink'
+  SRC: 'src'
+    Pad Template: 'src'
+
+Element Properties:
+  name                : The name of the object
+                        flags: readable, writable
+                        String. Default: "omxh264enc-omxh264enc0"
+  parent              : The parent of the object
+                        flags: readable, writable
+                        Object of type "GstObject"
+  control-rate        : Bitrate control method
+                        flags: readable, writable, changeable only in NULL or READY state
+                        Enum "GstOMXVideoEncControlRate" Default: -1, "default"
+                           (0): disable          - Disable
+                           (1): variable         - Variable
+                           (2): constant         - Constant
+                           (3): variable-skip-frames - Variable Skip Frames
+                           (4): constant-skip-frames - Constant Skip Frames
+                           (-1): default          - Component Default
+  target-bitrate      : Target bitrate (0xffffffff=component default)
+                        flags: readable, writable, changeable in NULL, READY, PAUSED or PLAYING state
+                        Unsigned Integer. Range: 0 - 4294967295 Default: 4294967295
+  quant-i-frames      : Quantization parameter for I-frames (0xffffffff=component default)
+                        flags: readable, writable, changeable only in NULL or READY state
+                        Unsigned Integer. Range: 0 - 4294967295 Default: 4294967295
+  quant-p-frames      : Quantization parameter for P-frames (0xffffffff=component default)
+                        flags: readable, writable, changeable only in NULL or READY state
+                        Unsigned Integer. Range: 0 - 4294967295 Default: 4294967295
+  quant-b-frames      : Quantization parameter for B-frames (0xffffffff=component default)
+                        flags: readable, writable, changeable only in NULL or READY state
+                        Unsigned Integer. Range: 0 - 4294967295 Default: 4294967295
+  inline-header       : Inline SPS/PPS header before IDR
+                        flags: readable, writable, changeable only in NULL or READY state
+                        Boolean. Default: true
+  periodicty-idr      : Periodicity of IDR frames (0xffffffff=component default)
+                        flags: readable, writable, changeable only in NULL or READY state
+                        Unsigned Integer. Range: 0 - 4294967295 Default: 4294967295
+  interval-intraframes: Interval of coding Intra frames (0xffffffff=component default)
+                        flags: readable, writable, changeable only in NULL or READY state
+                        Unsigned Integer. Range: 0 - 4294967295 Default: 4294967295
+*/

@@ -1,7 +1,12 @@
-#node ./node_modules/nodemon/bin/nodemon.js ./dist/sender.js
+#node ./node_modules/nodemon/bin/nodemon.js --watch ./dist/sender.js ./dist/sender.js
 
 start bash -c "node ./dist/receiver.js"
-start bash -c "node ./dist/senderWrap.js"
+
+scp ./dist/sender.js pi@192.168.0.205:~/
+#start bash -c "node ./dist/senderWrap.js"
+# node sender.js &> sender.log &
+
+# node -p "setInterval(() => {}, 1000)" &> sender.log &
 
 
 

@@ -2,6 +2,11 @@ var v4l2camera = require("v4l2camera");
 var fs = require("fs");
 var crypto = require('crypto');
 
+function clock() {
+    var time = process.hrtime();
+    return time[0]*1000 + time[1] / 1000 / 1000;
+}
+
 //import * as ws from "ws";
 
 //var ws = require("ws");
@@ -43,6 +48,7 @@ var lastDigest = "";
 var i = 0;
 
 var targetFrameTime = 1000 * format.interval.numerator / format.interval.denominator;
+targetFrameTime = 0;
 // Okay... so, sometimes the camera dynamically changes the frame rate.
 
 console.log({targetFrameTime});
@@ -51,7 +57,7 @@ cam.start();
 
 var capturePending = null;
 setInterval(() => {
-    var curCapture = clock();
+    var curCapture = Date.now();
     if(capturePending) {
         if((curCapture - capturePending) > 1000) {
             console.log(`Last read didn't finish, but it is taking too long. Reading despite missing frame. CurCapture ${curCapture}, pending ${capturePending}`);

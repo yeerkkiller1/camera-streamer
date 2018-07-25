@@ -5,6 +5,7 @@ declare namespace v4l2camera {
         public configSet(format: Format): void;
         public configGet(): Format;
         public start(): void;
+        public stop(callback?: () => void): void;
         public capture(callback: (success: boolean) => void): void;
         public frameRaw(): Uint8Array;
     }
