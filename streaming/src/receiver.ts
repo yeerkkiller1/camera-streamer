@@ -1,6 +1,6 @@
 import * as wsClass from "ws-class";
 
-import { PChan, pchan, TransformChannel, TransformChannelAsync, Deferred } from "pchannel";
+import { PChan, pchan, TransformChannel, TransformChannelAsync, Deferred, g } from "pchannel";
 
 import { CreateVideo, MuxVideo } from "mp4-typescript";
 import { mkdir, writeFile, writeFileSync, readFileSync } from "fs";
@@ -10,6 +10,11 @@ import { PChanReceive, PChanSend } from "controlFlow/pChan";
 import { makeProcessSingle } from "./util/singleton";
 import { clock, TimeServer, setTimeServer } from "./util/time";
 import { randomUID } from "./util/rand";
+
+import { CreateTempFolderPath } from "temp-folder";
+
+// For polyfills
+import "./util/math";
 
 console.log("pid", process.pid);
 makeProcessSingle("receiver");
@@ -117,15 +122,34 @@ class PChannelMultiListen<T> implements PChanSend<T> {
 class Receiver extends TimeServer implements IReceiver, IHost {
     // Eh... might as well use &, because we can't narrow the type anyway, as this property
     //  will be a proxy, and I haven't implemented the in operator yet!
-    client!: ISender&IBrowserReceiver
-    clientVideoSegment = new PChannelMultiListen<VideoSegment>();
+    client!: ISender&IBrowserReceiver&ConnExtraProperties;
+    clientVideoSegment = new PChannelMultiListen<LiveVideoSegment>();
 
     cameraClient = new Deferred<ISender>();
-
     curFormatId = randomUID("format");
 
+    // If it is a string it is the sourceId of a client that closed.
+    liveDataChan = new PChan<LiveVideoSegment|string>();
+
+    constructor() {
+        super();
+    
+        TransformChannelAsync<LiveVideoSegment|string, void>(x => this.storeLiveData(x.inputChan))(this.liveDataChan).GetPromise().catch(e => {
+            console.error(`storeLiveData loop crashed`, e)
+        });
+        this.clientVideoSegment.Subscribe(segment => {
+            try {
+                this.liveDataChan.SendValue(segment);
+            } catch(e) {
+                console.log(`liveDataChan err`);
+            }
+        });
+    }
+
     public async getFormats(): Promise<v4l2camera.Format[]> {
-        return (await (await this.cameraClient.Promise()).getStreamFormats()).filter(x => x.formatName === "MJPG");
+        let client = await this.cameraClient.Promise();
+        let formats = await client.getStreamFormats();
+        return formats.filter(x => x.formatName === "MJPG");
     }
     public async setFormat(
         fps: number,
@@ -138,21 +162,100 @@ class Receiver extends TimeServer implements IReceiver, IHost {
         await (await this.cameraClient.Promise()).setStreamFormat(fps, iFrameRate, bitRateMBPS, format, this.curFormatId);
     }
 
-    public async cameraPing() {
-        console.log("setStreamFormat call");
+    public async cameraPing(sourceId: string) {
+        console.log("Camera connected call");
         
         let client = this.client;
         this.cameraClient.ForceResolve(client);
 
-        /*
-        let formats = await (await this.cameraClient.Promise()).getStreamFormats();
-        formats = formats.filter(x => x.formatName === "MJPG");
-        this.curFormatId = randomUID("format");
-        (await this.cameraClient.Promise()).setStreamFormat(3, formats[formats.length - 1], this.curFormatId);
-        */
+        let promise = client.ClosePromise;
+        promise.then(() => {
+            console.log("Camera closed");
+            this.liveDataChan.SendValue(sourceId);
+        });
     }
 
-    public async subscribeToCamera() {
+    private pendingSegmentStart: number|undefined;
+    private timeRanges: {
+        range: RecordTimeRange
+    }[] = [];
+    private async storeLiveData(segments: PChanReceive<LiveVideoSegment|string>) {
+        while(true) {
+            let lastSourceId: string|undefined;
+            let lastFrameTime: number|undefined;
+
+            const finishSegment = () => {
+                if(!this.pendingSegmentStart || !lastFrameTime) return;
+                console.log("Segment finished");
+                this.timeRanges.push({
+                    range: {
+                        firstFrameTime: this.pendingSegmentStart,
+                        lastFrameTime: lastFrameTime
+                    }
+                });
+                lastSourceId = undefined;
+                this.pendingSegmentStart = undefined;
+                lastFrameTime = undefined;
+            };
+            
+            while(true) {
+                let segment = await segments.GetPromise();
+                if(typeof segment === "string") {
+                    console.log(`Closed ${segment}, current ${lastSourceId}`);
+                    if(segment === lastSourceId) {
+                        finishSegment();
+                        this.pendingSegmentStart = undefined;
+                    }
+                    continue;
+                }
+
+                if(segment.sourceId !== lastSourceId) {
+                    finishSegment();
+
+                    // Start segment
+                    console.log("Segment started");
+                    
+                    this.pendingSegmentStart = segment.cameraRecordTimes[0];
+                }
+
+                console.log(`Segment loop ${segment.sourceId}`);
+                lastFrameTime = segment.cameraRecordTimes.last();
+                lastSourceId = segment.sourceId;
+            }
+        }
+    }
+    public async getRecordTimeRanges(info: {
+        /** We return one range before this time (if possible), and then up to 100 ranges after it. */
+        startTime: number;
+    }): Promise<{
+        ranges: RecordTimeRange[]
+    }> {
+        let ranges = this.timeRanges.map(x => x.range);
+        if(this.pendingSegmentStart) {
+            ranges.push({
+                firstFrameTime: this.pendingSegmentStart,
+                lastFrameTime: "live"
+            });
+        }
+        return { ranges: ranges };
+    }
+
+    public async subscribeToCamera(info: {
+        time: VideoTime;
+        rate: number;
+    }) {
+        if(info.time === "live") {
+            if(info.rate !== 1) {
+                throw new Error(`Live and rate !== 1 is invalid. Rate was ${info.rate}`);
+            }
+            return this.subscribeToCameraLive();
+        }
+
+        throw new Error(`time !== live is not implemented yet`);
+    }
+
+
+    private async subscribeToCameraLive() {
         let client = this.client;
 
         this.clientVideoSegment.Subscribe(video => {
@@ -163,12 +266,16 @@ class Receiver extends TimeServer implements IReceiver, IHost {
 
             client.acceptVideoSegment_VOID(video);
         });
+
+        return {
+            streamRate: 1
+        };
     }
 
     
     nalStream = new PChan<NALHolder>();
     public acceptNAL(info: NALHolder): void {
-        console.log(`Received nal size ${info.nal.length}, type ${info.type.type} at ${+new Date()}, from time ${info.type.type === "slice" ? info.type.frameRecordTime : 0}`);
+        //console.log(`Received nal size ${info.nal.length}, type ${info.type.type} at ${+new Date()}, from time ${info.type.type === "slice" ? info.type.frameRecordTime : 0}`);
         info.senderConfig.serverReceiveTime = +new Date();
 
         this.nalStream.SendValue(info);
@@ -216,7 +323,7 @@ class Receiver extends TimeServer implements IReceiver, IHost {
                     }
                     frames.push(frame);
                     if(!startTime) {
-                        console.log(`Using frame record time ${frame.type.frameRecordTime}`);
+                        //console.log(`Using frame record time ${frame.type.frameRecordTime}`);
                         startTime = frame.type.frameRecordTime;
                     }
                 }
@@ -259,7 +366,7 @@ class Receiver extends TimeServer implements IReceiver, IHost {
                 });
                 frameInfos[frameInfos.length - 1].frameDurationInSeconds = 0;
 
-                console.log(`Muxing video from ${JSON.stringify(sps.senderConfig)}`);
+                //console.log(`Muxing video from ${JSON.stringify(sps.senderConfig)}`);
                 let video = await MuxVideo({
                     sps: sps.nal,
                     pps: pps.nal,
@@ -274,9 +381,9 @@ class Receiver extends TimeServer implements IReceiver, IHost {
                 });
 
                 this.clientVideoSegment.SendValue({
+                    type: "live",
                     mp4Video: video,
                     baseMediaDecodeTimeInSeconds,
-                    durationSeconds: frameInfos.map(x => x.frameDurationInSeconds).reduce((x, y) => x + y, 0),
                     cameraRecordTimes: frames.map(x => x.type.type === "slice" ? x.type.frameRecordTime : -1),
                     frameSizes: frameInfos.map(x => x.buf.length),
                     cameraRecordTimesLists: frames.map(x => x.type.type === "slice" ? x.type.frameRecordTimes : []),
@@ -289,9 +396,10 @@ class Receiver extends TimeServer implements IReceiver, IHost {
                         fps: sps.senderConfig.fps,
                         formatId: sps.senderConfig.formatId
                     },
+                    sourceId: sps.senderConfig.sourceId
                 });
 
-                console.log(`Send muxed video`);
+                //console.log(`Send muxed video`);
             }
         } catch(e) {
             console.error(e);
@@ -304,6 +412,7 @@ class Receiver extends TimeServer implements IReceiver, IHost {
 }
 
 wsClass.HostServer(7060, new Receiver());
+
 
 //todonext
 /*

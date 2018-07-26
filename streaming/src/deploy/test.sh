@@ -1,9 +1,15 @@
-#node ./node_modules/nodemon/bin/nodemon.js --watch ./dist/sender.js ./dist/sender.js
+scp ./dist/sender.js pi@192.168.0.15:~/
 
-start bash -c "node ./dist/receiver.js"
+uname="$(uname)"
+if [ "$uname" == "Darwin" ]; then
+    node ./dist/receiver.js
+else
+    start bash -c "node ./dist/receiver.js"
+fi
 
-scp ./dist/sender.js pi@192.168.0.205:~/
 #start bash -c "node ./dist/senderWrap.js"
+
+#node ./node_modules/nodemon/bin/nodemon.js --watch ./dist/sender.js ./dist/sender.js
 # node sender.js &> sender.log &
 
 # node -p "setInterval(() => {}, 1000)" &> sender.log &

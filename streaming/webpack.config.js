@@ -2,6 +2,7 @@ var fs = require("fs");
 var webpack = require("webpack");
 var UglifyJsPlugin = require("uglifyjs-webpack-plugin");
 var Visualizer = require('webpack-visualizer-plugin');
+var nodeExternals = require('webpack-node-externals');
 
 module.exports = env => {
     return [getConfig(env)];
@@ -62,16 +63,19 @@ function getConfig (env) {
                 NODE: node
             }),
             new Visualizer()
-        ],
-
-        externals: {
-            "v4l2camera": "require('v4l2camera')"
-        }
+        ]
     };
 
     if (node) {
         obj["target"] = "node";
+        /*
+        obj["externals"] = [nodeExternals({
+            whitelist: ["v4l2camera"]
+        })];
+        */
     }
+    obj["externals"] = obj["externals"] || [];
+    obj["externals"].push({"v4l2camera": "require('v4l2camera')"});
 
     return obj;
 };

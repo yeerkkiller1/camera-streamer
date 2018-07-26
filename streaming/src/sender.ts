@@ -13,6 +13,7 @@ import { clock, setTimeServer, getTimeSynced } from "./util/time";
 
 import { ParseNalHeaderByte } from "mp4-typescript";
 import { createSimulatedFrame } from "./util/jpeg";
+import { randomUID } from "./util/rand";
 
 // Make sure we kill any previous instances
 console.log("pid", process.pid);
@@ -57,6 +58,8 @@ try {
     console.error(`Could not create v4l2camera.Camera on /dev/video0, closing process`);
     process.exit();
 }
+
+const sourceId = randomUID("camera");
 
 class StreamLoop {
     constructor(
@@ -195,7 +198,8 @@ class StreamLoop {
                         cameraSendTime: time,
                         timeOffset: curTime - time,
                         serverReceiveTime: 0,
-                        formatId
+                        formatId,
+                        sourceId
                     };
 
                     let b = nalUnit[0];
@@ -348,7 +352,7 @@ let server!: IReceiver;
 //wsClass.ThrottleConnections({ kbPerSecond: 200, latencyMs: 100 }, () => {
     server = wsClass.ConnectToServer<IReceiver>({
         port: 7060,
-        host: "192.168.0.202",
+        host: "192.168.0.19",
         bidirectionController: sender
     });
 //});
@@ -357,7 +361,7 @@ setTimeServer(server);
 
 sender.server = server;
 console.log("Calling ping");
-server.cameraPing();
+server.cameraPing(sourceId);
 //*/
 
 

@@ -1,4 +1,4 @@
-import { g } from "pchannel";
+import { g, PChan, TransformChannel, TransformChannelAsync } from "pchannel";
 g.NODE =  false;
 
 import * as React from "react";
@@ -52,8 +52,8 @@ class Main extends React.Component<{}, IState> {
     state: IState = {
         formats: [],
         // -1 is valid, we use this like: .slice(index)[0]
-        formatIndex: 6, // 0 = 640x480, 5 = 800x600, 6 = 1280x720, 7=1920x1080
-        requestedFPS: 10,
+        formatIndex: 0, // 0 = 640x480, 5 = 800x600, 6 = 1280x720, 7=1920x1080
+        requestedFPS: 1,
         iFrameRate: 2
     };
 
@@ -62,14 +62,21 @@ class Main extends React.Component<{}, IState> {
     videoStarted = false;
     videoElement: HTMLVideoElement|null|undefined;
 
-    componentWillMount() {
-        let server = ConnectToServer<IHost>({
-            port: 7060,
-            host: "localhost",
-            bidirectionController: this
-        });
-        setTimeServer(server);
+    server = ConnectToServer<IHost>({
+        port: 7060,
+        host: "localhost",
+        bidirectionController: this
+    });
 
+    constructor(...args: any[]) {
+        // This should be fixed in typescript 3.0 with https://github.com/Microsoft/TypeScript/issues/4130 .
+        //@ts-ignore
+        super(...args);
+
+        setTimeServer(this.server);
+    }
+
+    componentWillMount() {
         //todonext
         //  - Simulate connection lag, so we can start to figure out dynamic fps
         //  - Simulate connection closing, and add reconnection logic
@@ -78,26 +85,32 @@ class Main extends React.Component<{}, IState> {
         //  - ws-class is not handling closes properly, and still calling functions on closed zombie classes, so... we should fix that.
         //  - Cancelling an encoder that is really far behind isn't working. I should kill the process if it doesn't die fast enough.
 
-        // Hmm... the viewer should be able to set this info, but the receiver should also have some memory of
-        //  these values, as the camera should be running even if there is no webpage viewer.
         (async () => {
-            let formats = await server.getFormats();
-            this.setState({ formats });
+            /*
+            
+            //*/
+            //server.subscribeToCamera({time: "live", rate: 1});
 
-            let format = formats.slice(this.state.formatIndex)[0];
-            console.log(formats);
-
-            let fps = this.state.requestedFPS;
-
-            let bitrate = getBitRateMBPS(fps, format);
-            await server.setFormat(
-                fps,
-                this.state.iFrameRate,
-                bitrate,
-                format
-            );
-            server.subscribeToCamera();
+            let ranges = await this.server.getRecordTimeRanges({startTime: 0});
+            console.log(ranges);
         })();
+    }
+    async startCamera() {
+        let formats = await this.server.getFormats();
+        this.setState({ formats });
+
+        let format = formats.slice(this.state.formatIndex)[0];
+        console.log(formats);
+
+        let fps = this.state.requestedFPS;
+
+        let bitrate = getBitRateMBPS(fps, format);
+        await this.server.setFormat(
+            fps,
+            this.state.iFrameRate,
+            bitrate,
+            format
+        );
     }
     initVideo(vid: HTMLVideoElement|null) {
         if(!vid) return;
@@ -141,6 +154,16 @@ class Main extends React.Component<{}, IState> {
         push.addEventListener("sourceopen", async () => {
             var buf = push.addSourceBuffer('video/mp4; codecs="avc1.640028"');
             this.vidBuffer = buf;
+            let queue = this.updateEndQueue = new PChan<void>();
+            
+            const callback = () => {
+                if(this.updateEndQueue !== queue) {
+                    buf.removeEventListener("updatend", callback);
+                    return;
+                }
+                queue.SendValue(undefined);
+            };
+            this.vidBuffer.addEventListener("updateend", callback);
 
             buf.addEventListener("updateend", () => {
                 if(this.videoStarted) return;
@@ -165,7 +188,9 @@ class Main extends React.Component<{}, IState> {
     }
 
     acceptVideoSegment_VOID(info: VideoSegment): void {
-        info.clientReceiveTime = getTimeSynced();
+        if(info.type === "live") {
+            info.clientReceiveTime = getTimeSynced();
+        }
 
         for(let time of info.cameraRecordTimes) {
             this.frameTimes.push(time);
@@ -185,11 +210,23 @@ class Main extends React.Component<{}, IState> {
 
         if(this.vidBuffer) {
             console.log("Add buffer");
-            // TODO: Use updateend to let us only add once appendBuffer finishes
-            this.vidBuffer.appendBuffer(info.mp4Video);
-            
+            this.appendQueue(info.mp4Video);
         }
     }
+
+    updateEndQueue: PChan<void>|undefined;
+    
+    // TODO: If we ever call remove, we need to combine it in this loop, as both set updating to true.
+    appendQueue = TransformChannel<Buffer, void>(async (input) => {
+        if(!this.vidBuffer) {
+            console.log(`Ignoring video because vidBuffer hasn't been initialized yet.`);
+            return;
+        }
+        if(this.vidBuffer.updating) {
+            throw new Error(`appendQueue is broken, tried to add while vidBuffer is updating`);
+        }
+        this.vidBuffer.appendBuffer(input);
+    });
 
     renderTimes(): JSX.Element|null {
         let { latestSegment, latestSegmentURL } = this.state;
@@ -198,6 +235,10 @@ class Main extends React.Component<{}, IState> {
         console.log(`Render times`);
 
         let seg = latestSegment;
+
+        if(seg.type !== "live") {
+            return null;
+        }
         
         let recordDuration = seg.cameraRecordTimes[seg.cameraRecordTimes.length - 1] - seg.cameraRecordTimes[0];
 
@@ -257,7 +298,8 @@ class Main extends React.Component<{}, IState> {
         let encodeFrames = recLists.length;
 
         let prevSegment = this.state.prevSegment;
-        let lastTime = prevSegment ? prevSegment.cameraRecordTimesLists.last().last() : recLists[0][0];
+        
+        let lastTime = prevSegment && prevSegment.type === "live" ? prevSegment.cameraRecordTimesLists.last().last() : recLists[0][0];
         let sensorTime = recLists.last().last() - lastTime;
 
         let realLag = currentTime - videoPlayTime;
@@ -411,6 +453,7 @@ class Main extends React.Component<{}, IState> {
         return (
             <div>
                 <video id="vid" width="1200" controls ref={x => this.initVideo(x)}></video>
+                <button onClick={() => this.startCamera()}>Start Canera</button>
                 <div>
                     {this.renderTimes()}
                 </div>

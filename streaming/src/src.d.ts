@@ -43,6 +43,8 @@ interface NALHolder {
         serverReceiveTime: number;
         timeOffset: number;
         formatId: string;
+
+        sourceId: string;
     };
 }
 interface IReceiver extends
@@ -50,16 +52,37 @@ interface IReceiver extends
 ITimeServer {
     acceptNAL(info: NALHolder): void;
 
-    cameraPing(): void;
+    cameraPing(sourceId: string): void;
 }
 
+/** Milliseconds since epoch whatever */
+type VideoTime = number | "live";
+
+/** A range starts on the first frame after a camera connects, and ends on the last frame
+ *      received from the camera (or "live").
+ */
+type RecordTimeRange = { firstFrameTime: number, lastFrameTime: VideoTime };
 
 interface IHost extends
 //Bidirect<IHost, IBrowserReceiver>,
 ITimeServer {
     //subscribeToWebcamFrameInfo(): Promise<void>;
 
-    subscribeToCamera(): Promise<void>;
+    getRecordTimeRanges(info: {
+        /** We return one range before this time (if possible), and then up to 100 ranges after it. */
+        startTime: number;
+    }): Promise<{
+        ranges: RecordTimeRange[]
+    }>;
+
+    subscribeToCamera(info: {
+        time: VideoTime;
+        // time === "live" and rate !== 1 is invalid (what would that even mean?)
+        rate: number;
+    }): Promise<{
+        /** May be within 16 times of the requested rate. */
+        streamRate: number;
+    }>;
 
     getFormats(): Promise<v4l2camera.Format[]>;
     setFormat(
@@ -70,18 +93,28 @@ ITimeServer {
         format: v4l2camera.Format
     ): Promise<void>;
 }
-interface VideoSegment {
+
+type VideoSegment = VideoSegmentRecorded | LiveVideoSegment;
+
+interface VideoSegmentBase {
     mp4Video: Buffer;
     baseMediaDecodeTimeInSeconds: number;
-    durationSeconds: number;
-
+    cameraRecordTimes: number[];
+}
+interface VideoSegmentRecorded extends VideoSegmentBase {
+    type: "recorded";
+}
+interface LiveVideoSegment extends VideoSegmentBase {
+    type: "live";
+    mp4Video: Buffer;
+    baseMediaDecodeTimeInSeconds: number;
+    
     sourceInfo: {
         fps: number;
         formatId: string;
         // TODO: resolution
     };
 
-    cameraRecordTimes: number[];
     frameSizes: number[];
     cameraRecordTimesLists: number[][];
     cameraSendTimes: number[];
@@ -90,6 +123,8 @@ interface VideoSegment {
     clientReceiveTime: number;
 
     cameraTimeOffset: number;
+
+    sourceId: string;
 }
 interface IBrowserReceiver extends Controller<IBrowserReceiver> {
     //acceptWebcamFrameInfo_VOID(info: WebcamFrameInfo): void;
@@ -110,14 +145,3 @@ interface IBrowserReceiver extends Controller<IBrowserReceiver> {
 //  client
 //      display buffer
 //          builds up if the client clock is slower than the camera clock, so it thinks the frame time has not occured yet
-
-
-
-
-interface IEncodeCamera extends Bidirect<IEncodeCamera, IEncoder> {
-
-}
-
-interface IEncoder {
-
-}

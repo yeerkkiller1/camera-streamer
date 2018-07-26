@@ -16,7 +16,8 @@
     "jimp": "^0.2.28",
     "less": "^2.7.1",
     "less-loader": "^2.2.3",
-    "mp4-typescript": "^0.2.0",
+    "mp4-typescript": "^0.2.5",
+    "p-info": "^0.1.15",
     "pchannel": "^0.4.5",
     "prop-types": "^15.6.0",
     "react": "^16.2.0",
@@ -25,6 +26,7 @@
     "react-test-renderer": "^16.3.0",
     "source-map-loader": "^0.2.3",
     "style-loader": "^0.13.1",
+    "temp-folder": "^0.2.16",
     "ts-loader": "^3.1.1",
     "typescript": "^2.8.1",
     "webpack": "^3.8.1",
@@ -32,7 +34,11 @@
     "webpack-node-externals": "^1.7.2",
     "webpack-visualizer-plugin": "^0.1.11",
     "ws": "^3.2.0",
-    "ws-class": "^0.5.3"
+    "ws-class": "^0.5.7"
+  },
+  "resolutions": {
+    "temp-folder/p-info": "0.1.15",
+    "ws-class/pchannel": "0.4.5"
   },
   "optionalDependencies": {
     "v4l2camera": "git+https://github.com/yeerkkiller1/node-v4l2camera.git"
