@@ -10,7 +10,11 @@ import { setTimeServer, getTimeSynced } from "../util/time";
 import { PropsListify } from "../util/PropsListify";
 import { PixelGraph, Color } from "../util/PixelGraph";
 import { min, max, sum } from "../util/math";
-import { isFunction } from "util";
+
+// For polyfills
+import "../util/math";
+import { binarySearchMapped } from "../util/algorithms";
+import { formatDuration } from "../util/format";
 
 
 function getBitRateMBPS(fps: number, format: v4l2camera.Format) {
@@ -47,19 +51,43 @@ interface IState {
     formatIndex: number;
     requestedFPS: number;
     iFrameRate: number;
+    bitrateMbps: number;
+
+    /** Sorted by firstFrameTime. */
+    recordedRanges: TimeRange[];
 }
 class Main extends React.Component<{}, IState> {
     state: IState = {
         formats: [],
         // -1 is valid, we use this like: .slice(index)[0]
+        /*
         formatIndex: 0, // 0 = 640x480, 5 = 800x600, 6 = 1280x720, 7=1920x1080
-        requestedFPS: 1,
-        iFrameRate: 2
+        requestedFPS: 3,
+        iFrameRate: 2,
+        bitrateMbps: 10 / 1000,
+        //*/
+
+        // Full resoluation, max fps, low quality
+        /* This appears to work well, although IF a get a better camera I might want to lower the fps
+        //      increase the iFrameRate, and increase the bitrate.
+        formatIndex: -1, // 0 = 640x480, 5 = 800x600, 6 = 1280x720, 7=1920x1080
+        requestedFPS: 5,
+        iFrameRate: 5,
+        bitrateMbps: 10 / 1000,
+        //*/
+
+        // Full resolution, low fps, max quality
+        //*
+        formatIndex: -1, // 0 = 640x480, 5 = 800x600, 6 = 1280x720, 7=1920x1080
+        requestedFPS: 0.5,
+        iFrameRate: 2,
+        bitrateMbps: 8,
+        //*/
+
+        recordedRanges: []
     };
 
-    vidStartTime: number|undefined;
     vidBuffer: SourceBuffer|undefined;
-    videoStarted = false;
     videoElement: HTMLVideoElement|null|undefined;
 
     server = ConnectToServer<IHost>({
@@ -76,6 +104,20 @@ class Main extends React.Component<{}, IState> {
         setTimeServer(this.server);
     }
 
+    unmountCallbacks: (() => void)[] = [];
+    componentDidMount() {
+        this.syncRanges();
+    }
+    componentWillUnmount() {
+        for(let callback of this.unmountCallbacks) {
+            try {
+                callback();
+            } catch(e) {
+                console.error(`Error in unmountCallbacks`);
+            }
+        }
+    }
+
     componentWillMount() {
         //todonext
         //  - Simulate connection lag, so we can start to figure out dynamic fps
@@ -84,16 +126,6 @@ class Main extends React.Component<{}, IState> {
         //  - And turn off the server, and make sure that relaunches
         //  - ws-class is not handling closes properly, and still calling functions on closed zombie classes, so... we should fix that.
         //  - Cancelling an encoder that is really far behind isn't working. I should kill the process if it doesn't die fast enough.
-
-        (async () => {
-            /*
-            
-            //*/
-            //server.subscribeToCamera({time: "live", rate: 1});
-
-            let ranges = await this.server.getRecordTimeRanges({startTime: 0});
-            console.log(ranges);
-        })();
     }
     async startCamera() {
         let formats = await this.server.getFormats();
@@ -108,10 +140,68 @@ class Main extends React.Component<{}, IState> {
         await this.server.setFormat(
             fps,
             this.state.iFrameRate,
-            bitrate,
+            this.state.bitrateMbps,
             format
         );
     }
+
+    async syncRanges() {
+        // Get the last day, then keep trying to extend past the last day.
+        const syncMore = async () => {
+            if(this.state.recordedRanges.length === 0) {
+                let lastTime = +new Date();
+                let firstTime = lastTime - 1000 * 60 * 60 * 24;
+                await this.syncRecordTimes(firstTime, lastTime);
+            } else {
+                let last = this.state.recordedRanges.last();
+                let startTime = last.lastFrameTime;
+                if(startTime === "live") {
+                    startTime = last.firstFrameTime;
+                }
+                await this.syncRecordTimes(startTime, +new Date());
+            }
+
+            setTimeout(syncMore, 5000);
+        };
+        syncMore();
+    }
+    async syncRecordTimes(startTime: number, lastTime: number) {
+        while(true) {
+            let ranges = (await this.server.getTimeRanges({startTime: startTime})).ranges;
+            console.log({ranges});
+
+            this.addRanges(ranges);
+
+            if(ranges.length === 0) break;
+            let last = ranges.last();
+            if(last.lastFrameTime === "live") break;
+            if(last.lastFrameTime >= lastTime) break;
+            // Prevent infinite loops, because my range lookup function is wrong.
+            if(last.lastFrameTime === startTime) break;
+
+            startTime = last.lastFrameTime;
+        }
+    }
+    private addRanges(ranges: TimeRange[]) {
+        if(ranges.length === 0) return;
+
+        let recordedRanges = this.state.recordedRanges;
+
+        for(let range of ranges) {
+            // Eh... you can merge two sorted lists faster than this, but... this will be fast enough.
+            let index = binarySearchMapped(recordedRanges, range.firstFrameTime, x => x.firstFrameTime, (a, b) => a - b);
+            if(index >= 0) {
+                recordedRanges[index] = range;
+                continue;
+            }
+            index = ~index;
+            recordedRanges.splice(index, 0, range);
+        }
+
+        this.setState({recordedRanges});
+    }
+
+
     initVideo(vid: HTMLVideoElement|null) {
         if(!vid) return;
         if(this.videoElement === vid) return;
@@ -129,7 +219,7 @@ class Main extends React.Component<{}, IState> {
             if(this.videoElement !== vid) return;
 
             let seg = this.state.latestSegment;
-            if(seg) {
+            if(seg && seg.type === "live") {
                 let firstTime = seg.cameraRecordTimes[0];
                 if(vid.currentTime * 1000 + maxClientsideBuffer < firstTime) {
                     console.log(`Moving video up to current time, because client side buffer time got too high (above ${maxClientsideBuffer})`);
@@ -164,14 +254,6 @@ class Main extends React.Component<{}, IState> {
                 queue.SendValue(undefined);
             };
             this.vidBuffer.addEventListener("updateend", callback);
-
-            buf.addEventListener("updateend", () => {
-                if(this.videoStarted) return;
-                this.videoStarted = true;
-                console.log("Trying to play");
-                vid.currentTime = this.vidStartTime || 0;
-                vid.play();
-            });
         });
     }
 
@@ -203,11 +285,6 @@ class Main extends React.Component<{}, IState> {
 
         this.setState({ latestSegment: info, prevSegment: this.state.latestSegment, latestSegmentURL });
 
-        if(this.vidStartTime === undefined) {
-            console.log("Init start time");
-            this.vidStartTime = info.baseMediaDecodeTimeInSeconds;
-        }
-
         if(this.vidBuffer) {
             console.log("Add buffer");
             this.appendQueue(info.mp4Video);
@@ -215,10 +292,11 @@ class Main extends React.Component<{}, IState> {
     }
 
     updateEndQueue: PChan<void>|undefined;
+    nextPlayTime: number|undefined;
     
     // TODO: If we ever call remove, we need to combine it in this loop, as both set updating to true.
     appendQueue = TransformChannel<Buffer, void>(async (input) => {
-        if(!this.vidBuffer) {
+        if(!this.videoElement || !this.vidBuffer || !this.updateEndQueue) {
             console.log(`Ignoring video because vidBuffer hasn't been initialized yet.`);
             return;
         }
@@ -226,62 +304,32 @@ class Main extends React.Component<{}, IState> {
             throw new Error(`appendQueue is broken, tried to add while vidBuffer is updating`);
         }
         this.vidBuffer.appendBuffer(input);
+
+        await this.updateEndQueue.GetPromise();
+
+        if(this.nextPlayTime) {
+            this.videoElement.currentTime = this.nextPlayTime / 1000;
+            this.videoElement.play();
+            this.nextPlayTime = undefined;
+        }
     });
 
     renderTimes(): JSX.Element|null {
         let { latestSegment, latestSegmentURL } = this.state;
-        if(!latestSegment || !this.videoElement || !this.videoStarted) return null;
+        if(!latestSegment || !this.videoElement) return null;
 
         console.log(`Render times`);
 
         let seg = latestSegment;
 
-        if(seg.type !== "live") {
-            return null;
-        }
-        
         let recordDuration = seg.cameraRecordTimes[seg.cameraRecordTimes.length - 1] - seg.cameraRecordTimes[0];
 
-        let cameraEncodeStartDelay = seg.cameraSendTimes[0] - seg.cameraRecordTimes[0];
-        // A bit less than real encode time, because the line between time until encode and encode time is blurred.
-        let cameraEncodeTime = seg.cameraRecordTimes[seg.cameraRecordTimes.length - 1] - seg.cameraRecordTimes[0];
+        if(seg.type !== "live") {
+            
+        }
 
-        let cameraSendDelay = seg.serverReceiveTime[0] - seg.cameraSendTimes[0];
-        let cameraSendTime = seg.serverReceiveTime[seg.serverReceiveTime.length - 1] - seg.serverReceiveTime[0];
-
-        let serverSendDelay = seg.serverSendTime - seg.serverReceiveTime[seg.serverReceiveTime.length - 1];
-        let serverSendDuration = seg.clientReceiveTime - seg.serverSendTime;
-
-        let clientBufferedTime = seg.cameraRecordTimes[0] - this.videoElement.currentTime * 1000;
-        let videoPlayLocalLag = Date.now() - this.videoElement.currentTime * 1000;
-        let videoPlayRealLag = getTimeSynced() - this.videoElement.currentTime * 1000;
-        let offsetToServer = getTimeSynced() - Date.now();
-
-        let cameraTimeOffset = seg.cameraTimeOffset;       
-
-        let displayData: {[key: string]: number} = {
-            recordDuration,
-            cameraEncodeStartDelay,
-            cameraEncodeTime,
-            cameraSendDelay,
-            cameraSendTime,
-            serverSendDelay,
-            serverSendDuration,
-            clientBufferedTime,
-            videoPlayLocalLag,
-            videoPlayRealLag,
-            offsetToServer,
-            cameraTimeOffset
-        };
 
         let recordStart = seg.cameraRecordTimes[0];
-        let recordEnd = seg.cameraRecordTimes[seg.cameraRecordTimes.length - 1];
-        let encodeStart = seg.cameraSendTimes[0];
-        let encodeEnd = seg.cameraSendTimes[seg.cameraSendTimes.length - 1];
-
-        let serverReceiveTimeStart = seg.serverReceiveTime[0];
-        let serverReceiveTimeEnd = seg.serverReceiveTime[seg.serverReceiveTime.length - 1];
-        let serverSendTime = seg.serverSendTime;
         let videoPlayTime = this.videoElement.currentTime * 1000;
         let currentTime = getTimeSynced();
 
@@ -293,13 +341,13 @@ class Main extends React.Component<{}, IState> {
         // Also some bitrate indicators?
 
         // For testing lag: http://output.jsbin.com/yewodox
-        let recLists = seg.cameraRecordTimesLists;
+        let recLists = seg.type === "live" ? seg.cameraRecordTimesLists : seg.cameraRecordTimes.map(x => [x]);
         let sensorFrames = sum(recLists.map(x => x.length));
         let encodeFrames = recLists.length;
 
         let prevSegment = this.state.prevSegment;
         
-        let lastTime = prevSegment && prevSegment.type === "live" ? prevSegment.cameraRecordTimesLists.last().last() : recLists[0][0];
+        let lastTime = prevSegment ? prevSegment.type === "live" ? prevSegment.cameraRecordTimesLists.last().last() : prevSegment.cameraRecordTimes.last() : recLists[0][0];
         let sensorTime = recLists.last().last() - lastTime;
 
         let realLag = currentTime - videoPlayTime;
@@ -309,17 +357,13 @@ class Main extends React.Component<{}, IState> {
         //  so it's hard to determine what is taking time. ALSO, there is lots of latency, so we can't just
         //  measure active time, as sometimes things just add a certain amount of lag, but have a lot of bandwidth,
         //  and bandwidth vs lag measurements are hard...
-        let timeOnCamera = seg.cameraSendTimes.last() - seg.cameraRecordTimes[0];
+        let timeOnCamera = seg.type === "live" ? seg.cameraSendTimes.last() - seg.cameraRecordTimes[0] : 0;
 
         // Bitrate calculations
         let bytes = seg.mp4Video.length;
 
+        let frameSize = seg.mp4Video.length / seg.cameraRecordTimes.length;
 
-        //todonext
-        // We are just going to have to show the time spent on each device
-        
-        
-        let cameraToServerTransferTime = sum(seg.cameraSendTimes.map((sendTime, i) => seg.cameraRecordTimes[i] - sendTime));
 
         return (
             <div>
@@ -329,19 +373,21 @@ class Main extends React.Component<{}, IState> {
                         <div>Client side buffer {clientSideBuffer.toFixed(0)}ms</div>
                     </div>
                 </div>
-                <div>
+                {seg.type === "live" && <div>
                     <div>Sensor Time: {sensorTime.toFixed(0)}ms (Recorded {encodeFrames} out of {sensorFrames}) (Recorded {(encodeFrames / sensorTime * 1000).toFixed(1)} FPS out of {(sensorFrames / sensorTime * 1000).toFixed(1)} FPS)</div>
                     <div className="indent">
                         <div>Time on camera: {timeOnCamera.toFixed(0)}ms</div>
                     </div>
-                </div>
+                </div>}
                 <div>
-                    <div>Chunk bytes size: {bytes}</div>
-                    <div>
+                    <div>Frame bytes size: {(frameSize / 1024).toFixed(1)}KB</div>
+                    <div>Chunk frames {seg.cameraRecordTimes.length}</div>
+                    <div>Chunk bytes size: {(bytes / 1024).toFixed(1)}KB</div>
+                    {seg.type === "live" && <div>
                         {seg.frameSizes.join(", ")}
-                    </div>
+                    </div>}
                     <div>
-                        {bytes / sensorTime * 1000 / 1024} KB/s
+                        {(bytes / sensorTime * 1000 / 1024).toFixed(0)} KB/s
                     </div>
                 </div>
                 <div>
@@ -353,107 +399,80 @@ class Main extends React.Component<{}, IState> {
         );
 
 
-        /*
-        let timeProps: { [key: string]: number } = {
-            recordStart,
-            recordEnd,
-            encodeStart,
-            encodeEnd,
-            serverReceiveTimeStart,
-            serverReceiveTimeEnd,
-            serverSendTime,
-            videoPlayTime,
-            currentTime
-        };
+    }
 
-        let start = recordStart;
-        for(let key in timeProps) {
-            timeProps[key] -= start;
+    async clickTimeBar(e: React.MouseEvent<HTMLDivElement>, range: TimeRange) {
+        let now = Date.now();
+
+        let elem = e.target as HTMLDivElement;
+        let rect = elem.getBoundingClientRect();
+
+        let fraction = (e.clientX - rect.left) / rect.width;
+
+        let end = range.lastFrameTime;
+        if(end === "live") {
+            end = now;
         }
+        let offsetTime = (end - range.firstFrameTime) * fraction;
+        let time = range.firstFrameTime + offsetTime;
+        let timeAgo = formatDuration(now - time);
+
+        console.log(`${timeAgo} AGO`);
+        this.nextPlayTime = time;
+        await this.server.subscribeToCamera({
+            time: time,
+            rate: 1
+        });
+    }
+    async streamLive() {
+        this.nextPlayTime = Date.now();
+        await this.server.subscribeToCamera({ time: "live", rate: 1 });
+    }
+
+    renderPlayInfo(): JSX.Element|null {
+        if(!this.videoElement) return null;
+
+        let now = Date.now();
+        let videoPlayTime = this.videoElement.currentTime * 1000;
+        let lag = now - videoPlayTime;
+
+        let seg = this.state.latestSegment;
+
 
         return (
             <div>
-                <PropsListify
-                    value={timeProps}
-                    listSize={50}
-                    renderFnc={list => {
-                        let minValue = min(list.map(x => min(Object.values(x))));
-                        let maxValue = max(list.map(x => max(Object.values(x))));
-
-                        let colors: Color[] = [
-                            { h: 0, s: 0.75, l: 0.75, a: 1 },
-                            { h: 30, s: 0.75, l: 0.75, a: 1 },
-                            { h: 60, s: 0.75, l: 0.75, a: 1 },
-                            { h: 90, s: 0.75, l: 0.75, a: 1 },
-                            { h: 120, s: 0.75, l: 0.75, a: 1 },
-                            { h: 150, s: 0.75, l: 0.75, a: 1 },
-                            { h: 180, s: 0.75, l: 0.75, a: 1 },
-                            { h: 210, s: 0.75, l: 0.75, a: 1 },
-                            { h: 240, s: 0.75, l: 0.75, a: 1 },
-                            { h: 270, s: 0.75, l: 0.75, a: 1 },
-                            { h: 300, s: 0.75, l: 0.75, a: 1 },
-                            { h: 330, s: 0.75, l: 0.75, a: 1 },
-                        ];
-
-                        let keys = Object.keys(timeProps);
-                        let lists: { key: string, values: number[], color: Color }[] = [];
-                        for(let i = 0; i < keys.length; i++) {
-                            let key = keys[i];
-                            let color = colors[i];
-                            lists.push({
-                                key,
-                                color,
-                                values: list.map(x => x[key])
-                            });
-                        }
-
-                        return (
-                            <div>
-                                <div>
-                                    <PixelGraph
-                                        minY={minValue}
-                                        maxY={maxValue}
-                                        heightInPixels={100}
-                                        lineWidth={10}
-                                        lines={
-                                            lists.map(x => ({
-                                                color: x.color,
-                                                data: x.values
-                                            })) as any
-                                        }
-                                    />
-                                </div>
-                                <div>
-                                    {JSON.stringify(list)}
-                                </div>
-                            </div>
-                        );
-                    }}
-                />
-                {
-                    Object.keys(displayData).map(key => {
-                        let value = displayData[key];
-
-                        return (
-                            <div key={key}>
-                                {key}: {value}
-                            </div>
-                        );
-                    })
-                }
+                <div>Playing {formatDuration(lag)} AGO</div>
             </div>
         );
-        */
     }
 
     render() {
-        let { formats, formatIndex } = this.state;
+        let { formats, formatIndex, recordedRanges } = this.state;
         let selectedFormat = formats.slice(formatIndex)[0];
 
+        let now = Date.now();
+        
         return (
             <div>
                 <video id="vid" width="1200" controls ref={x => this.initVideo(x)}></video>
-                <button onClick={() => this.startCamera()}>Start Canera</button>
+                <button onClick={() => this.startCamera()}>Start Camera</button>
+                <button onClick={() => this.streamLive()}>Watch Live</button>
+                <div>
+                    {this.renderPlayInfo()}
+                </div>
+                <div>
+                    {
+                        recordedRanges.map((range, index) => (
+                            <div
+                                key={index}
+                                style={{backgroundColor: "hsla(193, 75%, 75%, 1)", margin: "2px", width: "400px"}}
+                                onClick={(e) => this.clickTimeBar(e, range)}
+                            >
+                                {formatDuration(now - range.firstFrameTime)} AGO, TOOK {range.lastFrameTime === "live" ? "live" : formatDuration(range.lastFrameTime - range.firstFrameTime)}
+                            </div>
+                        ))
+                    }
+                </div>
                 <div>
                     {this.renderTimes()}
                 </div>

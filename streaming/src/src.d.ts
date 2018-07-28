@@ -61,18 +61,19 @@ type VideoTime = number | "live";
 /** A range starts on the first frame after a camera connects, and ends on the last frame
  *      received from the camera (or "live").
  */
-type RecordTimeRange = { firstFrameTime: number, lastFrameTime: VideoTime };
+type TimeRange = { firstFrameTime: number, lastFrameTime: VideoTime };
+type RecordTimeRange = { firstFrameTime: number, lastFrameTime: number };
 
 interface IHost extends
 //Bidirect<IHost, IBrowserReceiver>,
 ITimeServer {
     //subscribeToWebcamFrameInfo(): Promise<void>;
 
-    getRecordTimeRanges(info: {
-        /** We return one range before this time (if possible), and then up to 100 ranges after it. */
+    getTimeRanges(info: {
+        /** Returns the range starting at this time (or the first before) and then up to 100 ranges after it. */
         startTime: number;
     }): Promise<{
-        ranges: RecordTimeRange[]
+        ranges: TimeRange[];
     }>;
 
     subscribeToCamera(info: {
@@ -94,15 +95,16 @@ ITimeServer {
     ): Promise<void>;
 }
 
-type VideoSegment = VideoSegmentRecorded | LiveVideoSegment;
+type VideoSegment = RecordedVideoSegment | LiveVideoSegment;
 
 interface VideoSegmentBase {
     mp4Video: Buffer;
     baseMediaDecodeTimeInSeconds: number;
     cameraRecordTimes: number[];
 }
-interface VideoSegmentRecorded extends VideoSegmentBase {
+interface RecordedVideoSegment extends VideoSegmentBase {
     type: "recorded";
+    rate: number;
 }
 interface LiveVideoSegment extends VideoSegmentBase {
     type: "live";
@@ -126,9 +128,13 @@ interface LiveVideoSegment extends VideoSegmentBase {
 
     sourceId: string;
 }
-interface IBrowserReceiver extends Controller<IBrowserReceiver> {
-    //acceptWebcamFrameInfo_VOID(info: WebcamFrameInfo): void;
+
+interface IVideoAcceptor {
     acceptVideoSegment_VOID(info: VideoSegment): void;
+}
+interface IBrowserReceiver extends Controller<IBrowserReceiver>, IVideoAcceptor {
+    //acceptWebcamFrameInfo_VOID(info: WebcamFrameInfo): void;
+    
 }
 
 // There are some potential buffers that could build up:

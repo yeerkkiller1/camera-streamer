@@ -11,7 +11,7 @@ import { splitByStartCodes } from "./receiver/startCodes";
 import { encodeJpegFrames } from "./receiver/encodeNals";
 import { clock, setTimeServer, getTimeSynced } from "./util/time";
 
-import { ParseNalHeaderByte } from "mp4-typescript";
+import { ParseNalHeaderByte, ParseNalInfo } from "mp4-typescript";
 import { createSimulatedFrame } from "./util/jpeg";
 import { randomUID } from "./util/rand";
 
@@ -135,14 +135,13 @@ class StreamLoop {
         frameLoop();
 
 
-        let frameDuration = 1000 / fps;
-        let nextFrameTime = clock() + frameDuration;
-
         let outputJpegFrameTimes: number[][] = [];
 
         // Downsample to the requested FPS.
         let jpegFramePipe = TransformChannelAsync<{frame: Buffer; frameTime: number}, Buffer>(async ({inputChan, outputChan}) => {
             let curFrameTimes: number[] = [];
+            let frameDuration = 1000 / fps;
+            let nextFrameTime = clock() + frameDuration;
             let curLag = 0;
             while(true) {
                 let frameObj = await inputChan.GetPromise();
@@ -187,6 +186,9 @@ class StreamLoop {
 
         (async () => {
             try {
+                let currentSps: Buffer|undefined;
+                let currentPps: Buffer|undefined;
+
                 while(true) {
                     let nalUnit = await nalUnits.GetPromise();
 
@@ -205,6 +207,34 @@ class StreamLoop {
                     let b = nalUnit[0];
                     let type = ParseNalHeaderByte(b);
                     if(type === "slice") {
+                        let nalDetailedInfo = ParseNalInfo(nalUnit);
+                        if(nalDetailedInfo.type !== "slice") {
+                            throw new Error(`ParseNalHeaderByte and ParseNalInfo give different types. ParseNalHeaderByte gave slice, ParseNalInfo gave ${nalDetailedInfo.type}`);
+                        }
+
+                        // Every I frame should start with an sps, and pps. They are super small (easily less than 30 bytes combined),
+                        //  and this makes it easier to split up the video nicely (making sure every segment starts with an I frame),
+                        //  by making more starting points, and making starting points easier to find (as spses are easier to identify
+                        //  than I frames, as they just require reading the first byte of data).
+                        if(nalDetailedInfo.sliceType === "I") {
+                            if(currentSps === undefined) {
+                                throw new Error(`Received I frame without first receiving an SPS. How do we interpret this?`);
+                            }
+                            if(currentPps === undefined) {
+                                throw new Error(`Received I frame without first receiving a PPS. How do we interpret this?`);
+                            }
+                            receiver.acceptNAL({
+                                nal: currentSps,
+                                type: { type: "sps" },
+                                senderConfig
+                            });
+                            receiver.acceptNAL({
+                                nal: currentPps,
+                                type: { type: "pps" },
+                                senderConfig
+                            });
+                        }
+
                         let frameRecordTimes = outputJpegFrameTimes.shift();
                         if(frameRecordTimes === undefined) {
                             console.error("Frames timings messed up, received more frames than frames pushed");
@@ -222,11 +252,12 @@ class StreamLoop {
                             senderConfig
                         });
                     } else if(type === "sps" || type === "pps") {
-                        receiver.acceptNAL({
-                            nal: nalUnit,
-                            type: { type: type },
-                            senderConfig
-                        });
+                        if(type === "sps") {
+                            currentSps = nalUnit;
+                        }
+                        if(type === "pps") {
+                            currentPps = nalUnit;
+                        }
                     } else {
                         console.log(`Unknown NAL of size ${nalUnit.length}, type ${type}. Not sending to receiver, as unknown types will probably break it.`);
                     }

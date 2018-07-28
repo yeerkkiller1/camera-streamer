@@ -2,7 +2,7 @@ import * as wsClass from "ws-class";
 
 import { PChan, pchan, TransformChannel, TransformChannelAsync, Deferred, g } from "pchannel";
 
-import { CreateVideo, MuxVideo } from "mp4-typescript";
+import { CreateVideo, MuxVideo, ParseNalInfo } from "mp4-typescript";
 import { mkdir, writeFile, writeFileSync, readFileSync } from "fs";
 
 import * as net from "net";
@@ -15,6 +15,7 @@ import { CreateTempFolderPath } from "temp-folder";
 
 // For polyfills
 import "./util/math";
+import { binarySearchMapped } from "./util/algorithms";
 
 console.log("pid", process.pid);
 makeProcessSingle("receiver");
@@ -23,6 +24,30 @@ setInterval(() => {
     console.log("alive2");
 }, 60000);
 
+/*
+pi setup code:
+// Looks like there is no frame reordering... so this will work! And I think if we assume no reordering, certain
+//  pps, pps, and frame orders and rates (and we specify the rate with periodicty-idr), we don't need any mp4-typescript parsing
+//  in the main streamer/receiver code (besides start code checking, which is probably all [0,0,0,1] anyway) (so it will be fast).
+//  /etc/ssh/sshd_config, PasswordAuthentication no
+//  cat >> ~/.ssh/authorized_keys (put public key here)
+//  2017-11-29-raspbian-stretch.img
+//  gst-launch-1.0 version 1.10.4
+//  GStreamer 1.10.4
+//  http://packages.qa.debian.org/gstreamer1.0
+// sudo apt install gstreamer-1.0
+// sudo apt install gstreamer1.0-tools
+// sudo apt-get install libav-tools
+// gst-inspect-1.0 avenc_h264_omx
+
+
+// gst-inspect-1.0 omxh264enc
+// time gst-launch-1.0 -vv -e v4l2src device=/dev/video0 ! capsfilter caps="image/jpeg,width=1920,height=1080,framerate=30/1" ! jpegdec ! omxh264enc target-bitrate=15000000 control-rate=variable periodicty-idr=10 ! video/x-h264, profile=high ! tcpclientsink port=3000 host=192.168.0.202
+
+// time gst-launch-1.0 -vv -e v4l2src device=/dev/video0 num-buffers=90 ! capsfilter caps="image/jpeg,width=1920,height=1080,framerate=30/1" ! jpegdec ! omxh264enc target-bitrate=15000000 control-rate=variable ! video/x-h264, profile=high ! filesink location="test.mp4"
+
+// time gst-launch-1.0 -vv -e multifilesrc location="frame%d.jpeg" ! capsfilter caps="image/jpeg,width=1920,height=1080,framerate=30/1" ! jpegdec ! omxh264enc target-bitrate=15000000 control-rate=variable ! video/x-h264, profile=high ! filesink location="test.mp4"
+*/
 
 //todonext
 // Bundle these and pass them to the client.
@@ -119,6 +144,103 @@ class PChannelMultiListen<T> implements PChanSend<T> {
     }
 }
 
+// We store nal units (1 nal = 1 Buffer form, sps and pps easily available per buffer, with info on slice type),
+//  and then dynamically mux depending on what the client requests.
+
+// 200KB/s source, looking like 40KB per frame.
+//  (this should be configurable, because I definitely might change it.)
+//  Live, source rate
+//      - Short term storage, 30 days. Regular S3. 200KB/s will use 500GB a month, so ~$11.5 per month.
+//  1/10 source
+//      - Long term storage, 180 days, glacier S3. So 300GB at once, which is ~$1.2 per month.
+//  1/100
+//      - Forever. Glacier S3. +60GB a year, so $0.24 per month after 1 year, $2.4 per month after 10 years.
+
+// 5.7 days at 200KB/s (100GB) from glacier (or infrequent access) costs about $3 for 1-5 minutes access time,
+//  $1 for 3-5 hours to access, and $0.25 for 5-12 hours to access.
+
+// Expedited retrievals cost $0.03 per GB and $0.01 per request. Standard retrievals cost $0.01 per GB and $0.05 per
+//  1,000 requests. Bulk retrievals cost $0.0025 per GB and $0.025 per 1,000 requests.
+
+// Okay, so... we probably want data older than a month to require explicitly requesting a time period and rate, saying expedited or not
+//  and then getting a notification when it finishes transferring the data to regular S3 (or just the digital ocean server?)
+
+// 1 hour at 60fps is 216000, at 40KB per frame that is around 8GB
+
+// Use cases.
+//  - Living streaming. Likely going to be on 24/7, and should forcefully not use S3, as going to S3 or back will cost a lot of money.
+//  - Watching historical video. Always at 60fps (if the data is avilable), because if the user is watching it, they will see all the frames.
+//      - There will probably be 3 tiers of video. Super high rate, high rate, and then realtime, but I'm not sure the rates of these.
+
+
+/*
+Data Returned by S3 Select	$0.0007 per GB
+Data Scanned by S3 Select	$0.002 per GB
+PUT, COPY, POST, or LIST Requests	$0.005 per 1,000 requests
+GET, SELECT and all other Requests	$0.0004 per 1,000 requests
+Lifecycle Transition Requests into Standard – Infrequent Access or One Zone - Infrequent Access	$0.01 per 1,000 requests
+*/
+
+/*
+S3 Standard Storage
+First 50 TB / Month	$0.023 per GB
+Next 450 TB / Month	$0.022 per GB
+Over 500 TB / Month	$0.021 per GB
+
+$5 digital ocean instance has a 25GB HDD, and 25GB S3 standard would cost $0.115 per month.
+
+S3 Standard-Infrequent Access (S3 Standard-IA) Storage
+All storage	$0.0125 per GB
+
+S3 One Zone-Infrequent Access (S3 One Zone-IA) Storage
+All storage	$0.01 per GB
+
+Amazon Glacier Storage
+All storage	$0.004 per GB
+*/
+
+// Storage sources, with ranges of NALs and the sample rates of them. Random access 
+
+// The server needs to remux, because we don't want to send the client weird videos.
+//  This means usually the server should stream video the client at the exact fps and speed the client
+//  wants it. If the client changes the speed and then seeks, the client can just change the fps to get it
+//  to work (via video.playbackRate), or just request all new video. The server will always be muxing
+//  on demand, so for new video you should always request the speed you want, as it should take the server
+//  no effort to switch the video rate (it should literally just require changing 1 variable).
+
+// TODO: Allow live streaming on the local network, at variable (max) fps.
+// TODO: Store the last 10GB or so on the camera, to allow viewing of short term video at a high fps.
+// TODO: We actually want to be able to turn up the live fps dynamically, so we can have good video
+//  for a short period of time (but not too long, or our internet will start to get throttled, and we'll use
+//  5TB a month, at only 10fps).
+
+// Parts:
+//  NAL acceptor
+//      - stores nals
+//      - creates emitters which read from it's storage
+//  NAL emitter
+//  NAL muxers
+//      - takers emitter, and muxers it to a client
+
+// There should probably be a "get single live jpeg image" test function, so you can see the quality
+//  degradation from encoding, and the maximum theoretical video quality.
+
+class Muxer {
+    constructor(public readonly rate: number) { }
+
+    public AcceptNAL(nal: NALHolder) {
+
+    }
+
+    public async Subscribe(args: {
+        time: VideoTime;
+        rate: number;
+        client: IVideoAcceptor
+    }): Promise<void> {
+
+    }
+}
+
 class Receiver extends TimeServer implements IReceiver, IHost {
     // Eh... might as well use &, because we can't narrow the type anyway, as this property
     //  will be a proxy, and I haven't implemented the in operator yet!
@@ -128,7 +250,7 @@ class Receiver extends TimeServer implements IReceiver, IHost {
     cameraClient = new Deferred<ISender>();
     curFormatId = randomUID("format");
 
-    // If it is a string it is the sourceId of a client that closed.
+    // If it is a string it is the sourceId of a camera that closed.
     liveDataChan = new PChan<LiveVideoSegment|string>();
 
     constructor() {
@@ -175,36 +297,31 @@ class Receiver extends TimeServer implements IReceiver, IHost {
         });
     }
 
-    private pendingSegmentStart: number|undefined;
+    /** Sorted by startTime */
     private timeRanges: {
-        range: RecordTimeRange
+        time: TimeRange;
+        segments: RecordedVideoSegment[];
     }[] = [];
-    private async storeLiveData(segments: PChanReceive<LiveVideoSegment|string>) {
+    private async storeLiveData(segmentsChan: PChanReceive<LiveVideoSegment|string>) {
         while(true) {
+            //todonext
+            // Sped up video. We can combine videos with the same sps and pps
+
             let lastSourceId: string|undefined;
-            let lastFrameTime: number|undefined;
 
             const finishSegment = () => {
-                if(!this.pendingSegmentStart || !lastFrameTime) return;
+                if(this.timeRanges.length === 0 || this.timeRanges.last().time.lastFrameTime !== "live") return;
                 console.log("Segment finished");
-                this.timeRanges.push({
-                    range: {
-                        firstFrameTime: this.pendingSegmentStart,
-                        lastFrameTime: lastFrameTime
-                    }
-                });
-                lastSourceId = undefined;
-                this.pendingSegmentStart = undefined;
-                lastFrameTime = undefined;
+                let liveSegments = this.timeRanges.last();
+                liveSegments.time.lastFrameTime = liveSegments.segments.last().cameraRecordTimes.last();
             };
             
             while(true) {
-                let segment = await segments.GetPromise();
+                let segment = await segmentsChan.GetPromise();
                 if(typeof segment === "string") {
                     console.log(`Closed ${segment}, current ${lastSourceId}`);
                     if(segment === lastSourceId) {
                         finishSegment();
-                        this.pendingSegmentStart = undefined;
                     }
                     continue;
                 }
@@ -215,50 +332,200 @@ class Receiver extends TimeServer implements IReceiver, IHost {
                     // Start segment
                     console.log("Segment started");
                     
-                    this.pendingSegmentStart = segment.cameraRecordTimes[0];
+                    this.timeRanges.push({
+                        time: {
+                            firstFrameTime: segment.cameraRecordTimes[0],
+                            lastFrameTime: "live"
+                        },
+                        segments: []
+                    });
                 }
 
                 console.log(`Segment loop ${segment.sourceId}`);
-                lastFrameTime = segment.cameraRecordTimes.last();
+                this.timeRanges.last().segments.push({
+                    type: "recorded",
+                    mp4Video: segment.mp4Video,
+                    baseMediaDecodeTimeInSeconds: segment.baseMediaDecodeTimeInSeconds,
+                    cameraRecordTimes: segment.cameraRecordTimes,
+                    rate: 1
+                });
+
                 lastSourceId = segment.sourceId;
             }
         }
     }
-    public async getRecordTimeRanges(info: {
+    public async getTimeRanges(info: {
         /** We return one range before this time (if possible), and then up to 100 ranges after it. */
         startTime: number;
     }): Promise<{
-        ranges: RecordTimeRange[]
+        ranges: TimeRange[]
     }> {
-        let ranges = this.timeRanges.map(x => x.range);
-        if(this.pendingSegmentStart) {
-            ranges.push({
-                firstFrameTime: this.pendingSegmentStart,
-                lastFrameTime: "live"
-            });
+        let index = binarySearchMapped(this.timeRanges, info.startTime, x => x.time.firstFrameTime, (a, b) => a - b);
+        if(index < 0) {
+            index = ~index - 1;
+            if(index < 0) {
+                index = 0;
+            }
         }
+        let ranges: TimeRange[] = this.timeRanges.slice(index, index + 2).map(x => x.time);
         return { ranges: ranges };
+    }
+
+    private streamLoops: {
+        client: Receiver["client"];
+        close: () => Promise<void>;
+    }[] = [];
+
+    private async closeStreams(client: Receiver["client"]) {
+        let prevStreams = this.streamLoops.filter(x => x.client === client);
+        for(let prevStream of prevStreams) {
+            console.log(`Closing previous stream to same client`);
+            await prevStream.close();
+            console.log(`Closed previous stream to same client`);
+        }
+        let streamLoops = this.streamLoops;
+        for(let i = streamLoops.length - 1; i >= 0; i--) {
+            if(streamLoops[i].client === client) {
+                streamLoops.splice(i, 1);
+            }
+        }
     }
 
     public async subscribeToCamera(info: {
         time: VideoTime;
         rate: number;
     }) {
+        let client = this.client;
+
+        await this.closeStreams(client);
+
+        let cancelId: number|undefined;
+        let close = false;
+        let closedDeferred = new Deferred<void>();
+        this.streamLoops.push({
+            client,
+            close() {
+                clearTimeout(cancelId);
+                close = true;
+                closedDeferred.Resolve(undefined);
+                return closedDeferred.Promise();
+            }
+        });
+
         if(info.time === "live") {
             if(info.rate !== 1) {
                 throw new Error(`Live and rate !== 1 is invalid. Rate was ${info.rate}`);
             }
-            return this.subscribeToCameraLive();
+            return this.subscribeToCameraLive(client);
         }
 
-        throw new Error(`time !== live is not implemented yet`);
+
+        // Okay... using time we can find the start range to play at. And then... we should
+        //  just start playing. We might play at a faster than 1 rate, so we should handle
+        //  catching up to live and then switching to a live stream. Otherwise (when we
+        //  are not live), we don't need a channel, we can just iterate over the array of videos?
+        // Until we add s3 handling, then we will basically be streaming from s3?
+        // And actually... if we are streaming from s3, do we even want to have the server in the middle?
+        //  (yes, for caching, to reduce s3 bandwidth).
+
+        console.log("Starting video stream");
+
+        let index = binarySearchMapped(this.timeRanges, info.time, x => x.time.firstFrameTime, (a, b) => a - b);
+        if(index < 0) {
+            index = ~index - 1;
+            if(index < 0) {
+                index = 0;
+            }
+        }
+        let segObj = this.timeRanges[index];
+        if(!segObj) {
+            throw new Error(`No video at or after time ${info.time}`);
+        }
+        let segIndex = binarySearchMapped(segObj.segments, info.time, x => x.cameraRecordTimes[0], (a, b) => a - b);
+        if(segIndex < 0) {
+            segIndex = ~segIndex - 1;
+            if(segIndex < 0) {
+                throw new Error(`Impossible`);
+            }
+        }
+
+        let firstSegment = true;
+        let time = info.time;
+
+        let nextSegmentTime = clock();
+        let curLag = 0;
+
+        const sendSegment = () => {
+            if(close) return;
+            try {
+                let now = clock();
+                let setTimeoutLag = now - nextSegmentTime;
+                curLag += setTimeoutLag;
+
+                let ranges = this.timeRanges;
+                let segmentObj = ranges[index];
+                let segments = segmentObj.segments;
+                let segment = segments[segIndex];
+
+                //console.log(`Sending segment`);
+                client.acceptVideoSegment_VOID(segment);
+
+                segIndex++;
+                if(segIndex >= segments.length) {
+                    if(segmentObj.time.lastFrameTime === "live") {
+                        // TODO: Switch to live streaming it.
+                        console.log(`Reached the end of the live stream. Ending stream`);    
+                        return;
+                    }
+                    segIndex = 0;
+                    index++;
+                }
+                if(index >= ranges.length) {
+                    console.log(`Sent all video, ending stream`);
+                    return;
+                }
+
+                let nextSegmentStart = segIndex < segments.length ? segments[segIndex].cameraRecordTimes[0] : segment.cameraRecordTimes.last();
+                // TODO: The first iteration should use info.time for this instead
+                let segStart = segment.cameraRecordTimes[0];
+                if(firstSegment) {
+                    firstSegment = false;
+                    segStart = time;
+                }
+                let segmentDuration = nextSegmentStart - segStart - curLag;
+
+                nextSegmentTime = clock() + segmentDuration;
+                cancelId = setTimeout(sendSegment, segmentDuration) as any;
+            } catch(e) {
+                console.error(`Segment loop died`, e);
+            }
+        };
+        sendSegment();
+
+        return {
+            streamRate: 1
+        };
     }
 
 
-    private async subscribeToCameraLive() {
-        let client = this.client;
+    private async subscribeToCameraLive(client: Receiver["client"]) {
+        await this.closeStreams(client);
 
+        let close = false;
+        let closedDeferred = new Deferred<void>();
+        this.streamLoops.push({
+            client,
+            close() {
+                close = true;
+                return closedDeferred.Promise();
+            }
+        });
+        
         this.clientVideoSegment.Subscribe(video => {
+            if(close) {
+                closedDeferred.Resolve(undefined);
+                throw new Error(`Client requested stop`);
+            }
             if(video.sourceInfo.formatId !== this.curFormatId) {
                 console.log(`Ignoring encoded data because it was generated using a stale format id.`);
                 return;
@@ -366,6 +633,9 @@ class Receiver extends TimeServer implements IReceiver, IHost {
                 });
                 frameInfos[frameInfos.length - 1].frameDurationInSeconds = 0;
 
+                //todonext mux video into videos of different speeds. This will mean there less videos at a faster speed
+                //  (as you can't play faster video live, and the only reason we have small increments is for live video).
+
                 //console.log(`Muxing video from ${JSON.stringify(sps.senderConfig)}`);
                 let video = await MuxVideo({
                     sps: sps.nal,
@@ -424,26 +694,7 @@ https://gist.github.com/mitsuhito/ad3ae3e341726687457c
 Locally, decode the NALs? and see if there is reordering. If there is, then disable that? Or maybe just order to
 */
 
-/*
-pi setup code:
-// Looks like there is no frame reordering... so this will work! And I think if we assume no reordering, certain
-//  pps, pps, and frame orders and rates (and we specify the rate with periodicty-idr), we don't need any mp4-typescript parsing
-//  in the main streamer/receiver code (besides start code checking, which is probably all [0,0,0,1] anyway) (so it will be fast).
-//  /etc/ssh/sshd_config, PasswordAuthentication no
-//  cat >> ~/.ssh/authorized_keys (put public key here)
-//  2017-11-29-raspbian-stretch.img
-//  gst-launch-1.0 version 1.10.4
-//  GStreamer 1.10.4
-//  http://packages.qa.debian.org/gstreamer1.0
-// sudo apt install gstreamer-1.0
-// sudo apt install gstreamer1.0-tools
-// gst-inspect-1.0 omxh264enc
-// time gst-launch-1.0 -vv -e v4l2src device=/dev/video0 ! capsfilter caps="image/jpeg,width=1920,height=1080,framerate=30/1" ! jpegdec ! omxh264enc target-bitrate=15000000 control-rate=variable periodicty-idr=10 ! video/x-h264, profile=high ! tcpclientsink port=3000 host=192.168.0.202
 
-// time gst-launch-1.0 -vv -e v4l2src device=/dev/video0 num-buffers=90 ! capsfilter caps="image/jpeg,width=1920,height=1080,framerate=30/1" ! jpegdec ! omxh264enc target-bitrate=15000000 control-rate=variable ! video/x-h264, profile=high ! filesink location="test.mp4"
-
-// time gst-launch-1.0 -vv -e multifilesrc location="frame%d.jpeg" ! capsfilter caps="image/jpeg,width=1920,height=1080,framerate=30/1" ! jpegdec ! omxh264enc target-bitrate=15000000 control-rate=variable ! video/x-h264, profile=high ! filesink location="test.mp4"
-*/
 
 
 /*

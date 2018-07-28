@@ -3072,16 +3072,16 @@ mkdirp@0.5.1, mkdirp@0.5.x, mkdirp@^0.5.0, mkdirp@^0.5.1, mkdirp@~0.5.0, mkdirp@
   dependencies:
     minimist "0.0.8"
 
-mp4-typescript@^0.2.5:
-  version "0.2.5"
-  resolved "https://registry.yarnpkg.com/mp4-typescript/-/mp4-typescript-0.2.5.tgz#2002d41f5a58c722b6963badaa22aabfe4d77cfc"
+mp4-typescript@^0.2.8:
+  version "0.2.8"
+  resolved "https://registry.yarnpkg.com/mp4-typescript/-/mp4-typescript-0.2.8.tgz#58bcf43a5151d60c145f9fd9aba5faa2e84bb789"
   dependencies:
     jimp "^0.2.28"
     nan "^2.10.0"
     node-gyp "https://github.com/yeerkkiller1/node-gyp"
-    p-info "^0.1.7"
+    p-info "^0.1.15"
     pchannel "^0.4.5"
-    temp-folder "^0.2.15"
+    temp-folder "^0.2.17"
     webpack-node-externals "^1.7.2"
     x264-npm "^0.155.8"
 
@@ -3154,6 +3154,23 @@ node-fetch@^1.0.1:
 node-forge@0.7.5:
   version "0.7.5"
   resolved "https://registry.yarnpkg.com/node-forge/-/node-forge-0.7.5.tgz#6c152c345ce11c52f465c2abd957e8639cd674df"
+
+"node-gyp@git+https://github.com/yeerkkiller1/node-gyp.git":
+  version "4.0.0"
+  uid "4f1493a7d011fa17d39cd27b0c4911b26acf18bf"
+  resolved "git+https://github.com/yeerkkiller1/node-gyp.git#4f1493a7d011fa17d39cd27b0c4911b26acf18bf"
+  dependencies:
+    glob "^7.0.3"
+    graceful-fs "^4.1.2"
+    mkdirp "^0.5.0"
+    nopt "2 || 3"
+    npmlog "0 || 1 || 2 || 3 || 4"
+    osenv "0"
+    request "2"
+    rimraf "2"
+    semver "~5.3.0"
+    tar "^3.1.3"
+    which "1"
 
 "node-gyp@https://github.com/yeerkkiller1/node-gyp":
   version "4.0.0"
@@ -3433,7 +3450,7 @@ p-finally@^1.0.0:
   version "1.0.0"
   resolved "https://registry.yarnpkg.com/p-finally/-/p-finally-1.0.0.tgz#3fbcfb15b899a44123b34b6dcc18b724336a2cae"
 
-p-info@0.1.15, p-info@^0.1.15, p-info@^0.1.4, p-info@^0.1.7:
+p-info@0.1.15, p-info@^0.1.15, p-info@^0.1.4:
   version "0.1.15"
   resolved "https://registry.yarnpkg.com/p-info/-/p-info-0.1.15.tgz#830301b70a7933bafa5f1e52569d0903e6dd8333"
   dependencies:
@@ -4897,11 +4914,18 @@ tar@^4:
     safe-buffer "^5.1.2"
     yallist "^3.0.2"
 
-temp-folder@^0.2.15, temp-folder@^0.2.16:
+temp-folder@^0.2.16:
   version "0.2.16"
   resolved "https://registry.yarnpkg.com/temp-folder/-/temp-folder-0.2.16.tgz#b939dd96c45d464c8c1b75fcdbbb22308cc8b49e"
   dependencies:
     p-info "^0.1.4"
+    pchannel "^0.3.4"
+
+temp-folder@^0.2.17:
+  version "0.2.17"
+  resolved "https://registry.yarnpkg.com/temp-folder/-/temp-folder-0.2.17.tgz#2c90e569a8d13d5b08bcdf896fcdb01c1b7cc0f8"
+  dependencies:
+    p-info "^0.1.15"
     pchannel "^0.3.4"
 
 term-size@^1.2.0:

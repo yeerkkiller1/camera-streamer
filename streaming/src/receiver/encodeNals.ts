@@ -3,7 +3,7 @@ import { PChanReceive, PChanSend } from "controlFlow/pChan";
 import { spawn } from "child_process";
 
 
-//type ThirdArgument<T> = T extends (a: any, b: any, c: infer X) => any ? X : never;
+ //type ThirdArgument<T> = T extends (a: any, b: any, c: infer X) => any ? X : never;
 //type SpawnOptions = ThirdArgument<typeof spawn>;
 function spawnChannel(command: string, args: string[], onProcClose: () => void): (jpegStream: PChanReceive<Buffer>) => PChanReceive<Buffer> {
     return TransformChannelAsync<Buffer, Buffer>(async ({inputChan, outputChan}) => {
@@ -58,7 +58,14 @@ function spawnChannel(command: string, args: string[], onProcClose: () => void):
 
     You can test if it is broken by running:
 
-    cat frame*.jpeg | gst-launch-1.0 -vv -e fdsrc fd=0 ! capsfilter caps="image/jpeg,width=1920,height=1080,framerate=30/1" ! jpegdec ! omxh264enc target-bitrate=15000000 control-rate=variable ! video/x-h264,profile=high ! fdsink fd=1 | cat > frames.nal
+    gst-launch-1.0 -vv -e v4l2src device=/dev/video0 num-buffers=30 ! capsfilter caps="image/jpeg,width=1920,height=1080,framerate=30/1" ! multifilesink location="frame%d.jpeg"
+
+    time cat frame*.jpeg | gst-launch-1.0 -vv -e fdsrc fd=0 ! capsfilter caps="image/jpeg,width=1920,height=1080,framerate=1/1" ! jpegdec ! omxh264enc target-bitrate=50000 periodicty-idr=2 ! video/x-h264,profile=high ! fdsink fd=1 | cat > frames.nal && stat frames.nal
+
+    time cat frame*.jpeg | gst-launch-1.0 -vv -e fdsrc fd=0 ! capsfilter caps="image/jpeg,width=1920,height=1080,framerate=30/1" ! jpegdec ! avenc_h264_omx bitrate=10000 gop-size=2 ! video/x-h264,profile=high ! fdsink fd=1 | cat > frames.nal && stat frames.nal
+
+    time cat frame*.jpeg | gst-launch-1.0 -vv -e fdsrc fd=0 ! capsfilter caps="image/jpeg,width=1920,height=1080,framerate=1/1" ! jpegdec ! omxh264enc target-bitrate=10000 control-rate=variable ! video/x-h264,profile=high ! fdsink fd=1 | cat > frames.nal && stat frames.nal
+
 
 */
 
@@ -81,7 +88,7 @@ export function encodeJpegFrames(info: {
 }): PChanReceive<Buffer> {
     let { width, height, frameNumerator, frameDenominator, iFrameRate, jpegStream, bitRateMBPS } = info;
 
-    let args = `-q fdsrc fd=0 ! capsfilter caps="image/jpeg,width=${width},height=${height},framerate=${frameNumerator}/${frameDenominator}" ! jpegdec ! omxh264enc target-bitrate=${Math.round(bitRateMBPS * 1000 * 1000)} control-rate=variable periodicty-idr=${iFrameRate} ! video/x-h264,profile=high ! fdsink fd=1`;
+    let args = `-q fdsrc fd=0 ! capsfilter caps="image/jpeg,width=${width},height=${height},framerate=${frameNumerator}/${frameDenominator}" ! jpegdec ! avenc_h264_omx bitrate=${Math.round(bitRateMBPS * 1000 * 1000)} gop-size=${iFrameRate} ! video/x-h264,profile=high ! fdsink fd=1`;
     return spawnChannel("gst-launch-1.0", args.split(" "), info.onProcClose)(jpegStream);
 }
 

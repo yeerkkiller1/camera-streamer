@@ -16,7 +16,7 @@
     "jimp": "^0.2.28",
     "less": "^2.7.1",
     "less-loader": "^2.2.3",
-    "mp4-typescript": "^0.2.5",
+    "mp4-typescript": "^0.2.8",
     "p-info": "^0.1.15",
     "pchannel": "^0.4.5",
     "prop-types": "^15.6.0",
