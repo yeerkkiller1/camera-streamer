@@ -14,3 +14,32 @@ export function sum(value: number[]): number {
     }
     return this[this.length - 1];
 };
+
+
+export function group(values: number[], minGroupGap: number): number[][] {
+    let prevValue: number|undefined;
+
+    let groups: number[][] = [];
+    let curGroup: number[] = [];
+    for(let i = 0; i < values.length; i++) {
+        let v = values[i];
+
+        if(prevValue !== undefined) {
+            let gap = v - prevValue;
+            if(gap > minGroupGap) {
+                groups.push(curGroup);
+                curGroup = [];
+            }
+        }
+
+        curGroup.push(v);
+
+        prevValue = v;
+    }
+
+    if(curGroup.length > 0) {
+        groups.push(curGroup);
+    }
+
+    return groups;
+}

@@ -14,7 +14,7 @@ function getParentId(pid: number) {
 //  gets cleaned up on process exit that we can tie into.)
 
 export function makeProcessSingle(name: string) {
-    console.log(process.platform);
+    console.log(process.platform, process.pid);
     if(process.platform === "win32") {
         try {
             (() => {

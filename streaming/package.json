@@ -16,7 +16,7 @@
     "jimp": "^0.2.28",
     "less": "^2.7.1",
     "less-loader": "^2.2.3",
-    "mp4-typescript": "^0.2.8",
+    "mp4-typescript": "^0.3.2",
     "p-info": "^0.1.15",
     "pchannel": "^0.4.5",
     "prop-types": "^15.6.0",
@@ -34,7 +34,7 @@
     "webpack-node-externals": "^1.7.2",
     "webpack-visualizer-plugin": "^0.1.11",
     "ws": "^3.2.0",
-    "ws-class": "^0.5.7"
+    "ws-class": "^0.5.9"
   },
   "resolutions": {
     "temp-folder/p-info": "0.1.15",

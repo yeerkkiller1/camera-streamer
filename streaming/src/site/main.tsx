@@ -1,4 +1,4 @@
-import { g, PChan, TransformChannel, TransformChannelAsync } from "pchannel";
+import { g, PChan, TransformChannel, TransformChannelAsync, SetTimeoutAsync } from "pchannel";
 g.NODE =  false;
 
 import * as React from "react";
@@ -7,15 +7,23 @@ import * as ReactDOM from "react-dom";
 import "./main.less";
 import { ConnectToServer } from "ws-class";
 import { setTimeServer, getTimeSynced } from "../util/time";
-import { PropsListify } from "../util/PropsListify";
 import { PixelGraph, Color } from "../util/PixelGraph";
 import { min, max, sum } from "../util/math";
 
 // For polyfills
 import "../util/math";
-import { binarySearchMapped } from "../util/algorithms";
+import { binarySearchMapped, binarySearchMap, insertIntoListMap } from "../util/algorithms";
 import { formatDuration } from "../util/format";
+import { RangeSummarizer } from "../NALStorage/RangeSummarizer";
+import { VideoHolder, IVideoHolder } from "./VideoHolder";
+import { VideoHolderFake } from "./VideoHolderFake";
+import { PollLoop } from "./PollLoop";
+import { RealTimeToVideoTime } from "../NALStorage/TimeMap";
+import { SegmentRanges, reduceRanges } from "../NALStorage/rangeMapReduce";
+import { UnionUndefined } from "../util/misc";
 
+let VideoHolderClass = VideoHolder;
+//let VideoHolderClass = VideoHolderFake;
 
 function getBitRateMBPS(fps: number, format: v4l2camera.Format) {
     let { height } = format;
@@ -41,11 +49,16 @@ function getBitRateMBPS(fps: number, format: v4l2camera.Format) {
     return bitRateMBPS;
 }
 
+
+
 interface IState {
-    latestSegment?: VideoSegment;
+    latestSegment?: MP4Video;
     latestSegmentURL?: string;
-    prevSegment?: VideoSegment;
+    prevSegment?: MP4Video;
     test?: number;
+
+    rate: number;
+    speedMultiplier: number;
     
     formats: v4l2camera.Format[];
     formatIndex: number;
@@ -53,18 +66,32 @@ interface IState {
     iFrameRate: number;
     bitrateMbps: number;
 
-    /** Sorted by firstFrameTime. */
-    recordedRanges: TimeRange[];
+    currentPlayTime: number;
+
+    rangeSummaries: {
+        [rate: number]: {
+            serverRanges?: SegmentRanges;
+            receivedRanges?: SegmentRanges;
+            requestedRanges?: SegmentRanges;
+        }
+    };
 }
-class Main extends React.Component<{}, IState> {
+
+
+class Main extends React.Component<{}, IState> implements IBrowserReceiver {
     state: IState = {
+        rate: 1,
+        speedMultiplier: 1,
+
         formats: [],
         // -1 is valid, we use this like: .slice(index)[0]
-        /*
+        //*
         formatIndex: 0, // 0 = 640x480, 5 = 800x600, 6 = 1280x720, 7=1920x1080
-        requestedFPS: 3,
+        requestedFPS: 10,
         iFrameRate: 2,
         bitrateMbps: 10 / 1000,
+
+        currentPlayTime: 0,
         //*/
 
         // Full resoluation, max fps, low quality
@@ -77,18 +104,20 @@ class Main extends React.Component<{}, IState> {
         //*/
 
         // Full resolution, low fps, max quality
-        //*
+        /*
         formatIndex: -1, // 0 = 640x480, 5 = 800x600, 6 = 1280x720, 7=1920x1080
         requestedFPS: 0.5,
         iFrameRate: 2,
         bitrateMbps: 8,
         //*/
 
-        recordedRanges: []
+        rangeSummaries: {}
     };
 
-    vidBuffer: SourceBuffer|undefined;
-    videoElement: HTMLVideoElement|null|undefined;
+    videoHolder: IVideoHolder|undefined|null;
+    
+    //vidBuffer: SourceBuffer|undefined;
+    //videoElement: HTMLVideoElement|null|undefined;
 
     server = ConnectToServer<IHost>({
         port: 7060,
@@ -106,7 +135,7 @@ class Main extends React.Component<{}, IState> {
 
     unmountCallbacks: (() => void)[] = [];
     componentDidMount() {
-        this.syncRanges();
+        this.syncVideoInfo();
     }
     componentWillUnmount() {
         for(let callback of this.unmountCallbacks) {
@@ -127,6 +156,44 @@ class Main extends React.Component<{}, IState> {
         //  - ws-class is not handling closes properly, and still calling functions on closed zombie classes, so... we should fix that.
         //  - Cancelling an encoder that is really far behind isn't working. I should kill the process if it doesn't die fast enough.
     }
+
+    async syncVideoInfo() {
+        let ranges = await this.server.syncTimeRanges(this.state.rate, this.state.speedMultiplier);
+        this.addServerRanges(ranges);
+    }
+
+    acceptNewTimeRanges_VOID(ranges: NALRanges): void {
+        this.addServerRanges(ranges);
+    }
+
+    private addServerRanges(ranges: NALRanges) {
+        ranges = JSON.parse(JSON.stringify(ranges));
+        let rate = ranges.rate;
+        if(!this.state.rangeSummaries[rate]) {
+            this.state.rangeSummaries[rate] = { };
+        }
+        this.state.rangeSummaries[rate].serverRanges = reduceRanges([ranges], this.state.rangeSummaries[rate].serverRanges);
+        this.setState({ rangeSummaries: this.state.rangeSummaries });
+    }
+    private addReceivedRanges(ranges: NALRanges) {
+        ranges = JSON.parse(JSON.stringify(ranges));
+        let rate = ranges.rate;
+        if(!this.state.rangeSummaries[rate]) {
+            this.state.rangeSummaries[rate] = { };
+        }
+        this.state.rangeSummaries[rate].receivedRanges = reduceRanges([ranges], this.state.rangeSummaries[rate].receivedRanges);
+        this.setState({ rangeSummaries: this.state.rangeSummaries });
+    }
+    private addRequestedRanges(ranges: NALRanges) {
+        ranges = JSON.parse(JSON.stringify(ranges));
+        let rate = ranges.rate;
+        if(!this.state.rangeSummaries[rate]) {
+            this.state.rangeSummaries[rate] = { };
+        }
+        this.state.rangeSummaries[rate].requestedRanges = reduceRanges([ranges], this.state.rangeSummaries[rate].requestedRanges);
+        this.setState({ rangeSummaries: this.state.rangeSummaries });
+    }
+
     async startCamera() {
         let formats = await this.server.getFormats();
         this.setState({ formats });
@@ -145,295 +212,255 @@ class Main extends React.Component<{}, IState> {
         );
     }
 
-    async syncRanges() {
-        // Get the last day, then keep trying to extend past the last day.
-        const syncMore = async () => {
-            if(this.state.recordedRanges.length === 0) {
-                let lastTime = +new Date();
-                let firstTime = lastTime - 1000 * 60 * 60 * 24;
-                await this.syncRecordTimes(firstTime, lastTime);
-            } else {
-                let last = this.state.recordedRanges.last();
-                let startTime = last.lastFrameTime;
-                if(startTime === "live") {
-                    startTime = last.firstFrameTime;
-                }
-                await this.syncRecordTimes(startTime, +new Date());
-            }
-
-            setTimeout(syncMore, 5000);
-        };
-        syncMore();
-    }
-    async syncRecordTimes(startTime: number, lastTime: number) {
-        while(true) {
-            let ranges = (await this.server.getTimeRanges({startTime: startTime})).ranges;
-            console.log({ranges});
-
-            this.addRanges(ranges);
-
-            if(ranges.length === 0) break;
-            let last = ranges.last();
-            if(last.lastFrameTime === "live") break;
-            if(last.lastFrameTime >= lastTime) break;
-            // Prevent infinite loops, because my range lookup function is wrong.
-            if(last.lastFrameTime === startTime) break;
-
-            startTime = last.lastFrameTime;
-        }
-    }
-    private addRanges(ranges: TimeRange[]) {
-        if(ranges.length === 0) return;
-
-        let recordedRanges = this.state.recordedRanges;
-
-        for(let range of ranges) {
-            // Eh... you can merge two sorted lists faster than this, but... this will be fast enough.
-            let index = binarySearchMapped(recordedRanges, range.firstFrameTime, x => x.firstFrameTime, (a, b) => a - b);
-            if(index >= 0) {
-                recordedRanges[index] = range;
-                continue;
-            }
-            index = ~index;
-            recordedRanges.splice(index, 0, range);
-        }
-
-        this.setState({recordedRanges});
-    }
-
-
-    initVideo(vid: HTMLVideoElement|null) {
-        if(!vid) return;
-        if(this.videoElement === vid) return;
-
-        console.log("New video element");
-        this.videoElement = vid;
-
-        // onstalled, onemptied, onended, onpause, are all useless. Watching polling currentTime is the only way to know
-        //  when the video stalls.
-        //const maxClientsideBuffer = 5 * 1000;
-
-        // Max of two videos behind
-        const maxClientsideBuffer = this.state.iFrameRate * (1 / this.state.requestedFPS) * 2 * 1000;
-        const checkForStallOrLag = () => {
-            if(this.videoElement !== vid) return;
-
-            let seg = this.state.latestSegment;
-            if(seg && seg.type === "live") {
-                let firstTime = seg.cameraRecordTimes[0];
-                if(vid.currentTime * 1000 + maxClientsideBuffer < firstTime) {
-                    console.log(`Moving video up to current time, because client side buffer time got too high (above ${maxClientsideBuffer})`);
-                    vid.currentTime = firstTime / 1000;
-                }
-
-                // We can't play in the future
-                if(vid.currentTime * 1000 > seg.cameraRecordTimes.last()) {
-                    console.log("Moving video back because it was playing in the future");
-                    vid.currentTime = firstTime / 1000 - 0.00001;
-                }
-            }
-
-            setTimeout(checkForStallOrLag, maxClientsideBuffer / 10);
-        };
-        checkForStallOrLag();
-        
-
-        
-        var push = new MediaSource();
-        vid.src = URL.createObjectURL(push);
-        push.addEventListener("sourceopen", async () => {
-            var buf = push.addSourceBuffer('video/mp4; codecs="avc1.640028"');
-            this.vidBuffer = buf;
-            let queue = this.updateEndQueue = new PChan<void>();
-            
-            const callback = () => {
-                if(this.updateEndQueue !== queue) {
-                    buf.removeEventListener("updatend", callback);
-                    return;
-                }
-                queue.SendValue(undefined);
-            };
-            this.vidBuffer.addEventListener("updateend", callback);
-        });
-    }
-
-    frameTimes: number[] = [];
-    seekToFrame(index: number) {
-        if(!this.videoElement) return;
-        // We have to minus this time to make the last frame work. Now sure why...
-        //  If we play a video until the end the time goes WAY (around 3/4 of a frame when I tested) past
-        //  the start of the last frame, and seeking to exactly the last frame time doesn't even work.
-        //  But subtracting a little bit does work. It must have to do with rounding or something? Odd...
-        //  and unfortunate, as it will be hard to verify this frame mapping is correct with real video
-        //  (which is not timestamped, as that takes too much CPU power).
-        this.videoElement.currentTime = this.frameTimes[index] - 0.00001;
-    }
-
-    acceptVideoSegment_VOID(info: VideoSegment): void {
-        if(info.type === "live") {
-            info.clientReceiveTime = getTimeSynced();
-        }
-
-        for(let time of info.cameraRecordTimes) {
-            this.frameTimes.push(time);
-        }
-
-        
-        console.log(info.cameraRecordTimes[0], "to", info.cameraRecordTimes[info.cameraRecordTimes.length - 1]);
-
+    acceptVideo_VOID(info: MP4Video, requestRange: NALRange): void {
         let latestSegmentURL = URL.createObjectURL(new Blob([info.mp4Video]));
+        this.setState({ latestSegmentURL, latestSegment: info, prevSegment: this.state.latestSegment });
 
-        this.setState({ latestSegment: info, prevSegment: this.state.latestSegment, latestSegmentURL });
-
-        if(this.vidBuffer) {
-            console.log("Add buffer");
-            this.appendQueue(info.mp4Video);
-        }
-    }
-
-    updateEndQueue: PChan<void>|undefined;
-    nextPlayTime: number|undefined;
-    
-    // TODO: If we ever call remove, we need to combine it in this loop, as both set updating to true.
-    appendQueue = TransformChannel<Buffer, void>(async (input) => {
-        if(!this.videoElement || !this.vidBuffer || !this.updateEndQueue) {
-            console.log(`Ignoring video because vidBuffer hasn't been initialized yet.`);
+        if(!this.videoHolder) {
+            console.warn(`Ignoring video as video element hasn't been mounted yet.`);
             return;
         }
-        if(this.vidBuffer.updating) {
-            throw new Error(`appendQueue is broken, tried to add while vidBuffer is updating`);
-        }
-        this.vidBuffer.appendBuffer(input);
 
-        await this.updateEndQueue.GetPromise();
+        if(info.frameTimes.length > 0) {
+            if(info.incomplete) {
+                console.log(`Received incomplete video, not counted it as a received range. ${info.frameTimes[0].time} to ${info.frameTimes.last().time}`);
+            } else {
+                let rate = info.frameTimes[0].rate;
+                if(!this.state.rangeSummaries[rate]) {
+                    this.state.rangeSummaries[rate] = { };
+                }
 
-        if(this.nextPlayTime) {
-            this.videoElement.currentTime = this.nextPlayTime / 1000;
-            this.videoElement.play();
-            this.nextPlayTime = undefined;
+                let firstTime = requestRange.firstTime;
+                let lastTime = info.frameTimes.last().time;
+
+                if(lastTime < firstTime) {
+                    // We received data before the requested time. This should only happen for 1 key frame (1 video),
+                    //  so we have all the data from the start of this video to the start of the requested range.
+                    firstTime = info.frameTimes[0].time;
+                    lastTime = requestRange.firstTime;
+                }
+
+                let ranges: NALRanges = {
+                    rate,
+                    frameTimes: [],
+                    segmentRanges: [{
+                        firstTime,
+                        lastTime
+                    }]
+                };
+                this.addReceivedRanges(ranges);
+                // Add it as requested, as we use requested to determine what should be requested, and if we received it,
+                //  we should definitely not request it again.
+                this.addRequestedRanges(ranges);
+
+                //console.log(`Add buffer ${info.frameTimes[0].time} to ${info.frameTimes.last().time}, range ${firstTime} to ${lastTime}`);
+                let size = lastTime - firstTime;
+                console.log(`Add buffer, pos ${size}`);
+            }
         }
-    });
+
+        (async () => {
+            if(!this.videoHolder) return;                
+            await this.videoHolder.AddVideo(info);
+        })();
+    }
+    
+    curPlayToken: object = {};
+    async onTimeClick(startTime: number) {
+        let videoHolder = this.videoHolder;
+        if(!videoHolder) return;
+
+        videoHolder.SeekToTime(startTime);
+        this.setState({ currentPlayTime: startTime });
+
+        let loadChunkSize = 10000;
+        let minPlayBuffer = 5000;
+
+        let rate = this.state.rate;
+        let summaryObj = this.state.rangeSummaries[rate] = this.state.rangeSummaries[rate] || {};
+        let { serverRanges } = summaryObj;
+        if(!serverRanges) return;
+
+        let ourPlayToken = {};
+        this.curPlayToken = ourPlayToken;
+
+        // TODO: Move this to something trigger by play behavior. That way we try to kickstart playback
+        //  when they seek, but we don't keep trying to download video after we reach the end of the video.
+        while(this.curPlayToken === ourPlayToken) {
+            let index = binarySearchMap(serverRanges.segments, startTime, x => x.firstTime);
+            if(index < 0) {
+                index = ~index - 1;
+            }
+            let segment = UnionUndefined(serverRanges.segments[index]);
+            if(!segment) break;
+            if(startTime > segment.lastTime) break;
+
+            let loaded = await this.downloadVideo(startTime, loadChunkSize);
+            if(!loaded) break;
+
+            let endTime = startTime + loadChunkSize;
+            while(this.curPlayToken === ourPlayToken) {
+                let delay = endTime - this.state.currentPlayTime - minPlayBuffer;
+                if(delay > 0) {
+                    console.log(`Waiting ${delay}ms for video position to progress more.`);
+                    await SetTimeoutAsync(delay);
+                } else {
+                    break;
+                }
+            }
+
+            startTime += loadChunkSize;
+        }
+    }
+
+
+    inDownload = false;
+    curDownloadToken: object = {};
+    async downloadVideo(startTime: number, minBuffer: number): Promise<boolean> {
+        let rate = this.state.rate;
+
+        //todonext
+        // TODO: Request cancellation.
+        //  In this function add a try/finally flag to know when we are making a request.
+        //  Call cancelStream, when that comes back make requested ranges exactly equal to received, and then make the new request.
+        if(this.inDownload) {
+            let summaryObj = this.state.rangeSummaries[rate] = this.state.rangeSummaries[rate] || {};
+            summaryObj.requestedRanges = JSON.parse(JSON.stringify(summaryObj.receivedRanges));
+            this.setState({ rangeSummaries: this.state.rangeSummaries });
+            this.curDownloadToken = {};
+            await this.server.CancelVideo();
+        }
+
+        this.inDownload = true;
+        try {
+            let requestedSegments: NALRange[] = [];
+            let summaryObj = this.state.rangeSummaries[rate] = this.state.rangeSummaries[rate] || {};
+
+            let { requestedRanges } = summaryObj;
+            if(requestedRanges) {
+                requestedSegments = requestedRanges.segments;
+            }
+
+            let index = binarySearchMap(requestedSegments, startTime, x => x.firstTime);
+            if(index < 0) {
+                index = ~index - 1;
+            }
+            let prevSegment = UnionUndefined(requestedSegments[index]);
+            let nextSegment = UnionUndefined(requestedSegments[index + 1]);
+
+            let endTime = startTime + minBuffer;
+
+            
+            let startTimeExclusive = false;
+            if(prevSegment) {
+                if(prevSegment.lastTime >= startTime) {
+                    startTime = prevSegment.lastTime;
+
+                    // prevSegment is a requested range, which is exclusive by default. So lastTime is exclusive,
+                    //  meaning we do need to request it to get that frame.
+                    startTimeExclusive = true;
+                }
+            }
+
+            if(nextSegment) {
+                if(nextSegment.firstTime < endTime) {
+                    endTime = nextSegment.firstTime;
+                }
+            }
+
+            if(endTime <= startTime) {
+                console.log(`Already loaded video (and buffered), not loading anything.`);
+                return true;
+            }
+
+            let ranges: NALRanges = {
+                rate,
+                frameTimes: [],
+                segmentRanges: [{
+                    firstTime: startTime,
+                    lastTime: endTime
+                }]
+            };
+            this.addRequestedRanges(ranges);
+
+            console.log(`Requesting video from ${startTime} to ${endTime}`);
+
+            let downloadToken = {};
+            this.curDownloadToken = downloadToken;
+            await this.server.GetVideo(startTime, endTime, startTimeExclusive, this.state.rate, this.state.speedMultiplier);
+
+            let didFinishDownload = this.curDownloadToken === downloadToken;
+
+            if(didFinishDownload) {
+                this.addReceivedRanges(ranges);
+            }
+
+            return didFinishDownload;
+        } finally {
+            this.inDownload = false;
+        }
+    }
+    
 
     renderTimes(): JSX.Element|null {
         let { latestSegment, latestSegmentURL } = this.state;
-        if(!latestSegment || !this.videoElement) return null;
-
-        console.log(`Render times`);
+        if(!latestSegment || !this.videoHolder) return null;
 
         let seg = latestSegment;
 
-        let recordDuration = seg.cameraRecordTimes[seg.cameraRecordTimes.length - 1] - seg.cameraRecordTimes[0];
-
-        if(seg.type !== "live") {
-            
-        }
-
-
-        let recordStart = seg.cameraRecordTimes[0];
-        let videoPlayTime = this.videoElement.currentTime * 1000;
+       
+        let videoPlayTime = this.videoHolder.GetCurrentTime();
         let currentTime = getTimeSynced();
 
+        let frameTimes = latestSegment.frameTimes.map(x => x.time);
 
-        //todonext
-        //  We can't distinguish between latency and bandwidth problems... so just show time on each device,
-        //      which should be equal to latency. Unless latency continues to increase, then it's a bandwidth problem.
-
-        // Also some bitrate indicators?
-
-        // For testing lag: http://output.jsbin.com/yewodox
-        let recLists = seg.type === "live" ? seg.cameraRecordTimesLists : seg.cameraRecordTimes.map(x => [x]);
-        let sensorFrames = sum(recLists.map(x => x.length));
-        let encodeFrames = recLists.length;
-
-        let prevSegment = this.state.prevSegment;
-        
-        let lastTime = prevSegment ? prevSegment.type === "live" ? prevSegment.cameraRecordTimesLists.last().last() : prevSegment.cameraRecordTimes.last() : recLists[0][0];
-        let sensorTime = recLists.last().last() - lastTime;
+        let recordStart = frameTimes.last();
 
         let realLag = currentTime - videoPlayTime;
         let clientSideBuffer = recordStart - videoPlayTime;
 
-        // Hmm... the problem is, that this will be delayed just because of timing. We basically stream it,
-        //  so it's hard to determine what is taking time. ALSO, there is lots of latency, so we can't just
-        //  measure active time, as sometimes things just add a certain amount of lag, but have a lot of bandwidth,
-        //  and bandwidth vs lag measurements are hard...
-        let timeOnCamera = seg.type === "live" ? seg.cameraSendTimes.last() - seg.cameraRecordTimes[0] : 0;
+
+        // Some rough estimations...
+        let playTime;
+        {
+            let frameTimes = latestSegment.frameTimes.map(x => RealTimeToVideoTime(x.time, seg.rate, seg.speedMultiplier));
+            let timeOfFrames = frameTimes.last() - frameTimes[0];
+            let timePerFrame = timeOfFrames / (frameTimes.length - 1) * (frameTimes.length);
+            playTime = timePerFrame * frameTimes.length;
+        }
 
         // Bitrate calculations
         let bytes = seg.mp4Video.length;
 
-        let frameSize = seg.mp4Video.length / seg.cameraRecordTimes.length;
-
+        let KBPerSecond = bytes / playTime * 1000 / 1024;
+        let framesPerSecond = latestSegment.frameTimes.length / playTime * 1000;
 
         return (
             <div>
+                
                 <div>
                     Lag: {realLag.toFixed(0)}ms
                     <div className="indent">
                         <div>Client side buffer {clientSideBuffer.toFixed(0)}ms</div>
                     </div>
                 </div>
-                {seg.type === "live" && <div>
-                    <div>Sensor Time: {sensorTime.toFixed(0)}ms (Recorded {encodeFrames} out of {sensorFrames}) (Recorded {(encodeFrames / sensorTime * 1000).toFixed(1)} FPS out of {(sensorFrames / sensorTime * 1000).toFixed(1)} FPS)</div>
-                    <div className="indent">
-                        <div>Time on camera: {timeOnCamera.toFixed(0)}ms</div>
-                    </div>
-                </div>}
-                <div>
-                    <div>Frame bytes size: {(frameSize / 1024).toFixed(1)}KB</div>
-                    <div>Chunk frames {seg.cameraRecordTimes.length}</div>
-                    <div>Chunk bytes size: {(bytes / 1024).toFixed(1)}KB</div>
-                    {seg.type === "live" && <div>
-                        {seg.frameSizes.join(", ")}
-                    </div>}
-                    <div>
-                        {(bytes / sensorTime * 1000 / 1024).toFixed(0)} KB/s
-                    </div>
-                </div>
                 <div>
                     { latestSegmentURL &&
-                        <a href={latestSegmentURL} download={"segment.mp4"}>Download last video</a>
+                        <a href={latestSegmentURL} download={"segment.mp4"}>Download last video ({latestSegment.frameTimes[0].time} to {latestSegment.frameTimes.last().time}, {(latestSegment.mp4Video.length / 1024).toFixed(1)}KB)</a>
                     }
+                </div>
+                <div>
+                    {KBPerSecond.toFixed(1)}KB/s, {framesPerSecond.toFixed(1)}FPS
                 </div>
             </div>
         );
-
-
-    }
-
-    async clickTimeBar(e: React.MouseEvent<HTMLDivElement>, range: TimeRange) {
-        let now = Date.now();
-
-        let elem = e.target as HTMLDivElement;
-        let rect = elem.getBoundingClientRect();
-
-        let fraction = (e.clientX - rect.left) / rect.width;
-
-        let end = range.lastFrameTime;
-        if(end === "live") {
-            end = now;
-        }
-        let offsetTime = (end - range.firstFrameTime) * fraction;
-        let time = range.firstFrameTime + offsetTime;
-        let timeAgo = formatDuration(now - time);
-
-        console.log(`${timeAgo} AGO`);
-        this.nextPlayTime = time;
-        await this.server.subscribeToCamera({
-            time: time,
-            rate: 1
-        });
-    }
-    async streamLive() {
-        this.nextPlayTime = Date.now();
-        await this.server.subscribeToCamera({ time: "live", rate: 1 });
     }
 
     renderPlayInfo(): JSX.Element|null {
-        if(!this.videoElement) return null;
+        if(!this.videoHolder) return null;
 
-        let now = Date.now();
-        let videoPlayTime = this.videoElement.currentTime * 1000;
+        let now = getTimeSynced();
+        let videoPlayTime = this.videoHolder.GetCurrentTime();
         let lag = now - videoPlayTime;
 
         let seg = this.state.latestSegment;
@@ -447,32 +474,44 @@ class Main extends React.Component<{}, IState> {
     }
 
     render() {
-        let { formats, formatIndex, recordedRanges } = this.state;
+        let { formats, formatIndex, rangeSummaries } = this.state;
         let selectedFormat = formats.slice(formatIndex)[0];
 
-        let now = Date.now();
-        
+        let rangesObj = rangeSummaries[this.state.rate];
+        if(!rangesObj) {
+            rangesObj = { };
+        }
+
         return (
             <div>
-                <video id="vid" width="1200" controls ref={x => this.initVideo(x)}></video>
+                <VideoHolderClass
+                    rate={this.state.rate}
+                    speedMultiplier={this.state.speedMultiplier}
+                    videoProps={{id:"vid", width: "1200", controls: true}}
+                    ref={x => this.videoHolder = x}
+                />
+
+                <PollLoop delay={500} callback={() => {
+                    let newTime = this.videoHolder && this.videoHolder.GetCurrentTime() || 0;
+                    if(this.state.currentPlayTime !== newTime) {
+                        this.state.currentPlayTime = newTime;
+                        this.setState({ currentPlayTime: newTime });
+                    }
+                }} />
+
                 <button onClick={() => this.startCamera()}>Start Camera</button>
-                <button onClick={() => this.streamLive()}>Watch Live</button>
                 <div>
                     {this.renderPlayInfo()}
                 </div>
-                <div>
-                    {
-                        recordedRanges.map((range, index) => (
-                            <div
-                                key={index}
-                                style={{backgroundColor: "hsla(193, 75%, 75%, 1)", margin: "2px", width: "400px"}}
-                                onClick={(e) => this.clickTimeBar(e, range)}
-                            >
-                                {formatDuration(now - range.firstFrameTime)} AGO, TOOK {range.lastFrameTime === "live" ? "live" : formatDuration(range.lastFrameTime - range.firstFrameTime)}
-                            </div>
-                        ))
-                    }
-                </div>
+                <RangeSummarizer
+                    rate={this.state.rate}
+                    speedMultiplier={this.state.speedMultiplier}
+                    receivedRanges={rangesObj.receivedRanges}
+                    serverRanges={rangesObj.serverRanges}
+                    requestedRanges={rangesObj.requestedRanges}
+                    currentPlayTime={this.state.currentPlayTime}
+                    onTimeClick={time => this.onTimeClick(time)}
+                />
                 <div>
                     {this.renderTimes()}
                 </div>

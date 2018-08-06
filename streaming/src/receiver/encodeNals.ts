@@ -3,6 +3,7 @@ import { PChanReceive, PChanSend } from "controlFlow/pChan";
 import { spawn } from "child_process";
 
 
+
  //type ThirdArgument<T> = T extends (a: any, b: any, c: infer X) => any ? X : never;
 //type SpawnOptions = ThirdArgument<typeof spawn>;
 function spawnChannel(command: string, args: string[], onProcClose: () => void): (jpegStream: PChanReceive<Buffer>) => PChanReceive<Buffer> {

@@ -14,6 +14,7 @@ import { clock, setTimeServer, getTimeSynced } from "./util/time";
 import { ParseNalHeaderByte, ParseNalInfo } from "mp4-typescript";
 import { createSimulatedFrame } from "./util/jpeg";
 import { randomUID } from "./util/rand";
+import { DownsampledInstance, Downsampler } from "./NALStorage/Downsampler";
 
 // Make sure we kill any previous instances
 console.log("pid", process.pid);
@@ -61,6 +62,162 @@ try {
 
 const sourceId = randomUID("camera");
 
+type Frame = {frame: Buffer; frameTime: number};
+function createEncodeLoop(
+    rawJpegFramePipe: PChanReceive<Frame>,
+    receiver: IReceiver,
+    fps: number,
+    format: v4l2camera.Format,
+    iFrameRate: number,
+    bitRateMBPS: number,
+    formatId: string,
+    rate: number,
+    encoderDestruct: Deferred<void>
+) {
+    let outputJpegFrameTimes: number[][] = [];
+
+    // Downsample to the requested FPS.
+    let jpegFramePipe = TransformChannelAsync<Frame, Buffer>(async ({inputChan, outputChan}) => {
+        let curFrameTimes: number[] = [];
+        let frameDuration = 1000 / fps;
+        let nextFrameTime = clock() + frameDuration;
+        let curLag = 0;
+        while(true) {
+            let frameObj = await inputChan.GetPromise();
+            let frame = frameObj.frame;
+            let rawFrameTime = frameObj.frameTime;
+            if(rawFrameTime === undefined) {
+                console.error(`No time for frame. That should be impossible`);
+                rawFrameTime = Date.now();
+            }
+            curFrameTimes.push(rawFrameTime);
+            
+            let curTime = clock();
+            if(curTime < nextFrameTime - curLag) continue;               
+            let frameLag = curTime - nextFrameTime;
+            curLag += frameLag;
+            nextFrameTime = nextFrameTime + frameDuration;
+            //console.log({frameLag, nextFrameTime, curTime});
+            let frameTimes = curFrameTimes;
+            curFrameTimes = [];
+            outputJpegFrameTimes.push(frameTimes);
+            outputChan.SendValue(frame);
+        }
+    })(rawJpegFramePipe);
+
+
+    let nalPipe = encodeJpegFrames({
+        width: format.width,
+        height: format.height,
+        frameNumerator: format.interval.numerator,
+        frameDenominator: format.interval.denominator,
+        iFrameRate: iFrameRate,
+        bitRateMBPS: bitRateMBPS,
+        jpegStream: jpegFramePipe,
+        onProcClose: () => {
+            console.log(`Encoder closed`);
+            encoderDestruct.Resolve(undefined);
+        }
+    });
+
+    // It is a lot easier to figure out frame times if we (the sender) splits h264 data into nals
+    let nalUnits = splitByStartCodes(nalPipe);
+
+    (async () => {
+        try {
+            let currentSps: Buffer|undefined;
+            let currentPps: Buffer|undefined;
+
+            while(true) {
+                let nalUnit = await nalUnits.GetPromise();
+
+                let time = getTimeSynced();
+                let curTime = Date.now();
+                let senderConfig: NALHolder["senderConfig"] = {
+                    fps,
+                    format,
+                    cameraSendTime: time,
+                    timeOffset: curTime - time,
+                    serverReceiveTime: 0,
+                    formatId,
+                    sourceId
+                };
+
+                let b = nalUnit[0];
+                let type = ParseNalHeaderByte(b);
+                if(type === "slice") {
+                    let nalDetailedInfo = ParseNalInfo(nalUnit);
+                    if(nalDetailedInfo.type !== "slice") {
+                        throw new Error(`ParseNalHeaderByte and ParseNalInfo give different types. ParseNalHeaderByte gave slice, ParseNalInfo gave ${nalDetailedInfo.type}`);
+                    }
+
+                    let frameRecordTimes = outputJpegFrameTimes.shift();
+                    if(frameRecordTimes === undefined) {
+                        console.error("Frames timings messed up, received more frames than frames pushed");
+                    } else if(outputJpegFrameTimes.length > 100) {
+                        // TODO: This likely means our encoder can't keep up. Reduce the fps!
+                        console.error("Frames timings messed up, pushed way more frames than frames received");
+                    }
+
+                    frameRecordTimes = frameRecordTimes || [getTimeSynced()];
+                    let frameRecordTime = frameRecordTimes[frameRecordTimes.length - 1];
+
+                    let type: NALType;
+                    if(nalDetailedInfo.sliceType === "I") {
+                        type = NALType.NALType_keyframe;
+                    } else if(nalDetailedInfo.sliceType === "P") {
+                        type = NALType.NALType_interframe;
+                    } else {
+                        throw new Error(`Unhandled sliceType ${nalDetailedInfo.sliceType}`);
+                    }
+
+                    if(currentSps === undefined) {
+                        throw new Error(`Received I frame without first receiving an SPS. How do we interpret this?`);
+                    }
+                    if(currentPps === undefined) {
+                        throw new Error(`Received I frame without first receiving a PPS. How do we interpret this?`);
+                    }
+                    let delay = Date.now() -  frameRecordTime;
+                    console.log(`Send NAL slice, delayed ${delay}ms`);
+                    receiver.acceptNAL_VOID({
+                        nal: nalUnit,
+                        recordInfo: { type: "slice", frameRecordTimes, frameRecordTime },
+                        senderConfig,
+                        time: frameRecordTime,
+                        type: type,
+                        width: senderConfig.format.width,
+                        height: senderConfig.format.height,
+                        sps: currentSps,
+                        pps: currentPps,
+                        rate
+                    });
+                } else if(type === "sps" || type === "pps") {
+                    if(type === "sps") {
+                        currentSps = nalUnit;
+                    }
+                    if(type === "pps") {
+                        currentPps = nalUnit;
+                    }
+                } else {
+                    console.log(`Unknown NAL of size ${nalUnit.length}, type ${type}. Not sending to receiver, as unknown types will probably break it.`);
+                }
+            }
+        } catch(e) {
+            if(!nalPipe.IsClosedError(e)) {
+                console.error(e);
+            }
+        }
+
+        console.log(`Finished nal pipe (this should never happen)`);
+    })();
+
+    return {
+        jpegFramePipe,
+        nalPipe,
+        nalUnits
+    };
+}
+
 class StreamLoop {
     constructor(
         receiver: IReceiver,
@@ -68,7 +225,9 @@ class StreamLoop {
         format: v4l2camera.Format,
         iFrameRate: number,
         bitRateMBPS: number,
-        formatId: string
+        formatId: string,
+        downsampleRate: number,
+        ratePrevCounts: { [rate: number]: number }
     ) {
         if (format.formatName !== "MJPG") {
             throw new Error("Format must use MJPG");
@@ -87,10 +246,7 @@ class StreamLoop {
 
         let captureLoopDestruct = new Deferred<void>();
         let cameraDestruct = new Deferred<void>();
-        let encoderDestruct = new Deferred<void>();
 
-
-        let rawJpegFramePipe = new PChan<{frame: Buffer; frameTime: number}>();
         
         // It appears as if the camera has a rolling buffer of frames, populated at the frequency of the format we requested.
         //  This means if we are slow to poll, we still get the correct frame rate (sort of). Which means... we want this buffer
@@ -98,6 +254,48 @@ class StreamLoop {
         //  and the time we call capture. Then after having the maximum number of frames we can down sample to the frame rate we want.
         // Also, it looks like polling as fast as we can't won't return duplicates, it will just delay, so we always want to poll
         //  as fast as we can.
+
+        
+        let jpegEncoders: {
+            encode: JpegEncoder;
+            rawJpegFramePipe: PChan<Frame>;
+            jpegFramePipe: PChanReceive<Buffer>;
+            nalPipe: PChanReceive<Buffer>;
+            nalUnits: PChanReceive<Buffer>;
+            encoderDestruct: Deferred<void>;
+        }[] = [];
+
+        class JpegEncoder implements DownsampledInstance<Frame> {
+            public rawJpegFramePipe = new PChan<Frame>();
+            public encoderDestruct = new Deferred<void>();
+            constructor(public Rate: number) {
+                console.log(`New jpeg encoder for rate ${Rate}`);
+
+                let dtors = createEncodeLoop(
+                    this.rawJpegFramePipe,
+                    receiver,
+                    fps / this.Rate,
+                    format,
+                    iFrameRate,
+                    bitRateMBPS,
+                    formatId,
+                    Rate,
+                    this.encoderDestruct
+                );
+
+                jpegEncoders.push({
+                    ...dtors,
+                    rawJpegFramePipe: this.rawJpegFramePipe,
+                    encoderDestruct: this.encoderDestruct,
+                    encode: this
+                });
+            }
+            public AddValue(val: Frame): void {
+                this.rawJpegFramePipe.SendValue(val);
+            }
+        }
+
+        let downsampler = new Downsampler(downsampleRate, JpegEncoder, ratePrevCounts[1]);
 
         const frameLoop = () => {
             try {
@@ -118,7 +316,7 @@ class StreamLoop {
                         let frame = Buffer.from(raw);
 
                         //console.log(`Got frame ${frame.length} at time ${frameTime}`);
-                        rawJpegFramePipe.SendValue({
+                        downsampler.AddValue({
                             frame,
                             frameTime
                         });
@@ -135,170 +333,38 @@ class StreamLoop {
         frameLoop();
 
 
-        let outputJpegFrameTimes: number[][] = [];
-
-        // Downsample to the requested FPS.
-        let jpegFramePipe = TransformChannelAsync<{frame: Buffer; frameTime: number}, Buffer>(async ({inputChan, outputChan}) => {
-            let curFrameTimes: number[] = [];
-            let frameDuration = 1000 / fps;
-            let nextFrameTime = clock() + frameDuration;
-            let curLag = 0;
-            while(true) {
-                let frameObj = await inputChan.GetPromise();
-                let frame = frameObj.frame;
-                let rawFrameTime = frameObj.frameTime;
-                if(rawFrameTime === undefined) {
-                    console.error(`No time for frame. That should be impossible`);
-                    rawFrameTime = Date.now();
-                }
-                curFrameTimes.push(rawFrameTime);
-                
-                let curTime = clock();
-                if(curTime < nextFrameTime - curLag) continue;               
-                let frameLag = curTime - nextFrameTime;
-                curLag += frameLag;
-                nextFrameTime = nextFrameTime + frameDuration;
-                //console.log({frameLag, nextFrameTime, curTime});
-                let frameTimes = curFrameTimes;
-                curFrameTimes = [];
-                outputJpegFrameTimes.push(frameTimes);
-                outputChan.SendValue(frame);
-            }
-        })(rawJpegFramePipe);
-
-
-        let nalPipe = encodeJpegFrames({
-            width: format.width,
-            height: format.height,
-            frameNumerator: format.interval.numerator,
-            frameDenominator: format.interval.denominator,
-            iFrameRate: iFrameRate,
-            bitRateMBPS: bitRateMBPS,
-            jpegStream: jpegFramePipe,
-            onProcClose: () => {
-                console.log(`Encoder closed`);
-                encoderDestruct.Resolve(undefined);
-            }
-        });
-
-        // It is a lot easier to figure out frame times if we (the sender) splits h264 data into nals
-        let nalUnits = splitByStartCodes(nalPipe);
-
-        (async () => {
-            try {
-                let currentSps: Buffer|undefined;
-                let currentPps: Buffer|undefined;
-
-                while(true) {
-                    let nalUnit = await nalUnits.GetPromise();
-
-                    let time = getTimeSynced();
-                    let curTime = Date.now();
-                    let senderConfig: NALHolder["senderConfig"] = {
-                        fps,
-                        format,
-                        cameraSendTime: time,
-                        timeOffset: curTime - time,
-                        serverReceiveTime: 0,
-                        formatId,
-                        sourceId
-                    };
-
-                    let b = nalUnit[0];
-                    let type = ParseNalHeaderByte(b);
-                    if(type === "slice") {
-                        let nalDetailedInfo = ParseNalInfo(nalUnit);
-                        if(nalDetailedInfo.type !== "slice") {
-                            throw new Error(`ParseNalHeaderByte and ParseNalInfo give different types. ParseNalHeaderByte gave slice, ParseNalInfo gave ${nalDetailedInfo.type}`);
-                        }
-
-                        // Every I frame should start with an sps, and pps. They are super small (easily less than 30 bytes combined),
-                        //  and this makes it easier to split up the video nicely (making sure every segment starts with an I frame),
-                        //  by making more starting points, and making starting points easier to find (as spses are easier to identify
-                        //  than I frames, as they just require reading the first byte of data).
-                        if(nalDetailedInfo.sliceType === "I") {
-                            if(currentSps === undefined) {
-                                throw new Error(`Received I frame without first receiving an SPS. How do we interpret this?`);
-                            }
-                            if(currentPps === undefined) {
-                                throw new Error(`Received I frame without first receiving a PPS. How do we interpret this?`);
-                            }
-                            receiver.acceptNAL({
-                                nal: currentSps,
-                                type: { type: "sps" },
-                                senderConfig
-                            });
-                            receiver.acceptNAL({
-                                nal: currentPps,
-                                type: { type: "pps" },
-                                senderConfig
-                            });
-                        }
-
-                        let frameRecordTimes = outputJpegFrameTimes.shift();
-                        if(frameRecordTimes === undefined) {
-                            console.error("Frames timings messed up, received more frames than frames pushed");
-                        } else if(outputJpegFrameTimes.length > 100) {
-                            // TODO: This likely means our encoder can't keep up. Reduce the fps!
-                            console.error("Frames timings messed up, pushed way more frames than frames received");
-                        }
-
-                        frameRecordTimes = frameRecordTimes || [getTimeSynced()];
-                        let frameRecordTime = frameRecordTimes[frameRecordTimes.length - 1];
-
-                        receiver.acceptNAL({
-                            nal: nalUnit,
-                            type: { type: "slice", frameRecordTimes, frameRecordTime },
-                            senderConfig
-                        });
-                    } else if(type === "sps" || type === "pps") {
-                        if(type === "sps") {
-                            currentSps = nalUnit;
-                        }
-                        if(type === "pps") {
-                            currentPps = nalUnit;
-                        }
-                    } else {
-                        console.log(`Unknown NAL of size ${nalUnit.length}, type ${type}. Not sending to receiver, as unknown types will probably break it.`);
-                    }
-                }
-            } catch(e) {
-                if(!nalPipe.IsClosedError(e)) {
-                    console.error(e);
-                }
-            }
-
-            console.log(`Finished nal pipe (this should never happen)`);
-        })();
-
 
 
         // We have to fill up all destructDeferreds in here, because if we dynamically add any they might be added just as we are destructing
         //  but before this.destructing is set, which will cause a resource leak.
         this.destructDeferreds = [
             captureLoopDestruct,
-            cameraDestruct,
-            encoderDestruct
+            cameraDestruct
         ];
 
-        this.destructRequested.Promise().then(() => {
-            if(!rawJpegFramePipe.IsClosed()) {
-                rawJpegFramePipe.Close();
-            }
-            if(!jpegFramePipe.IsClosed()) {
-                jpegFramePipe.Close();
-            }
-            if(!nalPipe.IsClosed()) {
-                console.log(`Requesting encoder close`);
-                nalPipe.Close();
-            }
-            if(!nalUnits.IsClosed()) {
-                nalUnits.Close();
+        captureLoopDestruct.Promise().then(() => {
+            for(let dtors of jpegEncoders) {
+                if(!dtors.rawJpegFramePipe.IsClosed()) {
+                    dtors.rawJpegFramePipe.Close();
+                }
+                if(!dtors.jpegFramePipe.IsClosed()) {
+                    dtors.jpegFramePipe.Close();
+                }
+                if(!dtors.nalPipe.IsClosed()) {
+                    console.log(`Requesting encoder close`);
+                    dtors.nalPipe.Close();
+                }
+                if(!dtors.nalUnits.IsClosed()) {
+                    dtors.nalUnits.Close();
+                }
             }
         });
 
         // Don't stop the camera until everything else is closed. It is picky about stuff, and can crash if there are pending calls.
-        Promise.all([captureLoopDestruct.Promise(), encoderDestruct.Promise()]).then(() => {
+        Promise.all([captureLoopDestruct.Promise()]).then(async () => {
+            // Eh... there is a race condition here. But oh well...
+            await Promise.all(jpegEncoders.map(x => x.encoderDestruct.Promise()));
+
             console.log(`Stopping camera`);
             camera.stop(() => {
                 console.log(`Camera stopped`);
@@ -355,6 +421,8 @@ class Sender implements ISender {
         bitRateMBPS: number,
         format: v4l2camera.Format,
         formatId: string,
+        downsampleRate: number,
+        ratePrevCounts: { [rate: number]: number }
     ): Promise<void> {
         let server = this.server;
         if(this.streamLoop) {
@@ -365,7 +433,7 @@ class Sender implements ISender {
         // The previous streamLoop has been destructed (if it existed), and there is only one returned call from Destruct,
         //  that is the freshest call, and that is us. I assume all promise accepts will be called in order, at once. That way
         //  after Destruct finishes this.streamLoop is synchronously replaced with a new instance, which can then further be destructed.
-        this.streamLoop = new StreamLoop(this.server, fps, format, iFrameRate, bitRateMBPS, formatId);
+        this.streamLoop = new StreamLoop(this.server, fps, format, iFrameRate, bitRateMBPS, formatId, downsampleRate, ratePrevCounts);
 
         console.log(`Finished set format`);
     }
@@ -383,7 +451,7 @@ let server!: IReceiver;
 //wsClass.ThrottleConnections({ kbPerSecond: 200, latencyMs: 100 }, () => {
     server = wsClass.ConnectToServer<IReceiver>({
         port: 7060,
-        host: "192.168.0.19",
+        host: "192.168.0.202",
         bidirectionController: sender
     });
 //});
@@ -404,92 +472,3 @@ setInterval(() => {
 }, 60000);
 
 //*/
-
-
-
-
-
-
-//console.log(wsClass.test() - 10);
-
-//var cam = new v4l2camera.Camera("/dev/video0");
-//console.log(cam.formats);
-/*
-   interval: { numerator: 1, denominator: 30 } },
-  { formatName: 'MJPG',
-    format: 1196444237,
-    width: 1280,
-    height: 720,
-    interval: { numerator: 1, denominator: 30 } }
-*/
-/*
-let format = cam.formats.filter(x => x.formatName === "MJPG")[0];
-//format = cam.formats[cam.formats.length - 1];
-console.log(format);
-cam.configSet(format);
-if (cam.configGet().formatName !== "MJPG") {
-  console.log("NOTICE: MJPG camera required");
-  process.exit(1);
-}
-cam.start();
-cam.capture(function onCapture(success) {
-    if(curCapture !== capturePending) {
-        capturePending = null;
-        console.warn(`Got unexpected capture, ignoring`);
-        return;
-    }
-    capturePending = null;
-    //console.log(`Finished ${curCapture}`);
-    
-    // Uint8Array
-    var frame = cam.frameRaw();
-    let buffer = Buffer.from(frame);
-});
-*/
-
-/*
-
-connectLoop();
-
-// Promise resolve when connection closes
-function connect() {
-    return new Promise((resolve) => {
-        let conn = new ws("ws://192.168.0.202:6070");
-        conn.on("open", () => {
-            console.log("opened");
-        });
-        conn.on("close", () => {
-            console.log("closed");
-            resolve();
-        });
-        conn.on("error", () => {
-            console.log("error");
-            resolve();
-        });
-        conn.on("message", data => {
-            var obj = JSON.parse(data);
-            var size = obj.size;
-
-            var buffer = new Buffer(size);
-            for(var i = 0; i < size; i++) {
-                buffer[i] = i % 256;
-            }
-
-            conn.send(buffer);
-        });
-    });
-}
-
-function delay(time) {
-    return new Promise(resolve => {
-        setTimeout(resolve, time);
-    });
-}
-
-async function connectLoop() {
-    while(true) {
-        await connect();
-        await delay(1000);
-    }
-}
-*/

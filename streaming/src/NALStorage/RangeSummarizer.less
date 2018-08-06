@@ -1,0 +1,42 @@
+.RangeSummarizer {
+    &-segment {
+        background-color: hsla(193, 75%, 75%, 1);
+        margin: 2px;
+        width: 400px;
+
+        position: relative;
+
+        &--playing {
+            background-color: hsla(33, 75%, 75%, 1);
+        }
+
+        &-requestRange {
+            position: absolute;
+
+            background-color: hsla(203, 75%, 75%, 1);
+
+            height: 50%;
+            top: 0%;
+        }
+
+        &-loadedRange {
+            position: absolute;
+
+            background-color: hsla(283, 75%, 75%, 1);
+
+            height: 50%;
+            top: 50%;
+        }
+
+        &-playMarker {
+            position: absolute;
+
+            background-color: hsla(13, 75%, 75%, 1);
+
+            width: 4px;
+            left: -2px;
+            height: 100%;
+            top: 0px;
+        }
+    }
+}

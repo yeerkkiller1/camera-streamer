@@ -1,4 +1,4 @@
-scp ./dist/sender.js pi@192.168.0.15:~/
+scp ./dist/sender.js pi@192.168.0.205:~/
 
 uname="$(uname)"
 if [ "$uname" == "Darwin" ]; then

@@ -2,27 +2,17 @@ import * as wsClass from "ws-class";
 
 import { PChan, pchan, TransformChannel, TransformChannelAsync, Deferred, g } from "pchannel";
 
-import { CreateVideo, MuxVideo, ParseNalInfo } from "mp4-typescript";
 import { mkdir, writeFile, writeFileSync, readFileSync } from "fs";
 
-import * as net from "net";
-import { PChanReceive, PChanSend } from "controlFlow/pChan";
-import { makeProcessSingle } from "./util/singleton";
 import { clock, TimeServer, setTimeServer } from "./util/time";
 import { randomUID } from "./util/rand";
 
-import { CreateTempFolderPath } from "temp-folder";
-
 // For polyfills
 import "./util/math";
-import { binarySearchMapped } from "./util/algorithms";
+import { NALManager, createNALManager, testAddRanges } from "./NALStorage/NALManager";
+import { keyBy, mapObjectValues } from "./util/misc";
 
-console.log("pid", process.pid);
-makeProcessSingle("receiver");
-
-setInterval(() => {
-    console.log("alive2");
-}, 60000);
+//makeProcessSingle("receiver");
 
 /*
 pi setup code:
@@ -97,64 +87,26 @@ async function getFinalStorageFolder() {
 }
 
 
-class PChannelMultiListen<T> implements PChanSend<T> {
-    callbacks: ((value: T) => void)[] = [];
 
-    /** Returns a close callback. And if callback throughs, we close the connection. */
-    public Subscribe(callback: (value: T) => void): () => void {
-        this.callbacks.push(callback);
-        return () => {
-            this.removeCallback(callback);
-        };
-    }
-
-    private removeCallback(callback: (value: T) => void) {
-        let index = this.callbacks.indexOf(callback);
-        if(index < 0) {
-            console.warn(`Could not callback on PChannelMultiListen. Maybe we are searching for it incorrectly?, in which case we will leak memory here, and probably throw lots of errors.`);
-        } else {
-            this.callbacks.splice(index, 1);
-        }
-    }
-
-    private closeDeferred = new Deferred<void>();
-    OnClosed: Promise<void> = this.closeDeferred.Promise();
-    IsClosed(): boolean { return !!this.closeDeferred.Value; }
-
-    SendValue(value: T): void {
-        let callbacks = this.callbacks.slice();
-        for(let callback of callbacks) {
-            try {
-                callback(value);    
-            } catch(e) {
-                console.error(`Error on calling callback. Assuming requested no longer wants data, and are removing it from callback list. Error ${String(e)}`);
-                this.removeCallback(callback);
-            }
-        }
-    }
-    SendError(err: any): void {
-        console.error(`Error on PChannelMultiListen. There isn't really anything to do with this (the clients don't want it), so just swallowing it?`, err);
-    }
-    
-    Close(): void {
-        this.closeDeferred.Resolve(undefined);
-    }
-    IsClosedError(err: any): boolean {
-        return false;
-    }
-}
 
 // We store nal units (1 nal = 1 Buffer form, sps and pps easily available per buffer, with info on slice type),
 //  and then dynamically mux depending on what the client requests.
 
 // 200KB/s source, looking like 40KB per frame.
-//  (this should be configurable, because I definitely might change it.)
-//  Live, source rate
-//      - Short term storage, 30 days. Regular S3. 200KB/s will use 500GB a month, so ~$11.5 per month.
-//  1/10 source
-//      - Long term storage, 180 days, glacier S3. So 300GB at once, which is ~$1.2 per month.
-//  1/100
-//      - Forever. Glacier S3. +60GB a year, so $0.24 per month after 1 year, $2.4 per month after 10 years.
+
+// Storage size
+//  rate = 1, count = size / 2 / rate per nal
+//  rate = 4, count = prev_count * 2
+// This fills up the size, and is easily maintainable by making every frame buffer be a rolling buffer
+//  (or really we should just delete old videos).
+// We should have segments stored remotely, and some stored locally.
+// There should be a local sql lite server for keeping track of segments stored remotely
+// We should write locally in a rolling buffer, keep track of what we have in memory, and then read
+//  back local files on boot.
+// Locally we should write nal lookups in two files, one for nals, one for nal times.
+// Remotely every file should have the lookup as a file prefix.
+//  Lookup should be a list of nal times and byte locations.
+
 
 // 5.7 days at 200KB/s (100GB) from glacier (or infrequent access) costs about $3 for 1-5 minutes access time,
 //  $1 for 3-5 hours to access, and $0.25 for 5-12 hours to access.
@@ -225,48 +177,44 @@ All storage	$0.004 per GB
 // There should probably be a "get single live jpeg image" test function, so you can see the quality
 //  degradation from encoding, and the maximum theoretical video quality.
 
-class Muxer {
-    constructor(public readonly rate: number) { }
 
-    public AcceptNAL(nal: NALHolder) {
 
-    }
+// S3
+//  Has to have SQL lite server to keep track of what S3 objects exist
+//  Has to have a local disk buffer when buffer isn't large enough to put in S3
 
-    public async Subscribe(args: {
-        time: VideoTime;
-        rate: number;
-        client: IVideoAcceptor
-    }): Promise<void> {
+// One per video rate?
+interface NALStorage {
+    AcceptNAL(nal: NALHolder): void;
+    
+    // We need to be able to query to find what data exists.
+    //  There will be chunks that are immutable.
+    //  But also some data that is constantly changing in size.
 
-    }
+    // Maybe, a constant number of ranges, with the possibility of time being "live", and ranges have the possibility of
+    //  having a flag holes=true.
+
+    
 }
+
+const RateMultiplier = 4;
 
 class Receiver extends TimeServer implements IReceiver, IHost {
     // Eh... might as well use &, because we can't narrow the type anyway, as this property
     //  will be a proxy, and I haven't implemented the in operator yet!
     client!: ISender&IBrowserReceiver&ConnExtraProperties;
-    clientVideoSegment = new PChannelMultiListen<LiveVideoSegment>();
+
 
     cameraClient = new Deferred<ISender>();
-    curFormatId = randomUID("format");
+    nalManager = createNALManager();
 
-    // If it is a string it is the sourceId of a camera that closed.
-    liveDataChan = new PChan<LiveVideoSegment|string>();
-
-    constructor() {
-        super();
-    
-        TransformChannelAsync<LiveVideoSegment|string, void>(x => this.storeLiveData(x.inputChan))(this.liveDataChan).GetPromise().catch(e => {
-            console.error(`storeLiveData loop crashed`, e)
-        });
-        this.clientVideoSegment.Subscribe(segment => {
-            try {
-                this.liveDataChan.SendValue(segment);
-            } catch(e) {
-                console.log(`liveDataChan err`);
-            }
-        });
-    }
+    /*
+    x = (() => {
+        setInterval(async () => {
+            testAddRanges(await this.nalManager, RateMultiplier);
+        }, 1000 * 1);
+    })();
+    //*/
 
     public async getFormats(): Promise<v4l2camera.Format[]> {
         let client = await this.cameraClient.Promise();
@@ -280,8 +228,92 @@ class Receiver extends TimeServer implements IReceiver, IHost {
         bitRateMBPS: number,
         format: v4l2camera.Format
     ): Promise<void> {
-        this.curFormatId = randomUID("format");
-        await (await this.cameraClient.Promise()).setStreamFormat(fps, iFrameRate, bitRateMBPS, format, this.curFormatId);
+        let curFormatId = randomUID("format");
+        let manager = await this.nalManager;
+        let rates = manager.GetRates();
+        let rateCounts = mapObjectValues(keyBy(rates.map(x => ({rate: x, count: manager.GetNALsRanges(x).frameTimes.length})), x => String(x.rate)), x => x.count);
+        await (await this.cameraClient.Promise()).setStreamFormat(fps, iFrameRate, bitRateMBPS, format, curFormatId, RateMultiplier, rateCounts);
+    }
+
+    public async getRates(): Promise<number[]> {
+        return (await this.nalManager).GetRates();
+    }
+    public async syncTimeRanges(rate: number, speedMultiplier: number): Promise<NALRanges> {
+        let client = this.client;
+        let nalManager = await this.nalManager;
+
+        nalManager.SubscribeToNALs(rate, speedMultiplier, nal => {
+            client.acceptNewTimeRanges_VOID({
+                rate,
+                segmentRanges: [],
+                frameTimes: [nal]
+            })
+        });
+
+        return nalManager.GetNALsRanges(rate);
+    }
+
+    private pendingGetVideoCalls: {
+        client: Receiver["client"];
+        cancelTokens: Deferred<void>[];
+        onCallComplete: Deferred<void>[];
+    }[] = [];
+    public async GetVideo(
+        startTime: number,
+        lastTime: number,
+        startTimeExclusive: boolean,
+        rate: number,
+        speedMultiplier: number,
+    ): Promise<void> {
+        let client = this.client;
+        let cancelToken = new Deferred<void>();
+        let onCallComplete = new Deferred<void>();
+        let index = this.pendingGetVideoCalls.findIndex(x => x.client === client);
+        if(index < 0) {
+            index = this.pendingGetVideoCalls.length;
+            this.pendingGetVideoCalls.push({
+                client,
+                cancelTokens: [],
+                onCallComplete: []
+            });
+        }
+        let obj = this.pendingGetVideoCalls[index];
+        obj.cancelTokens.push(cancelToken);
+        try {
+            let manager = await this.nalManager;
+            await manager.GetVideo(startTime, lastTime, startTimeExclusive, rate, speedMultiplier, video => {
+                client.acceptVideo_VOID(video, { firstTime: startTime, lastTime });
+            }, cancelToken);
+
+            onCallComplete.Resolve(undefined);
+        } finally {
+            {
+                let index = obj.cancelTokens.indexOf(cancelToken);
+                if(index >= 0) {
+                    obj.cancelTokens.splice(index, 1);
+                }
+            }
+            {
+                let index = obj.onCallComplete.indexOf(onCallComplete);
+                if(index >= 0) {
+                    obj.onCallComplete.splice(index, 1);
+                }
+            }
+        }
+    }
+    public async CancelVideo(): Promise<void> {
+        let client = this.client;
+        let index = this.pendingGetVideoCalls.findIndex(x => x.client === client);
+        if(index < 0) {
+            return;
+        }
+        let obj = this.pendingGetVideoCalls[index];
+        for(let cancelToken of obj.cancelTokens) {
+            cancelToken.Resolve(undefined);
+        }
+        for(let callComplete of obj.onCallComplete) {
+            await callComplete.Promise();
+        }
     }
 
     public async cameraPing(sourceId: string) {
@@ -293,395 +325,27 @@ class Receiver extends TimeServer implements IReceiver, IHost {
         let promise = client.ClosePromise;
         promise.then(() => {
             console.log("Camera closed");
-            this.liveDataChan.SendValue(sourceId);
         });
     }
 
-    /** Sorted by startTime */
-    private timeRanges: {
-        time: TimeRange;
-        segments: RecordedVideoSegment[];
-    }[] = [];
-    private async storeLiveData(segmentsChan: PChanReceive<LiveVideoSegment|string>) {
-        while(true) {
-            //todonext
-            // Sped up video. We can combine videos with the same sps and pps
-
-            let lastSourceId: string|undefined;
-
-            const finishSegment = () => {
-                if(this.timeRanges.length === 0 || this.timeRanges.last().time.lastFrameTime !== "live") return;
-                console.log("Segment finished");
-                let liveSegments = this.timeRanges.last();
-                liveSegments.time.lastFrameTime = liveSegments.segments.last().cameraRecordTimes.last();
-            };
-            
-            while(true) {
-                let segment = await segmentsChan.GetPromise();
-                if(typeof segment === "string") {
-                    console.log(`Closed ${segment}, current ${lastSourceId}`);
-                    if(segment === lastSourceId) {
-                        finishSegment();
-                    }
-                    continue;
-                }
-
-                if(segment.sourceId !== lastSourceId) {
-                    finishSegment();
-
-                    // Start segment
-                    console.log("Segment started");
-                    
-                    this.timeRanges.push({
-                        time: {
-                            firstFrameTime: segment.cameraRecordTimes[0],
-                            lastFrameTime: "live"
-                        },
-                        segments: []
-                    });
-                }
-
-                console.log(`Segment loop ${segment.sourceId}`);
-                this.timeRanges.last().segments.push({
-                    type: "recorded",
-                    mp4Video: segment.mp4Video,
-                    baseMediaDecodeTimeInSeconds: segment.baseMediaDecodeTimeInSeconds,
-                    cameraRecordTimes: segment.cameraRecordTimes,
-                    rate: 1
-                });
-
-                lastSourceId = segment.sourceId;
-            }
-        }
-    }
-    public async getTimeRanges(info: {
-        /** We return one range before this time (if possible), and then up to 100 ranges after it. */
-        startTime: number;
-    }): Promise<{
-        ranges: TimeRange[]
-    }> {
-        let index = binarySearchMapped(this.timeRanges, info.startTime, x => x.time.firstFrameTime, (a, b) => a - b);
-        if(index < 0) {
-            index = ~index - 1;
-            if(index < 0) {
-                index = 0;
-            }
-        }
-        let ranges: TimeRange[] = this.timeRanges.slice(index, index + 2).map(x => x.time);
-        return { ranges: ranges };
-    }
-
-    private streamLoops: {
-        client: Receiver["client"];
-        close: () => Promise<void>;
-    }[] = [];
-
-    private async closeStreams(client: Receiver["client"]) {
-        let prevStreams = this.streamLoops.filter(x => x.client === client);
-        for(let prevStream of prevStreams) {
-            console.log(`Closing previous stream to same client`);
-            await prevStream.close();
-            console.log(`Closed previous stream to same client`);
-        }
-        let streamLoops = this.streamLoops;
-        for(let i = streamLoops.length - 1; i >= 0; i--) {
-            if(streamLoops[i].client === client) {
-                streamLoops.splice(i, 1);
-            }
-        }
-    }
-
-    public async subscribeToCamera(info: {
-        time: VideoTime;
-        rate: number;
-    }) {
-        let client = this.client;
-
-        await this.closeStreams(client);
-
-        let cancelId: number|undefined;
-        let close = false;
-        let closedDeferred = new Deferred<void>();
-        this.streamLoops.push({
-            client,
-            close() {
-                clearTimeout(cancelId);
-                close = true;
-                closedDeferred.Resolve(undefined);
-                return closedDeferred.Promise();
-            }
+    public acceptNAL_VOID(info: NALHolder): void {
+        this.nalManager.then((manager) => {
+            manager.AddNAL(info);
         });
-
-        if(info.time === "live") {
-            if(info.rate !== 1) {
-                throw new Error(`Live and rate !== 1 is invalid. Rate was ${info.rate}`);
-            }
-            return this.subscribeToCameraLive(client);
-        }
-
-
-        // Okay... using time we can find the start range to play at. And then... we should
-        //  just start playing. We might play at a faster than 1 rate, so we should handle
-        //  catching up to live and then switching to a live stream. Otherwise (when we
-        //  are not live), we don't need a channel, we can just iterate over the array of videos?
-        // Until we add s3 handling, then we will basically be streaming from s3?
-        // And actually... if we are streaming from s3, do we even want to have the server in the middle?
-        //  (yes, for caching, to reduce s3 bandwidth).
-
-        console.log("Starting video stream");
-
-        let index = binarySearchMapped(this.timeRanges, info.time, x => x.time.firstFrameTime, (a, b) => a - b);
-        if(index < 0) {
-            index = ~index - 1;
-            if(index < 0) {
-                index = 0;
-            }
-        }
-        let segObj = this.timeRanges[index];
-        if(!segObj) {
-            throw new Error(`No video at or after time ${info.time}`);
-        }
-        let segIndex = binarySearchMapped(segObj.segments, info.time, x => x.cameraRecordTimes[0], (a, b) => a - b);
-        if(segIndex < 0) {
-            segIndex = ~segIndex - 1;
-            if(segIndex < 0) {
-                throw new Error(`Impossible`);
-            }
-        }
-
-        let firstSegment = true;
-        let time = info.time;
-
-        let nextSegmentTime = clock();
-        let curLag = 0;
-
-        const sendSegment = () => {
-            if(close) return;
-            try {
-                let now = clock();
-                let setTimeoutLag = now - nextSegmentTime;
-                curLag += setTimeoutLag;
-
-                let ranges = this.timeRanges;
-                let segmentObj = ranges[index];
-                let segments = segmentObj.segments;
-                let segment = segments[segIndex];
-
-                //console.log(`Sending segment`);
-                client.acceptVideoSegment_VOID(segment);
-
-                segIndex++;
-                if(segIndex >= segments.length) {
-                    if(segmentObj.time.lastFrameTime === "live") {
-                        // TODO: Switch to live streaming it.
-                        console.log(`Reached the end of the live stream. Ending stream`);    
-                        return;
-                    }
-                    segIndex = 0;
-                    index++;
-                }
-                if(index >= ranges.length) {
-                    console.log(`Sent all video, ending stream`);
-                    return;
-                }
-
-                let nextSegmentStart = segIndex < segments.length ? segments[segIndex].cameraRecordTimes[0] : segment.cameraRecordTimes.last();
-                // TODO: The first iteration should use info.time for this instead
-                let segStart = segment.cameraRecordTimes[0];
-                if(firstSegment) {
-                    firstSegment = false;
-                    segStart = time;
-                }
-                let segmentDuration = nextSegmentStart - segStart - curLag;
-
-                nextSegmentTime = clock() + segmentDuration;
-                cancelId = setTimeout(sendSegment, segmentDuration) as any;
-            } catch(e) {
-                console.error(`Segment loop died`, e);
-            }
-        };
-        sendSegment();
-
-        return {
-            streamRate: 1
-        };
     }
-
-
-    private async subscribeToCameraLive(client: Receiver["client"]) {
-        await this.closeStreams(client);
-
-        let close = false;
-        let closedDeferred = new Deferred<void>();
-        this.streamLoops.push({
-            client,
-            close() {
-                close = true;
-                return closedDeferred.Promise();
-            }
-        });
-        
-        this.clientVideoSegment.Subscribe(video => {
-            if(close) {
-                closedDeferred.Resolve(undefined);
-                throw new Error(`Client requested stop`);
-            }
-            if(video.sourceInfo.formatId !== this.curFormatId) {
-                console.log(`Ignoring encoded data because it was generated using a stale format id.`);
-                return;
-            }
-
-            client.acceptVideoSegment_VOID(video);
-        });
-
-        return {
-            streamRate: 1
-        };
-    }
-
-    
-    nalStream = new PChan<NALHolder>();
-    public acceptNAL(info: NALHolder): void {
-        //console.log(`Received nal size ${info.nal.length}, type ${info.type.type} at ${+new Date()}, from time ${info.type.type === "slice" ? info.type.frameRecordTime : 0}`);
-        info.senderConfig.serverReceiveTime = +new Date();
-
-        this.nalStream.SendValue(info);
-    }
-    muxLoop = (async () => {
-        let stream = this.nalStream;
-        try {
-            
-            // Okay... we want to get frame durations from frame times. So... 
-
-            let nextSps: NALHolder|undefined;
-            while(true) {
-                // TODO: Write either the NALs, or the muxed video to disk, and then to s3, so we have it forever.
-                //  And then expose function to allow seeking of the video.
-                //  - We also want to write some higher fps videos
-                //      - The issue here is that in theory the spses may change from video to video?
-                //          - We should check that, and if they seem to not change, we can just take the nals and 
-                //              make the videos ourselfs (verifying the spses don't change),
-                //          - If they do change often, we have to encode larger chunks, or perhaps re-encode on the remote server?
-                //              (as the frame rate will be so much lower, so encoding speeds can be fairly low.)
-                //  - And we want a low FPS video, for super long term storage. 
-                //      - We can just remux a high fps video to slow it down to get this, or just mux a high fps video twice...
-
-                let sps = nextSps || await stream.GetPromise();
-                if(sps.type.type !== "sps") {
-                    throw new Error(`Expected sps, got ${sps.type.type}`);
-                }
-
-                let pps = await stream.GetPromise();
-                if(pps.type.type !== "pps") {
-                    throw new Error(`Expected pps, got ${pps.type.type}`);
-                }
-
-                let startTime: number|undefined;
-                let frames: NALHolder[] = [];
-                while(true) {
-                    let frame = await stream.GetPromise();
-                    if(frame.type.type === "sps") {
-                        nextSps = frame;
-                        break;
-                    }
-
-                    if(frame.type.type !== "slice") {
-                        throw new Error(`Expected slice, got ${frame.type.type}`);
-                    }
-                    frames.push(frame);
-                    if(!startTime) {
-                        //console.log(`Using frame record time ${frame.type.frameRecordTime}`);
-                        startTime = frame.type.frameRecordTime;
-                    }
-                }
-                startTime = startTime || +new Date();
-
-
-                if(sps.senderConfig.formatId !== this.curFormatId) {
-                    console.log(`Ignoring encoded data in muxer because it was generated using a stale format id.`);
-                    continue;
-                }
-
-
-                //todonext
-                // Oh yeah, the last frame. Frame timings are going to be hard here. We need to guess an fps? We could also just give
-                //  every frame its own time, but... We don't know how long the last frame should last for? We might have to add a one
-                //  nal delay here...
-                let fps = sps.senderConfig.fps;
-
-                let baseMediaDecodeTimeInSeconds = startTime / 1000;
-
-                let frameInfos = frames.map((x, i) => {
-                    if(x.type.type !== "slice") {
-                        throw new Error(`Not possible`);
-                    }
-
-                    let frameDurationInSeconds = 0;
-                    if(i < frames.length - 1) {
-                        let next = frames[i + 1];
-                        if(next.type.type !== "slice") {
-                            throw new Error(`Not possible`);
-                        }
-                        frameDurationInSeconds = (next.type.frameRecordTime - x.type.frameRecordTime) / 1000;
-                        console.log({frameDurationInSeconds});
-                    }
-                    
-                    return {
-                        buf: x.nal,
-                        frameDurationInSeconds
-                    };
-                });
-                frameInfos[frameInfos.length - 1].frameDurationInSeconds = 0;
-
-                //todonext mux video into videos of different speeds. This will mean there less videos at a faster speed
-                //  (as you can't play faster video live, and the only reason we have small increments is for live video).
-
-                //console.log(`Muxing video from ${JSON.stringify(sps.senderConfig)}`);
-                let video = await MuxVideo({
-                    sps: sps.nal,
-                    pps: pps.nal,
-                    frames: frameInfos,
-                    // TODO: This is multiplied by timescale and then rounded. Which means we only have second precision
-                    //  (and this is used for seeking). So, find a way to fix this, because we want frame level seeking precision?
-                    //  And we have to / fps, or else the number becomes too large for 32 bits, which is annoying.
-                    //  Actually... maybe we should just support 64 bits in the box where this is used?
-                    baseMediaDecodeTimeInSeconds: baseMediaDecodeTimeInSeconds,
-                    width: sps.senderConfig.format.width,
-                    height: sps.senderConfig.format.height,
-                });
-
-                this.clientVideoSegment.SendValue({
-                    type: "live",
-                    mp4Video: video,
-                    baseMediaDecodeTimeInSeconds,
-                    cameraRecordTimes: frames.map(x => x.type.type === "slice" ? x.type.frameRecordTime : -1),
-                    frameSizes: frameInfos.map(x => x.buf.length),
-                    cameraRecordTimesLists: frames.map(x => x.type.type === "slice" ? x.type.frameRecordTimes : []),
-                    cameraSendTimes: frames.map(x => x.senderConfig.cameraSendTime),
-                    serverReceiveTime: frames.map(x => x.senderConfig.serverReceiveTime),
-                    serverSendTime: +new Date(),
-                    clientReceiveTime: 0,
-                    cameraTimeOffset: sps.senderConfig.timeOffset,
-                    sourceInfo: {
-                        fps: sps.senderConfig.fps,
-                        formatId: sps.senderConfig.formatId
-                    },
-                    sourceId: sps.senderConfig.sourceId
-                });
-
-                //console.log(`Send muxed video`);
-            }
-        } catch(e) {
-            console.error(e);
-            console.error(`Mux loop died. This is bad... killing server in 30 seconds.`);
-            setTimeout(() => {
-                process.exit();
-            }, 30 * 1000);
-        }
-    })();
 }
 
-wsClass.HostServer(7060, new Receiver());
+var receiver = new Receiver();
+
+
+
+/*
+setInterval(() => {
+    console.log("alive2");
+}, 60000);
+*/
+wsClass.HostServer(7060, receiver);
+
 
 
 //todonext
