@@ -180,10 +180,12 @@ ITimeServer {
      * @param startTime Video is returned starting at the first key frame before or at this startTime (or after is nothing is at or before).
      * @param lastTime All keyframes returned will be at or before this time.
      * @param startTimeExclusive If true startTime now becomes exclusive, and the video is returned starting at the first key frame AFTER startTime.
+     * @param endTimeMinusOne If true we exclude the last video segment (unless the segment after that starts perfectly on the endTime).
+     *                          So if the endTime is a previous startTime we don't send the last segment (the previous start segment) twice.
      * @param rate 
      * @param speedMultiplier 
      */
-    GetVideo(startTime: number, lastTime: number, startTimeExclusive: boolean, rate: number, speedMultiplier: number): Promise<void>;
+    GetVideo(startTime: number, lastTime: number, startTimeExclusive: boolean, endTimeMinusOne: boolean, rate: number, speedMultiplier: number): Promise<void>;
 
     CancelVideo(): Promise<void>;
 

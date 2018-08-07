@@ -15,6 +15,7 @@ import { ParseNalHeaderByte, ParseNalInfo } from "mp4-typescript";
 import { createSimulatedFrame } from "./util/jpeg";
 import { randomUID } from "./util/rand";
 import { DownsampledInstance, Downsampler } from "./NALStorage/Downsampler";
+import { RoundRecordTime } from "./NALStorage/TimeMap";
 
 // Make sure we kill any previous instances
 console.log("pid", process.pid);
@@ -305,7 +306,7 @@ class StreamLoop {
                         captureLoopDestruct.Resolve(undefined);
                         return;
                     }
-                    let frameTime = getTimeSynced();
+                    let frameTime = RoundRecordTime(getTimeSynced());
                     try {
                         if(!success) {
                             console.error("Failed to capture frame");

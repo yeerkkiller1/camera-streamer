@@ -10,6 +10,7 @@ import { getTimeSynced } from "../util/time";
 import "./RangeSummarizer.less";
 import { group } from "../util/math";
 import { SegmentRanges } from "./rangeMapReduce";
+import { RealTimeToVideoTime, RealDurationToVideoDuration } from "./TimeMap";
 
 interface IProps {
     // TODO: Allow ranges to be mutated, by changing endTimes of the last range,
@@ -85,6 +86,9 @@ export class RangeSummarizer extends React.Component<IProps, IState> {
         let { receivedRanges, serverRanges, requestedRanges } = this.props;
         if(!serverRanges) return null;
 
+        let rate = this.props.rate;
+        let mult = this.props.speedMultiplier;
+
         // Show loaded percent, and current frame position indicator.
         let segments = serverRanges.segments.slice().reverse();
 
@@ -117,7 +121,14 @@ export class RangeSummarizer extends React.Component<IProps, IState> {
                                 key={index}
                                 onClick={(e) => this.clickTimeBar(e, range)}
                             >
-                                {range.firstTime} to {range.lastTime} ({formatDuration(range.lastTime - range.firstTime)}, {formatDuration(now - range.firstTime)} AGO)
+                                {range.firstTime} to {range.lastTime} ({formatDuration(range.lastTime - range.firstTime)}, {formatDuration(now - range.firstTime)} AGO
+                                {
+                                    rate !== 1 && (
+                                    <span>
+                                        , {formatDuration(RealDurationToVideoDuration(range.lastTime - range.firstTime, rate, mult))} play time
+                                    </span>
+                                )}
+                                )
 
                                 {requestedOverlapFracs.map((overlap, i) => (
                                     <div key={i} className="RangeSummarizer-segment-requestRange" style={{marginLeft: overlap.startFrac * 100 + "%", width: overlap.sizeFrac * 100 + "%"}}></div>

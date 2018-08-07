@@ -262,6 +262,7 @@ class Receiver extends TimeServer implements IReceiver, IHost {
         startTime: number,
         lastTime: number,
         startTimeExclusive: boolean,
+        endTimeMinusOne: boolean,
         rate: number,
         speedMultiplier: number,
     ): Promise<void> {
@@ -281,7 +282,7 @@ class Receiver extends TimeServer implements IReceiver, IHost {
         obj.cancelTokens.push(cancelToken);
         try {
             let manager = await this.nalManager;
-            await manager.GetVideo(startTime, lastTime, startTimeExclusive, rate, speedMultiplier, video => {
+            await manager.GetVideo(startTime, lastTime, startTimeExclusive, endTimeMinusOne, rate, speedMultiplier, video => {
                 client.acceptVideo_VOID(video, { firstTime: startTime, lastTime });
             }, cancelToken);
 

@@ -12,13 +12,13 @@ import { min, max, sum } from "../util/math";
 
 // For polyfills
 import "../util/math";
-import { binarySearchMapped, binarySearchMap, insertIntoListMap } from "../util/algorithms";
+import { binarySearchMapped, binarySearchMap, insertIntoListMap, findAtOrBefore, findAfter, findAtOrBeforeIndex, findClosest, findClosestIndex } from "../util/algorithms";
 import { formatDuration } from "../util/format";
 import { RangeSummarizer } from "../NALStorage/RangeSummarizer";
 import { VideoHolder, IVideoHolder } from "./VideoHolder";
 import { VideoHolderFake } from "./VideoHolderFake";
 import { PollLoop } from "./PollLoop";
-import { RealTimeToVideoTime } from "../NALStorage/TimeMap";
+import { RealTimeToVideoTime, VideoDurationToRealDuration } from "../NALStorage/TimeMap";
 import { SegmentRanges, reduceRanges } from "../NALStorage/rangeMapReduce";
 import { UnionUndefined } from "../util/misc";
 
@@ -58,6 +58,7 @@ interface IState {
     test?: number;
 
     rate: number;
+    rates: number[];
     speedMultiplier: number;
     
     formats: v4l2camera.Format[];
@@ -68,19 +69,30 @@ interface IState {
 
     currentPlayTime: number;
 
+    playTimes: {
+        [rate: number]: number;
+    };
+
     rangeSummaries: {
         [rate: number]: {
             serverRanges?: SegmentRanges;
             receivedRanges?: SegmentRanges;
             requestedRanges?: SegmentRanges;
+            // Eh... just receivedRanges, but with the addition of incomplete videos, because SegmentRanges can't have flags.
+            videoRanges?: SegmentRanges;
         }
     };
 }
 
-
+//todonext
+// - Switching between rates
+// - Picture grid behavior
+//      - Download a lot of video (of a clock preferrably), and then use that to test this mode
+// - S3 storage.
 class Main extends React.Component<{}, IState> implements IBrowserReceiver {
     state: IState = {
         rate: 1,
+        rates: [],
         speedMultiplier: 1,
 
         formats: [],
@@ -92,6 +104,7 @@ class Main extends React.Component<{}, IState> implements IBrowserReceiver {
         bitrateMbps: 10 / 1000,
 
         currentPlayTime: 0,
+        playTimes: {},
         //*/
 
         // Full resoluation, max fps, low quality
@@ -114,6 +127,7 @@ class Main extends React.Component<{}, IState> implements IBrowserReceiver {
         rangeSummaries: {}
     };
 
+    videoHolders: { [rate: number]: IVideoHolder|undefined|null } = {};
     videoHolder: IVideoHolder|undefined|null;
     
     //vidBuffer: SourceBuffer|undefined;
@@ -138,6 +152,7 @@ class Main extends React.Component<{}, IState> implements IBrowserReceiver {
         this.syncVideoInfo();
     }
     componentWillUnmount() {
+        console.log(`componentWillUnmount`);
         for(let callback of this.unmountCallbacks) {
             try {
                 callback();
@@ -148,6 +163,7 @@ class Main extends React.Component<{}, IState> implements IBrowserReceiver {
     }
 
     componentWillMount() {
+        console.log(`componentWillMount`);
         //todonext
         //  - Simulate connection lag, so we can start to figure out dynamic fps
         //  - Simulate connection closing, and add reconnection logic
@@ -158,8 +174,64 @@ class Main extends React.Component<{}, IState> implements IBrowserReceiver {
     }
 
     async syncVideoInfo() {
-        let ranges = await this.server.syncTimeRanges(this.state.rate, this.state.speedMultiplier);
+        let rates = await this.server.getRates();
+        this.setState({ rates });
+
+        this.setRate(rates[0]);
+    }
+    async setRate(rate: number) {
+
+        // And finally. Now get the real time they are seeked to, and get the same frame in the other rate.
+        // Do we want to alias the time when we switch rates? This means the frame might jump, but will stablize?
+        //  We want to down alias. So, if we are on a certain rate, we should move as close to the frame time of the
+        //  current frame as possible, so we stick to it when lowering the rate (adding more precision).
+        let seekTime = this.state.currentPlayTime;
+
+        //todonext.
+        // 64x
+        // Timescale is 64000000
+        //  Last video should start at 81762747317000 timescale,
+        //      and first frame of last video should start at (81762747317000 + 6404556) timescale
+        //  But, last frame appears to start early, at around (81762747317000 + 6404556 * 0.50001) timescale
+        //  So... frames appear 
+
+        {
+            let oldRate = this.state.rate;
+            let summary = this.state.rangeSummaries[oldRate] || {};
+            let { receivedRanges } = summary;
+            if(receivedRanges) {
+                let timeObj = findClosest(receivedRanges.allFrameTimes, seekTime, x => x.time);
+                if(timeObj) {
+                    // Actually, it looks like rounding is to the closest frame? So just use the exact time.
+                    seekTime = timeObj.time;
+                }
+            }
+        }
+        
+        this.videoHolder = this.videoHolders[rate];
+        if(this.videoHolder) {
+            this.videoHolder.SeekToTime(seekTime);
+        }
+        this.state.rate = rate;
+        this.state.currentPlayTime = seekTime;
+        this.setState({ rate, currentPlayTime: seekTime });
+        let ranges = await this.server.syncTimeRanges(rate, this.state.speedMultiplier);
         this.addServerRanges(ranges);
+
+        this.streamVideo(seekTime, false);
+    }
+    loadedVideo(videoHolder: IVideoHolder|null, rate: number) {
+        if(!videoHolder) return;
+        if(this.videoHolders[rate] === videoHolder) return;
+
+        console.log(`LoadedVideo ${videoHolder && (videoHolder as any).element}`);
+        this.videoHolders[rate] = videoHolder;
+        if(rate === this.state.rate) {
+            this.videoHolder = videoHolder;
+        }
+        if(videoHolder) {
+            videoHolder.SeekToTime(this.state.currentPlayTime);
+        }
     }
 
     acceptNewTimeRanges_VOID(ranges: NALRanges): void {
@@ -194,6 +266,16 @@ class Main extends React.Component<{}, IState> implements IBrowserReceiver {
         this.setState({ rangeSummaries: this.state.rangeSummaries });
     }
 
+    private addVideoRanges(ranges: NALRanges) {
+        ranges = JSON.parse(JSON.stringify(ranges));
+        let rate = ranges.rate;
+        if(!this.state.rangeSummaries[rate]) {
+            this.state.rangeSummaries[rate] = { };
+        }
+        this.state.rangeSummaries[rate].videoRanges = reduceRanges([ranges], this.state.rangeSummaries[rate].videoRanges);
+        this.setState({ rangeSummaries: this.state.rangeSummaries });
+    }
+
     async startCamera() {
         let formats = await this.server.getFormats();
         this.setState({ formats });
@@ -212,6 +294,11 @@ class Main extends React.Component<{}, IState> implements IBrowserReceiver {
         );
     }
 
+    // TODO: We need to remove video, or else a live stream will eventually use all our memory.
+    //  We will need to maintain received and requested lists when we delete video, so we know to download it again.
+    //  Also, consider saving video to the local disk, as a few GB on the local disk is probably okay,
+    //  and infinitely preferrable to a few GB in memory. And then when we store data on disk, add
+    //  disk deletion code, so we don't fill up the disk (or our allocated space at least).
     acceptVideo_VOID(info: MP4Video, requestRange: NALRange): void {
         let latestSegmentURL = URL.createObjectURL(new Blob([info.mp4Video]));
         this.setState({ latestSegmentURL, latestSegment: info, prevSegment: this.state.latestSegment });
@@ -222,41 +309,45 @@ class Main extends React.Component<{}, IState> implements IBrowserReceiver {
         }
 
         if(info.frameTimes.length > 0) {
+            let rate = info.frameTimes[0].rate;
+            if(!this.state.rangeSummaries[rate]) {
+                this.state.rangeSummaries[rate] = { };
+            }
+
+            let firstTime = requestRange.firstTime;
+            let lastTime = info.frameTimes.last().time;
+
+            if(lastTime < firstTime) {
+                // We received data before the requested time. This should only happen for 1 key frame (1 video),
+                //  so we have all the data from the start of this video to the start of the requested range.
+                firstTime = info.frameTimes[0].time;
+                lastTime = requestRange.firstTime;
+            }
+
+            let ranges: NALRanges = {
+                rate,
+                frameTimes: info.frameTimes,
+                segmentRanges: [{
+                    firstTime,
+                    lastTime
+                }]
+            };
+
             if(info.incomplete) {
-                console.log(`Received incomplete video, not counted it as a received range. ${info.frameTimes[0].time} to ${info.frameTimes.last().time}`);
+                console.log(`Received incomplete video, not counted it as a received range. ${info.frameTimes[0].time} to ${info.frameTimes.last().time}`);   
+
+                this.addVideoRanges(ranges);
             } else {
-                let rate = info.frameTimes[0].rate;
-                if(!this.state.rangeSummaries[rate]) {
-                    this.state.rangeSummaries[rate] = { };
-                }
-
-                let firstTime = requestRange.firstTime;
-                let lastTime = info.frameTimes.last().time;
-
-                if(lastTime < firstTime) {
-                    // We received data before the requested time. This should only happen for 1 key frame (1 video),
-                    //  so we have all the data from the start of this video to the start of the requested range.
-                    firstTime = info.frameTimes[0].time;
-                    lastTime = requestRange.firstTime;
-                }
-
-                let ranges: NALRanges = {
-                    rate,
-                    frameTimes: [],
-                    segmentRanges: [{
-                        firstTime,
-                        lastTime
-                    }]
-                };
+                this.addVideoRanges(ranges);
                 this.addReceivedRanges(ranges);
                 // Add it as requested, as we use requested to determine what should be requested, and if we received it,
                 //  we should definitely not request it again.
                 this.addRequestedRanges(ranges);
-
-                //console.log(`Add buffer ${info.frameTimes[0].time} to ${info.frameTimes.last().time}, range ${firstTime} to ${lastTime}`);
-                let size = lastTime - firstTime;
-                console.log(`Add buffer, pos ${size}`);
             }
+
+            //console.log(`Add buffer ${info.frameTimes[0].time} to ${info.frameTimes.last().time}, range ${firstTime} to ${lastTime}`);
+            let size = lastTime - firstTime;
+            console.log(`Add buffer, pos ${size}`);
         }
 
         (async () => {
@@ -266,7 +357,7 @@ class Main extends React.Component<{}, IState> implements IBrowserReceiver {
     }
     
     curPlayToken: object = {};
-    async onTimeClick(startTime: number) {
+    async streamVideo(startTime: number, startPlaying = false) {
         let videoHolder = this.videoHolder;
         if(!videoHolder) return;
 
@@ -277,6 +368,7 @@ class Main extends React.Component<{}, IState> implements IBrowserReceiver {
         let minPlayBuffer = 5000;
 
         let rate = this.state.rate;
+        let mult = this.state.speedMultiplier;
         let summaryObj = this.state.rangeSummaries[rate] = this.state.rangeSummaries[rate] || {};
         let { serverRanges } = summaryObj;
         if(!serverRanges) return;
@@ -300,7 +392,7 @@ class Main extends React.Component<{}, IState> implements IBrowserReceiver {
 
             let endTime = startTime + loadChunkSize;
             while(this.curPlayToken === ourPlayToken) {
-                let delay = endTime - this.state.currentPlayTime - minPlayBuffer;
+                let delay = RealTimeToVideoTime(endTime, rate, mult) - RealTimeToVideoTime(this.state.currentPlayTime, rate, mult) - minPlayBuffer;
                 if(delay > 0) {
                     console.log(`Waiting ${delay}ms for video position to progress more.`);
                     await SetTimeoutAsync(delay);
@@ -318,6 +410,7 @@ class Main extends React.Component<{}, IState> implements IBrowserReceiver {
     curDownloadToken: object = {};
     async downloadVideo(startTime: number, minBuffer: number): Promise<boolean> {
         let rate = this.state.rate;
+        let mult = this.state.speedMultiplier;
 
         //todonext
         // TODO: Request cancellation.
@@ -348,10 +441,11 @@ class Main extends React.Component<{}, IState> implements IBrowserReceiver {
             let prevSegment = UnionUndefined(requestedSegments[index]);
             let nextSegment = UnionUndefined(requestedSegments[index + 1]);
 
-            let endTime = startTime + minBuffer;
+            let endTime = startTime + VideoDurationToRealDuration(minBuffer, rate, mult);
 
             
             let startTimeExclusive = false;
+            let endTimeMinusOne = false;
             if(prevSegment) {
                 if(prevSegment.lastTime >= startTime) {
                     startTime = prevSegment.lastTime;
@@ -365,6 +459,7 @@ class Main extends React.Component<{}, IState> implements IBrowserReceiver {
             if(nextSegment) {
                 if(nextSegment.firstTime < endTime) {
                     endTime = nextSegment.firstTime;
+                    endTimeMinusOne = true;
                 }
             }
 
@@ -387,12 +482,13 @@ class Main extends React.Component<{}, IState> implements IBrowserReceiver {
 
             let downloadToken = {};
             this.curDownloadToken = downloadToken;
-            await this.server.GetVideo(startTime, endTime, startTimeExclusive, this.state.rate, this.state.speedMultiplier);
+            await this.server.GetVideo(startTime, endTime, startTimeExclusive, endTimeMinusOne, this.state.rate, this.state.speedMultiplier);
 
             let didFinishDownload = this.curDownloadToken === downloadToken;
 
             if(didFinishDownload) {
                 this.addReceivedRanges(ranges);
+                this.addVideoRanges(ranges);
             }
 
             return didFinishDownload;
@@ -473,8 +569,9 @@ class Main extends React.Component<{}, IState> implements IBrowserReceiver {
         );
     }
 
+    videoProps: IVideoHolder["props"]["videoProps"] = {id:"vid", width: "300", controls: true};
     render() {
-        let { formats, formatIndex, rangeSummaries } = this.state;
+        let { formats, formatIndex, rangeSummaries, rates } = this.state;
         let selectedFormat = formats.slice(formatIndex)[0];
 
         let rangesObj = rangeSummaries[this.state.rate];
@@ -482,27 +579,87 @@ class Main extends React.Component<{}, IState> implements IBrowserReceiver {
             rangesObj = { };
         }
 
+        console.log(`Render ${JSON.stringify(rates)}`);
+
         return (
             <div>
-                <VideoHolderClass
-                    rate={this.state.rate}
-                    speedMultiplier={this.state.speedMultiplier}
-                    videoProps={{id:"vid", width: "1200", controls: true}}
-                    ref={x => this.videoHolder = x}
-                />
-
-                <PollLoop delay={500} callback={() => {
+                <PollLoop delay={200} callback={() => {
                     let newTime = this.videoHolder && this.videoHolder.GetCurrentTime() || 0;
+                    let changed = false;
                     if(this.state.currentPlayTime !== newTime) {
+                        changed = true;
                         this.state.currentPlayTime = newTime;
-                        this.setState({ currentPlayTime: newTime });
+                    }
+                    let { playTimes } = this.state;
+                    for(let rate in this.videoHolders) {
+                        let video = this.videoHolders[rate];
+                        if(!video) continue;
+                        let time = video.GetCurrentTime();
+                        if(playTimes[rate] !== time) {
+                            changed = true;
+                            playTimes[rate] = time;
+                        }
+                    }
+
+                    if(changed) {
+                        this.forceUpdate();
                     }
                 }} />
+
+                <div key="videos">
+                    { rates.map(rate => (
+                        <div key={`rate=${rate}`}>
+                            <VideoHolderClass
+                                rate={rate}
+                                speedMultiplier={this.state.speedMultiplier}
+                                videoProps={this.videoProps}
+                                ref={x => this.loadedVideo(x, rate)}
+                            />
+                            {(() => {
+                                let { playTimes } = this.state;
+                                rangeSummaries[rate] = rangeSummaries[rate] || {};
+                                let { videoRanges } = rangeSummaries[rate];
+                                if(!videoRanges) return null;
+                                let times = videoRanges.allFrameTimes;
+                                let index = findClosestIndex(times, playTimes[rate], x => x.time)
+                                let timeObj = times[index];
+                                
+                                if(timeObj) {
+                                    return (
+                                        <div>
+                                            <div>
+                                                Play time: {playTimes[rate]}, frame time: {timeObj.time}, {times.length} frames, index {index}
+                                            </div>
+                                            <div>
+                                                {times[0].time} to {times.last().time}
+                                            </div>
+                                        </div>
+                                    );
+                                }
+                            })()}
+                        </div>
+                    ))}
+                </div>
 
                 <button onClick={() => this.startCamera()}>Start Camera</button>
                 <div>
                     {this.renderPlayInfo()}
                 </div>
+
+                <div>
+                    Rates: {
+                        rates.map(rate => (
+                            <button
+                                key={rate}
+                                className={`rate ${rate === this.state.rate ? "rate--selected" : ""}`}
+                                onClick={() => this.setRate(rate)}
+                            >
+                                {rate}
+                            </button>
+                        ))
+                    }
+                </div>
+
                 <RangeSummarizer
                     rate={this.state.rate}
                     speedMultiplier={this.state.speedMultiplier}
@@ -510,7 +667,7 @@ class Main extends React.Component<{}, IState> implements IBrowserReceiver {
                     serverRanges={rangesObj.serverRanges}
                     requestedRanges={rangesObj.requestedRanges}
                     currentPlayTime={this.state.currentPlayTime}
-                    onTimeClick={time => this.onTimeClick(time)}
+                    onTimeClick={time => this.streamVideo(time)}
                 />
                 <div>
                     {this.renderTimes()}
@@ -547,53 +704,3 @@ if (moduleAny.hot) {
         render();
     });
 }
-
-/*
-<video id="vid" controls></video>
-<script>
-    test();
-    async function test() {
-        var push = new MediaSource();
-        var buf;
-        vid.src = URL.createObjectURL(push);
-        push.addEventListener("sourceopen", async () => {
-            // TODO: Get this codec from the video file, so we know it is correct
-            
-            // I am not sure if the profile, compatibility and level even matter (the part after avc1.). Seems to work
-            //  either way, which it should, because that info is in both the mp4 box, and the sps NAL unit.
-            buf = push.addSourceBuffer('video/mp4; codecs="avc1.420029"');
-            //buf = push.addSourceBuffer(`video/mp4; codecs="avc1.64001E"`);
-
-            //let startTime = 38417943360 / 90000;
-            //await addVideo("../youtube.mp4");
-
-            let startTime = 100;
-            //let startTime = 0;
-            await addVideo("../dist/output0.mp4");
-            await addVideo("../dist/output1.mp4");
-
-            //let startTime = 20480 / 10240;
-            //await addVideo("../10fps.dash_2.m4s");
-
-            //await addVideo("../dist/output1.mp4");
-            //await addVideo("../dist/output2.mp4");
-
-            //let startTime = 200 * 10 / 1000;
-            buf.addEventListener("updateend", () => {
-                console.log("Trying to play");
-                vid.currentTime = startTime;
-                vid.play();
-
-                console.log(buf.videoTracks);
-            });
-        });
-
-        async function addVideo(path) {
-            let result = await fetch(path);
-            //let result = await fetch("./test.h264.mp4");
-            let raw = await result.arrayBuffer();
-            buf.appendBuffer(raw);
-        }
-    }
-</script>
-*/

@@ -1,5 +1,44 @@
 const uniqueKey = "uniqueKey" + Math.random() + +new Date();
 
+export function findAtOrBefore<T>(list: T[], value: number, map: (t: T) => number): T|undefined {
+    return list[findAtOrBeforeIndex(list, value, map)];
+}
+export function findAfter<T>(list: T[], value: number, map: (t: T) => number): T|undefined {
+    return list[findAfterIndex(list, value, map)];
+}
+export function findAfterIndex<T>(list: T[], value: number, map: (t: T) => number): number {
+    return findAtOrBeforeIndex(list, value, map) + 1;
+}
+export function findAtOrBeforeIndex<T>(list: T[], value: number, map: (t: T) => number): number {
+    let index = binarySearchMap(list, value, map);
+    if(index < 0) {
+        index = ~index - 1;
+    }
+    return index;
+}
+
+export function findClosest<T>(list: T[], value: number, map: (t: T) => number): T|undefined {
+    return list[findClosestIndex(list, value, map)];
+}
+export function findClosestIndex<T>(list: T[], value: number, map: (t: T) => number): number {
+    let beforeIndex = findAtOrBeforeIndex(list, value, map);
+    let afterIndex = findAfterIndex(list, value, map);
+    let before = list[beforeIndex];
+    let after = list[afterIndex];
+    if(!before) {
+        return afterIndex;
+    }
+    if(!after) {
+        return beforeIndex;
+    }
+
+    if(Math.abs(map(before) - value) < Math.abs(map(after) - value)) {
+        return beforeIndex;
+    } else {
+        return afterIndex;
+    }
+}
+
 export function binarySearchNumber(list: number[], value: number): number {
     return binarySearch<number>(list, value, (a, b) => a - b);
 }
@@ -10,8 +49,8 @@ export function binarySearchMap<T>(list: T[], value: number, map: (t: T) => numb
 
 export function binarySearchMapped<T, M>(list: T[], value: M, map: (t: T) => M, comparer: (lhs: M, rhs: M) => number): number {
     return binarySearch<T>(list, {[uniqueKey]: value} as any as T, (a, b) => {
-        let aMap = uniqueKey in a ? (a as any)[uniqueKey] as M : map(a);
-        let bMap = uniqueKey in b ? (b as any)[uniqueKey] as M : map(b);
+        let aMap = typeof a === "object" && uniqueKey in a ? (a as any)[uniqueKey] as M : map(a);
+        let bMap = typeof b === "object" && uniqueKey in b ? (b as any)[uniqueKey] as M : map(b);
 
         return comparer(aMap, bMap);
     });
@@ -34,26 +73,6 @@ export function binarySearch<T>(list: T[], value: T, comparer: (lhs: T, rhs: T) 
         }
     }
     return ~minIndex;
-}
-
-export function findAtOrBefore<T>(list: T[], value: T, comparer: (lhs: T, rhs: T) => number): T|undefined {
-    let index = binarySearch(list, value, comparer);
-
-    if (index < 0) {
-        index = ~index - 1;
-    }
-
-    return list[index];
-}
-
-export function findBefore<T>(list: T[], value: T, comparer: (lhs: T, rhs: T) => number): T|undefined {
-    let index = binarySearch(list, value, comparer);
-
-    if (index < 0) {
-        index = ~index;
-    }
-
-    return list[index - 1];
 }
 
 export function insertIntoListMap<T>(list: T[], value: T, map: (t: T) => number, duplicates: "throw"|"ignore"|"add" = "throw"): number {

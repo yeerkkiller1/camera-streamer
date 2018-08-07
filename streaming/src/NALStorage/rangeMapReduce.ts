@@ -10,7 +10,7 @@ export type SegmentRanges = {
 };
 
 // Ranges are all inclusive.
-export function reduceRanges(list: NALRanges[], prevValue: SegmentRanges|undefined): SegmentRanges {
+export function reduceRanges(list: NALRanges[], prevValue: SegmentRanges|undefined, gapRange = 750): SegmentRanges {
     prevValue = prevValue || { segments: [], unsegmentedFrameTimes: [], allFrameTimes: [] };
     let { segments, unsegmentedFrameTimes, allFrameTimes } = prevValue;
 
@@ -164,7 +164,6 @@ export function reduceRanges(list: NALRanges[], prevValue: SegmentRanges|undefin
 
     // Split frameTimes into groups (anything over a certain distance is a new group),
     //  and then make those groups into ranges.
-    const gapRange = 750;
     let frameTimeSegments: NALRange[] = group(unsegmentedFrameTimes.map(x => x.time), gapRange).map(g => ({ firstTime: g[0], lastTime: g.last()}));
     for(let segment of frameTimeSegments) {
         addSegment(segment, false);

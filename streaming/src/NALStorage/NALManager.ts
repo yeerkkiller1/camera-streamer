@@ -8,7 +8,7 @@ import { Downsampler, DownsampledInstance } from "./Downsampler";
 import { LocalNALRate, LocalNALStorage } from "./LocalNALRate";
 import { MuxVideo } from "mp4-typescript";
 import { group } from "../util/math";
-import { RealTimeToVideoTime } from "./TimeMap";
+import { RealTimeToVideoTime, GetTimescale } from "./TimeMap";
 import { clock } from "../util/time";
 
 // TODO:
@@ -208,7 +208,7 @@ export class NALManager {
         return storage && storage.GetNALTimes().map(x => x.time) || [];
     }
 
-    private async muxVideo(nals: NALHolderMin[]) {
+    private async muxVideo(nals: NALHolderMin[], rate: number, speedMultiplier: number) {
         let keyframe = nals[0];
         if(keyframe.type !== NALType.NALType_keyframe) {
             throw new Error(`MuxVideo called incorrectly, did not start with keyframe?`);
@@ -246,6 +246,7 @@ export class NALManager {
                 profile_idc: 0x40
             }
             //*/
+            timescale: GetTimescale(rate, speedMultiplier)
         });
 
         return {
@@ -263,6 +264,7 @@ export class NALManager {
         startTime: number,
         endTime: number,
         startTimeExclusive: boolean,
+        endTimeMinusOne: boolean,
         rate: number,
         speedMultiplier: number,
         callback: (video: MP4Video) => void,
@@ -338,7 +340,7 @@ export class NALManager {
                 return;
             }
 
-            let videoObj = await this.muxVideo(nalsBuffer.map(x => ({ ...x, time: RealTimeToVideoTime(x.time, rate, speedMultiplier) })));
+            let videoObj = await this.muxVideo(nalsBuffer.map(x => ({ ...x, time: RealTimeToVideoTime(x.time, rate, speedMultiplier) })), rate, speedMultiplier);
 
             if(cancelToken.Value()) return;
 
@@ -382,7 +384,7 @@ export class NALManager {
                 let nal = nals[i];
                 if(nal.type === NALType.NALType_keyframe && nalsBuffer.length > 0) {
                     // Exclusive end time
-                    if(nalsBuffer[0].time > endTime) {
+                    if(nalsBuffer[0].time > endTime || endTimeMinusOne && nal.time > endTime) {
                         finishProfile();
                         return;
                     }

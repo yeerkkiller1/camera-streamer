@@ -8,3 +8,21 @@ export function VideoTimeToRealTime(videoTime: number, rate: number, speedMultip
     let timescale = 1 / rate / speedMultiplier;
     return videoTime / timescale + newEpoch;
 }
+
+export function RealDurationToVideoDuration(realDuration: number, rate: number, speedMultiplier: number) {
+    let timescale = 1 / rate / speedMultiplier;
+    return realDuration * timescale;
+}
+export function VideoDurationToRealDuration(videoDuration: number, rate: number, speedMultiplier: number) {
+    let timescale = 1 / rate / speedMultiplier;
+    return videoDuration / timescale
+}
+
+export function GetTimescale(rate: number, speedMultiplier: number): number {
+    // 3 digits of ms precision (as timescale is in seconds)
+    return Math.floor(1000 * rate * speedMultiplier * 1000);
+}
+
+export function RoundRecordTime(time: number): number {
+    return Math.floor(time * 1000) / 1000;
+}

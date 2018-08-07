@@ -20,3 +20,5 @@ dist
 stats*.html
 *.frame*
 *.nal
+*.index
+rates.txt

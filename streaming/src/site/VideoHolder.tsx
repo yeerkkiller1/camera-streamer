@@ -1,6 +1,7 @@
 import * as React from "react";
 import { PChan, TransformChannel } from "pchannel";
 import { RealTimeToVideoTime, VideoTimeToRealTime } from "../NALStorage/TimeMap";
+import { PollLoop } from "./PollLoop";
 
 interface IProps {
     videoProps: React.VideoHTMLAttributes<HTMLVideoElement>;
@@ -8,7 +9,7 @@ interface IProps {
     speedMultiplier: number;
 }
 interface IState {
-
+    
 }
 
 export interface IVideoHolder extends React.Component<IProps, IState> {
@@ -23,6 +24,12 @@ export class VideoHolder extends React.Component<IProps, IState> implements IVid
     private videoElement: HTMLVideoElement|null|undefined;
 
     private updateEndQueue: PChan<void>|undefined;
+
+    public shouldComponentUpdate(nextProps: IProps, nextState: IState): boolean {
+        const get = (props: IProps) => ({ rate: props.rate, speedMultiplier: props.speedMultiplier });
+
+        return JSON.stringify(get(nextProps)) !== JSON.stringify(get(this.props));
+    }
 
     // TODO: If we ever call remove, we need to combine it in this loop, as both set updating to true.
     public AddVideo = TransformChannel<MP4Video, void>(async (input) => {
@@ -39,6 +46,7 @@ export class VideoHolder extends React.Component<IProps, IState> implements IVid
     });
 
     public SeekToTime(time: number) {
+        console.log(`Seek ${time}`);
         if(this.videoElement) {
             this.videoElement.currentTime = RealTimeToVideoTime(time, this.props.rate, this.props.speedMultiplier) / 1000;
         }
@@ -48,49 +56,19 @@ export class VideoHolder extends React.Component<IProps, IState> implements IVid
         return this.videoElement && VideoTimeToRealTime(this.videoElement.currentTime * 1000, this.props.rate, this.props.speedMultiplier) || 0;
     }
 
+    public element: HTMLVideoElement|null|undefined;
     private initVideo(vid: HTMLVideoElement|null) {
+        this.element = vid;
         if(!vid) return;
         if(this.videoElement === vid) return;
 
         console.log("New video element");
-        this.videoElement = vid;
+        this.videoElement = vid;      
 
-        // onstalled, onemptied, onended, onpause, are all useless. Watching polling currentTime is the only way to know
-        //  when the video stalls.
-        //const maxClientsideBuffer = 5 * 1000;
-
-        /*
-        // Max of two videos behind
-        const maxClientsideBuffer = this.state.iFrameRate * (1 / this.state.requestedFPS) * 2 * 1000;
-        const checkForStallOrLag = () => {
-            if(this.videoElement !== vid) return;
-
-            let seg = this.state.latestSegment;
-            if(seg && seg.type === "live") {
-                let firstTime = seg.cameraRecordTimes[0];
-                if(vid.currentTime * 1000 + maxClientsideBuffer < firstTime) {
-                    console.log(`Moving video up to current time, because client side buffer time got too high (above ${maxClientsideBuffer})`);
-                    vid.currentTime = firstTime / 1000;
-                }
-
-                // We can't play in the future
-                if(vid.currentTime * 1000 > seg.cameraRecordTimes.last()) {
-                    console.log("Moving video back because it was playing in the future");
-                    vid.currentTime = firstTime / 1000 - 0.00001;
-                }
-            }
-
-            setTimeout(checkForStallOrLag, maxClientsideBuffer / 10);
-        };
-        checkForStallOrLag();
-        */
-        
-
-        
         var push = new MediaSource();
         vid.src = URL.createObjectURL(push);
         push.addEventListener("sourceopen", async () => {
-            console.log("addSourceBuffer")
+            console.log(`addSourceBuffer, rate: ${this.props.rate}`);
             var buf = push.addSourceBuffer('video/mp4; codecs="avc1.640028"');
             this.vidBuffer = buf;
             let queue = this.updateEndQueue = new PChan<void>();
