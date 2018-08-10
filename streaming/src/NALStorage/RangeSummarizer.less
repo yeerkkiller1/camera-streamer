@@ -1,10 +1,15 @@
+@black: hsla(0, 0%, 14%, 1);
+
 .RangeSummarizer {
     &-segment {
         background-color: hsla(193, 75%, 75%, 1);
         margin: 2px;
         width: 400px;
 
-        position: relative;
+        &-bars {
+            position: relative;
+            height: 20px;
+        }
 
         &--playing {
             background-color: hsla(33, 75%, 75%, 1);
@@ -37,6 +42,117 @@
             left: -2px;
             height: 100%;
             top: 0px;
+        }
+
+        &-time {
+            position: absolute;
+            width: 1px;
+
+            top: 0px;
+            height: 100%;
+
+            opacity: 0.3;
+
+            background-color: hsla(253, 75%, 75%, 1);
+        }
+    }
+
+
+    &-bar {
+        //display: flex;
+        margin: 10px;
+    }
+
+    &-ruler {
+        &-unitsHolder {
+            display: flex;
+
+            &-seekButtons {
+                width: 160px;
+
+                &--minus {
+                    display: flex;
+                    justify-content: flex-end;
+                }
+                &--plus {
+
+                }
+            }
+        }
+        &-units {
+            width: 100%;
+            position: relative;
+            //outline: 1px solid black;
+            height: 20px;
+            overflow: hidden;
+
+            &-unitLabel {
+                position: absolute;
+                height: calc(~"100% + 1px");
+
+                &-text {
+                    white-space: nowrap;
+                    position: absolute;
+                    //text-align: center;
+                    color: hsla(0, 0%, 34%, 0.8);
+                    transform: translateX(-50%);
+                }
+
+                &-tray, &-trayLeft, &-trayRight {
+                    position: absolute;
+                    background: hsla(0, 0%, 34%, 0.2);
+                    //background: hsla(0, 0%, 34%, 1);
+                }
+                &-tray {
+                    width: 100%;
+                    top: calc(~"100% - 3px");
+                    height: 1px;
+                    left: 0px;
+                }
+                &-tray:after, &-trayLeft:after, &-trayRight:after {
+                    content: "";
+                    position: absolute;
+                    left: 0px;
+                    top: 0px;
+                    height: 100%;
+                    width: 100%;
+                    background: transparent;
+                }
+                &-trayLeft, &-trayRight {
+                    width: 1px;
+                    //height: 6px;
+                    top: calc(~"100% - 7px");
+                    bottom: 3px;
+                }
+                &-trayLeft {
+                    left: 0px;
+                }
+                &-trayRight {
+                    left: calc(~"100% - 1px");
+                }
+
+                &-tray:after {
+                    left: 3px;
+                    width: calc(~"100% - 6px");
+                    box-shadow: 0px -8px 6px 0px hsla(0, 0%, 14%, 0.5);
+                    margin-top: 10px;
+                }
+                &-trayLeft:after, &-trayRight:after {
+                    top: -1px;
+                    //left: 3px;
+                    //width: calc(~"100% - 6px");
+                    box-shadow: 0px -1000px 1px 0px hsla(0, 0%, 14%, 0.2);
+                    margin-top: 1000px;
+                }
+            }
+            /*
+            &-unitTick {
+                position: absolute;
+                width: 1px;
+                background: black;
+                height: 100%;
+            }
+            */
         }
     }
 }

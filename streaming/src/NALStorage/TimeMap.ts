@@ -26,3 +26,9 @@ export function GetTimescale(rate: number, speedMultiplier: number): number {
 export function RoundRecordTime(time: number): number {
     return Math.floor(time * 1000) / 1000;
 }
+
+export function GetMinGapSize(rate: number): number {
+    // 10 seconds of disconnect time, and then minimum of 1/3FPS
+    let minGapSize = Math.min(10 * 1000, 3000 * rate);
+    return minGapSize;
+}

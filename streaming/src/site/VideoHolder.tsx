@@ -13,7 +13,7 @@ interface IState {
 }
 
 export interface IVideoHolder extends React.Component<IProps, IState> {
-    AddVideo(mp4Video: MP4Video): void;
+    AddVideo(mp4Video: MP4Video): Promise<void>;
     /** Time in ms, like all times. */
     SeekToTime(time: number): void;
     GetCurrentTime(): number;
@@ -48,7 +48,8 @@ export class VideoHolder extends React.Component<IProps, IState> implements IVid
     public SeekToTime(time: number) {
         console.log(`Seek ${time}`);
         if(this.videoElement) {
-            this.videoElement.currentTime = RealTimeToVideoTime(time, this.props.rate, this.props.speedMultiplier) / 1000;
+            let newTime = RealTimeToVideoTime(time, this.props.rate, this.props.speedMultiplier) / 1000;;
+            this.videoElement.currentTime = newTime;
         }
     }
 

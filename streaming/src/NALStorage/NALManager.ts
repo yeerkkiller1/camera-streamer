@@ -8,7 +8,7 @@ import { Downsampler, DownsampledInstance } from "./Downsampler";
 import { LocalNALRate, LocalNALStorage } from "./LocalNALRate";
 import { MuxVideo } from "mp4-typescript";
 import { group } from "../util/math";
-import { RealTimeToVideoTime, GetTimescale } from "./TimeMap";
+import { RealTimeToVideoTime, GetTimescale, GetMinGapSize } from "./TimeMap";
 import { clock } from "../util/time";
 
 // TODO:
@@ -193,11 +193,13 @@ export class NALManager {
 
         let storage = this.localStorages[rate];
 
+        let minGapSize = GetMinGapSize(rate);
+
         return {
             rate,
             frameTimes: [],
             segmentRanges: storage &&
-                group(storage.GetNALTimes().map(x => x.time), 10 * 1000)
+                group(storage.GetNALTimes().map(x => x.time), minGapSize)
                 .map(x => ({ firstTime: x[0], lastTime: x.last() }))
             || []
         };
@@ -343,15 +345,6 @@ export class NALManager {
             let videoObj = await this.muxVideo(nalsBuffer.map(x => ({ ...x, time: RealTimeToVideoTime(x.time, rate, speedMultiplier) })), rate, speedMultiplier);
 
             if(cancelToken.Value()) return;
-
-            // Wait until videoCientsideBuffer time before the video starts before sending it.
-            let videoCientsideBuffer = 10 * 1000;
-
-            let videoTimeOffset = nalsBuffer[0].time - startTime;
-            let realityTimeOffset = Date.now() - streamRealtimeStart;
-
-            // Move everything to play closer to the present.
-            videoTimeOffset = videoTimeOffset / rate / speedMultiplier;
 
             sendCount++;
             sendVideoTime += (nalsBuffer.last().time - nalsBuffer[0].time) * ((nalsBuffer.length) / (nalsBuffer.length - 1));

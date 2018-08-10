@@ -16,7 +16,7 @@ export class VideoHolderFake extends React.Component<IProps, IState> implements 
     state: IState = {
         videoParts: []
     };
-    public AddVideo(mp4Video: MP4Video): void {
+    public async AddVideo(mp4Video: MP4Video): Promise<void> {
         this.state.videoParts.push(mp4Video);
         this.setState({ videoParts: this.state.videoParts });
     }

@@ -4,7 +4,8 @@ uname="$(uname)"
 if [ "$uname" == "Darwin" ]; then
     node ./dist/receiver.js
 else
-    start bash -c "node ./dist/receiver.js"
+    #start bash -c "node ./dist/receiver.js"
+    node ./dist/receiver.js
 fi
 
 #start bash -c "node ./dist/senderWrap.js"

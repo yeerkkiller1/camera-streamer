@@ -129,6 +129,8 @@ function createEncodeLoop(
             let currentSps: Buffer|undefined;
             let currentPps: Buffer|undefined;
 
+            let index = 0;
+
             while(true) {
                 let nalUnit = await nalUnits.GetPromise();
 
@@ -178,8 +180,11 @@ function createEncodeLoop(
                     if(currentPps === undefined) {
                         throw new Error(`Received I frame without first receiving a PPS. How do we interpret this?`);
                     }
-                    let delay = Date.now() -  frameRecordTime;
-                    console.log(`Send NAL slice, delayed ${delay}ms`);
+                    let delay = getTimeSynced() - frameRecordTime;
+                    // TODO: For some reason high rate video appears to be delayed by too much. It should be delayed by
+                    //  rate (before it gets any frames) plus maybe rate * key_frame_rate ? (for the first video to finish?).
+                    //  But rate 16 seems to take 64 frames to start, but I don't know why...
+                    console.log(`Send NAL slice, delayed ${delay}ms, rate ${rate}, index ${index++}`);
                     receiver.acceptNAL_VOID({
                         nal: nalUnit,
                         recordInfo: { type: "slice", frameRecordTimes, frameRecordTime },
@@ -306,6 +311,7 @@ class StreamLoop {
                         captureLoopDestruct.Resolve(undefined);
                         return;
                     }
+                    // Code to test frame delay and timing accuracy: http://output.jsbin.com/yewodox/4
                     let frameTime = RoundRecordTime(getTimeSynced());
                     try {
                         if(!success) {

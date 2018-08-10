@@ -1,5 +1,8 @@
 const uniqueKey = "uniqueKey" + Math.random() + +new Date();
 
+export function findAtOrBeforeOrAfter<T>(list: T[], value: number, map: (t: T) => number): T|undefined {
+    return list[findAtOrBeforeOrAfterIndex(list, value, map)];
+}
 export function findAtOrBefore<T>(list: T[], value: number, map: (t: T) => number): T|undefined {
     return list[findAtOrBeforeIndex(list, value, map)];
 }
@@ -9,10 +12,30 @@ export function findAfter<T>(list: T[], value: number, map: (t: T) => number): T
 export function findAfterIndex<T>(list: T[], value: number, map: (t: T) => number): number {
     return findAtOrBeforeIndex(list, value, map) + 1;
 }
+export function findAtOrAfter<T>(list: T[], value: number, map: (t: T) => number): number {
+    return findAtOrAfterIndex(list, value, map);
+}
+export function findAtOrAfterIndex<T>(list: T[], value: number, map: (t: T) => number): number {
+    let index = binarySearchMap(list, value, map);
+    if(index < 0) {
+        index = ~index;
+    }
+    return index;
+}
 export function findAtOrBeforeIndex<T>(list: T[], value: number, map: (t: T) => number): number {
     let index = binarySearchMap(list, value, map);
     if(index < 0) {
         index = ~index - 1;
+    }
+    return index;
+}
+export function findAtOrBeforeOrAfterIndex<T>(list: T[], value: number, map: (t: T) => number): number {
+    let index = binarySearchMap(list, value, map);
+    if(index < 0) {
+        index = ~index - 1;
+    }
+    if(index < 0) {
+        index = 0;
     }
     return index;
 }
