@@ -32,3 +32,29 @@ export function formatDuration(ms: number) {
 
     return parts.join(" ");
 }
+
+export const shortMonthsList = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+
+export function formatDate(time: number): string {
+    let d = new Date(time);
+    
+    let day = d.getDate();
+    let month = shortMonthsList[d.getMonth()];
+    let year = d.getFullYear();
+
+    let hours = d.getHours();
+    let mins = d.getMinutes();
+    let seconds = d.getSeconds();
+
+    let p = (x: number) => x < 10 ? "0" + x : x.toString();
+
+    let hourPeriod = hours < 12 ? "am" : "pm";
+    if(hours >= 12) {
+        hours -= 12;
+    }
+    if(hours === 0) {
+        hours = 12;
+    }
+
+    return `${year} ${month} ${day}  ${p(hours)}:${p(mins)}:${p(seconds)} ${hourPeriod}`;
+}

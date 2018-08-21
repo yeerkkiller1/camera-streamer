@@ -9,8 +9,13 @@ import { randomUID } from "./util/rand";
 
 // For polyfills
 import "./util/math";
-import { NALManager, createNALManager, testAddRanges } from "./NALStorage/NALManager";
+import { NALManager, createNALManager } from "./NALStorage/NALManager";
 import { keyBy, mapObjectValues } from "./util/misc";
+import { binarySearchMap, findAtOrBefore, findAtOrBeforeOrAfter } from "./util/algorithms";
+import { sum } from "./util/math";
+import { GetRangeFPSEstimate } from "./NALStorage/TimeMap";
+import { GetMP4NALs, ParseNalInfo } from "mp4-typescript";
+import { Downsampler, DownsampledInstance } from "./NALStorage/Downsampler";
 
 //makeProcessSingle("receiver");
 
@@ -85,6 +90,74 @@ async function getFinalStorageFolder() {
     } catch(e) { }
     return finalStorageFolder;
 }
+
+let nalManagerPromise = createNALManager();
+
+/*
+(async () => {
+    let nalManager = await nalManagerPromise;
+
+    console.log("start");
+
+    let startTime = +new Date(2018, 7, 10);
+    let nalRanges = nalManager.GetNALRanges(1);
+    if(nalRanges.length > 0) {
+        let fps = GetRangeFPSEstimate(nalRanges.last());
+        startTime = nalRanges.last().lastTime + 1000 / fps;
+    }
+
+    // Import video from disk
+    let paths = [
+        //"C:/Users/quent/Downloads/Norsk SlowTV Hurtigruten Minutt for Minutt BowCam Part 01 of 35 Bergen til Florø_all_key_frames.mp4",
+        //"C:/Users/quent/Downloads/Norsk SlowTV Hurtigruten Minutt for Minutt BowCam Part 09 of 35 Kristiansund til Trondheim_all_key_frames.mp4",
+        //"C:/Users/quent/Downloads/Norsk SlowTV Hurtigruten Minutt for Minutt BowCam Part 10 of 35 Trondheim til Rørvik_all_key_frames.mp4"
+        //"C:/Users/quent/Downloads/Fog Fjord Key Door Skip Dead Cells.mp4"
+    ];
+
+    for(let path of paths) {
+        console.log(`Start ${path}`);
+        let nals = GetMP4NALs(path);
+
+        console.log(`after nals ${path}`);
+
+        for(let nal of nals) {
+            nal.time = startTime + nal.time;
+        }
+        //ParseNalHeaderByte
+        //nalsObj.timescale
+        //nalsObj.nals
+
+        type NAL = typeof nals[0];
+        class NALAdder implements DownsampledInstance<NAL> {
+            constructor(public Rate: number) { }
+            public AddValue(nal: NAL): void {
+                nalManager.AddNAL({
+                    rate: this.Rate,
+
+                    width: nal.width,
+                    height: nal.height,
+
+                    time: nal.time,
+                    type: nal.isKeyFrame ? NALType.NALType_keyframe : NALType.NALType_interframe,
+                    sps: nal.sps,
+                    pps: nal.pps,
+
+
+                    nal: nal.nal
+                });
+            }
+        }
+
+        let downsampler = new Downsampler(4, NALAdder, 0);
+        for(let nal of nals) {
+            downsampler.AddValue(nal);
+        }
+        console.log(`Wrote all nals.`);
+
+        console.log(`Finished ${path}`);
+    }
+})();
+//*/
 
 
 
@@ -206,7 +279,6 @@ class Receiver extends TimeServer implements IReceiver, IHost {
 
 
     cameraClient = new Deferred<ISender>();
-    nalManager = createNALManager();
 
     /*
     x = (() => {
@@ -229,28 +301,46 @@ class Receiver extends TimeServer implements IReceiver, IHost {
         format: v4l2camera.Format
     ): Promise<void> {
         let curFormatId = randomUID("format");
-        let manager = await this.nalManager;
+        let manager = await nalManagerPromise;
         let rates = manager.GetRates();
-        let rateCounts = mapObjectValues(keyBy(rates.map(x => ({rate: x, count: manager.GetNALsRanges(x).frameTimes.length})), x => String(x.rate)), x => x.count);
+        let rateCounts = mapObjectValues(keyBy(rates.map(x => ({rate: x, count: sum(manager.GetNALRanges(x).map(x => x.frameCount))})), x => String(x.rate)), x => x.count);
         await (await this.cameraClient.Promise()).setStreamFormat(fps, iFrameRate, bitRateMBPS, format, curFormatId, RateMultiplier, rateCounts);
     }
 
     public async getRates(): Promise<number[]> {
-        return (await this.nalManager).GetRates();
+        return (await nalManagerPromise).GetRates();
     }
-    public async syncTimeRanges(rate: number, speedMultiplier: number): Promise<NALRanges> {
-        let client = this.client;
-        let nalManager = await this.nalManager;
 
-        nalManager.SubscribeToNALs(rate, speedMultiplier, nal => {
-            client.acceptNewTimeRanges_VOID({
+    syncRateUnsubs: {
+        client: Receiver["client"];
+        rate: number;
+        unsub: () => void;
+    }[] = [];
+    public async syncTimeRanges(rate: number): Promise<NALRange[]> {
+        let client = this.client;
+        let nalManager = await nalManagerPromise;
+
+        for(let i = this.syncRateUnsubs.length - 1; i >= 0; i--) {
+            let unsubObj = this.syncRateUnsubs[i];
+            if(unsubObj.client === client && unsubObj.rate === rate) {
+                unsubObj.unsub();
+                this.syncRateUnsubs.splice(i, 1);
+            }
+        }
+
+        let unsub = nalManager.SubscribeToNALRanges(rate, ranges => {
+            client.acceptNewTimeRanges_VOID(
                 rate,
-                segmentRanges: [],
-                frameTimes: [nal]
-            })
+                ranges
+            );
+        });
+        this.syncRateUnsubs.push({
+            client,
+            rate,
+            unsub
         });
 
-        return nalManager.GetNALsRanges(rate);
+        return nalManager.GetNALRanges(rate);
     }
 
     private pendingGetVideoCalls: {
@@ -260,12 +350,11 @@ class Receiver extends TimeServer implements IReceiver, IHost {
     }[] = [];
     public async GetVideo(
         startTime: number,
-        lastTime: number,
-        startTimeExclusive: boolean,
-        endTimeMinusOne: boolean,
+        minFrames: number,
+        nextReceivedFrameTime: number|undefined,
         rate: number,
-        speedMultiplier: number,
-    ): Promise<void> {
+        startTimeExclusive: boolean,
+    ): Promise<MP4Video | "VIDEO_EXCEEDS_NEXT_TIME" | "VIDEO_EXCEEDS_LIVE_VIDEO" | "CANCELLED"> {
         let client = this.client;
         let cancelToken = new Deferred<void>();
         let onCallComplete = new Deferred<void>();
@@ -281,13 +370,11 @@ class Receiver extends TimeServer implements IReceiver, IHost {
         let obj = this.pendingGetVideoCalls[index];
         obj.cancelTokens.push(cancelToken);
         try {
-            let manager = await this.nalManager;
-            await manager.GetVideo(startTime, lastTime, startTimeExclusive, endTimeMinusOne, rate, speedMultiplier, video => {
-                client.acceptVideo_VOID(video, { firstTime: startTime, lastTime });
-            }, cancelToken);
+            let manager = await nalManagerPromise;
 
-            onCallComplete.Resolve(undefined);
+            return await manager.GetVideo(startTime, minFrames, nextReceivedFrameTime, startTimeExclusive, rate, cancelToken);
         } finally {
+            onCallComplete.Resolve(undefined);
             {
                 let index = obj.cancelTokens.indexOf(cancelToken);
                 if(index >= 0) {
@@ -330,13 +417,14 @@ class Receiver extends TimeServer implements IReceiver, IHost {
     }
 
     public acceptNAL_VOID(info: NALHolder): void {
-        this.nalManager.then((manager) => {
+        nalManagerPromise.then((manager) => {
             manager.AddNAL(info);
         });
     }
 }
 
 var receiver = new Receiver();
+wsClass.HostServer(7060, receiver);
 
 
 
@@ -345,7 +433,6 @@ setInterval(() => {
     console.log("alive2");
 }, 60000);
 */
-wsClass.HostServer(7060, receiver);
 
 
 

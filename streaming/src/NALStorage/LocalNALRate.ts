@@ -3,15 +3,16 @@ import { keyBy } from "../util/misc";
 import { sort, insertIntoListMap } from "../util/algorithms";
 import { TransformChannel } from "pchannel";
 import { PChannelMultiListen } from "../receiver/PChannelMultiListen";
+import { appendFileSync } from "fs";
 
 let path = "./dist/";
 
 /** Used for both pure local data, and for after we load data from S3 (and then have to store it on disk, because
  *      the raspberry pi 3 only has 1GB of memory, and each chunk will easily be 100MB). */
-export interface LocalNALStorage {
+export interface NALStorage {
     AddNAL(val: NALHolderMin): void;
-    /** Should return the underlying array, that is automatically updated as new data is read. */
-    GetNALTimes(): NALTime[];
+
+    GetNALTimes(): NALIndexInfo[];
     
     ReadNALs(times: number[]): Promise<NALHolderMin[]>;
     SubscribeToNALTimes(callback: (nalTime: NALTime) => void): () => void;
@@ -104,7 +105,7 @@ function readNal(nalFullBuffer: Buffer, warnOnIncomplete = true, pos = 0): NALHo
 // TODO: S3 storage
 //  REMEMBER! You can't split P frames from their I frames. We need to keep them together, or else it won't play!
 
-export class LocalNALRate implements LocalNALStorage {
+export class LocalNALRate implements NALStorage {
     public static RatePath = path + "rates.txt";
 
     private nalTimeChannel = new PChannelMultiListen<NALTime>();
@@ -170,6 +171,8 @@ export class LocalNALRate implements LocalNALStorage {
                 sort(this.nalInfos, x => x.time);
                 this.nalInfoLookup = keyBy(this.nalInfos, x => String(x.time));
             })();
+            console.log(`Loaded LocalNALRate ${this.Rate}`);
+            return;
         } catch(e) {
             console.error(`Failed to read index file even though the nal file exists. We are going to try to generate the index from the nal file. Error ${e.toString()}`);
         }
@@ -177,6 +180,7 @@ export class LocalNALRate implements LocalNALStorage {
         // TODO: Eh... if the nal file is corrupted we should rename the nal file. And ignore the error. But... we don't want
         //  too many nal files, so maybe always rename to the same file, so it overwrites it?
 
+        // TODO: Oh... we need to handle files > 2GB, which is almost certain to be the case here.
         let nalFile = await readFilePromise(this.nalFilePath);
 
         this.nalInfos = [];
@@ -195,6 +199,7 @@ export class LocalNALRate implements LocalNALStorage {
         }
         sort(this.nalInfos, x => x.time);
         this.nalInfoLookup = keyBy(this.nalInfos, x => String(x.time));
+        console.log(`Loaded LocalNALRate ${this.Rate}`);
     }
 
     private writeLoop = TransformChannel<{nalFullBuffer: Buffer, indexObj: NALIndexInfo}, void>(async input => {
@@ -204,8 +209,6 @@ export class LocalNALRate implements LocalNALStorage {
         ]);
     });
     public AddNAL(nalInfo: NALHolderMin): void {
-        let { sps, pps } = nalInfo;
-
         // We need to store all of NALMinInfo on disk here, because the index file is optional
         let nalFullBuffer = writeNal(nalInfo);
 
@@ -219,12 +222,17 @@ export class LocalNALRate implements LocalNALStorage {
         (indexObj as any).toString = function() {
             return JSON.stringify(this);
         };
+        // TODO: We need to store some nal buffers in memory, because right now we add stuff to index before
+        //  we confirm the disk write. And I don't want to block on the disk write, so...
         insertIntoListMap(this.nalInfos, indexObj, x => x.time);
         this.nalInfoLookup[indexObj.time] = indexObj;
 
         this.curByteLocation += nalFullBuffer.length;
 
         this.writeLoop({ nalFullBuffer, indexObj });
+        
+        //appendFileSync(this.nalFilePath, nalFullBuffer),
+        //appendFileSync(this.indexFilePath, JSON.stringify(indexObj) + "\n")
 
         this.nalTimeChannel.SendValue({ time: nalInfo.time, type: nalInfo.type, rate: nalInfo.rate });
     }

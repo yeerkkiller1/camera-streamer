@@ -12,9 +12,16 @@ export function findAfter<T>(list: T[], value: number, map: (t: T) => number): T
 export function findAfterIndex<T>(list: T[], value: number, map: (t: T) => number): number {
     return findAtOrBeforeIndex(list, value, map) + 1;
 }
-export function findAtOrAfter<T>(list: T[], value: number, map: (t: T) => number): number {
-    return findAtOrAfterIndex(list, value, map);
+export function findAtOrAfter<T>(list: T[], value: number, map: (t: T) => number): T|undefined {
+    return list[findAtOrAfterIndex(list, value, map)];
 }
+
+export function findAt<T>(list: T[], value: number, map: (t: T) => number): T|undefined {
+    let index = binarySearchMap(list, value, map);
+    if(index < 0) return undefined;
+    return list[index];
+}
+
 export function findAtOrAfterIndex<T>(list: T[], value: number, map: (t: T) => number): number {
     let index = binarySearchMap(list, value, map);
     if(index < 0) {

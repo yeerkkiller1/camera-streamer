@@ -40,12 +40,27 @@ export function getIntialInputNumberValue(globalKey: string, initialValue: numbe
 
 interface ICheckboxProps {
     globalKey: string;
+    indeterminate?: boolean;
     onValue: (value: boolean) => void;
 }
 interface ICheckboxState { }
 
 export class Checkbox extends React.Component<ICheckboxProps, ICheckboxState> {
     state: ICheckboxState = { };
+
+    checkbox: HTMLInputElement|null|undefined;
+
+    componentDidMount() {
+        this.afterUpdate();
+    }
+    componentDidUpdate() {
+        this.afterUpdate();
+    }
+    afterUpdate() {
+        if(this.checkbox) {
+            this.checkbox.indeterminate = !!this.props.indeterminate;
+        }
+    }
 
     value(): boolean {
         return getValue(this.props.globalKey) && true || false;
@@ -56,6 +71,7 @@ export class Checkbox extends React.Component<ICheckboxProps, ICheckboxState> {
             <input
                 type="checkbox"
                 checked={this.value()}
+                ref={x => this.checkbox = x}
                 onChange={e => {
                     setInputValue(this.props.globalKey, e.currentTarget.checked);
                     this.props.onValue(this.value());

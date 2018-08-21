@@ -4,363 +4,17 @@ import { PropsMapReduce } from "../util/PropsMapReduce";
 // Polyfills.
 import "../util/math";
 import { binarySearchMap, binarySearchNumber, binarySearch, findAtOrBefore, findAtOrAfter, findAtOrAfterIndex, findAtOrBeforeIndex } from "../util/algorithms";
-import { formatDuration } from "../util/format";
+import { formatDuration, formatDate } from "../util/format";
 import { getTimeSynced } from "../util/time";
 
 import "./RangeSummarizer.less";
 import { group, sum } from "../util/math";
-import { SegmentRanges } from "./rangeMapReduce";
 import { RealTimeToVideoTime, RealDurationToVideoDuration } from "./TimeMap";
-import { getIntialInputNumberValue, InputNumber, setInputValue } from "../util/Input";
+import { getIntialInputNumberValue, InputNumber, setInputValue, getInitialCheckboxValue, Checkbox } from "../util/Input";
+import { unitList, UnitDurationObj, UnitType } from "../util/timeUnits";
+import { keyBy, mapObjectValues } from "../util/misc";
+import { ClickAnim } from "../util/ClickAnim";
 
-interface IProps {
-    // TODO: Allow ranges to be mutated, by changing endTimes of the last range,
-    //  OR by adding new ranges. Removing ranges will never be allowed.
-
-    rate: number;
-    speedMultiplier: number;
-
-    // ranges are sorted be time
-    receivedRanges: SegmentRanges|undefined;
-    serverRanges: SegmentRanges;
-    requestedRanges: SegmentRanges|undefined;
-    receivedFrames: NALTime[]|undefined;
-
-    currentPlayTime: number;
-
-    debugVideo: boolean;
-
-    onTimeClick: (time: number) => void;
-}
-interface IState {
-    viewport: {
-        startTime: number;
-        endTime: number;
-    }
-}
-
-function getOverlaps(baseRange: NALRange, ranges: SegmentRanges|undefined, toFracPos: (pos: number) => number): { startFrac: number, sizeFrac: number }[] {
-    let overlapFracs: { startFrac: number, sizeFrac: number }[] = [];
-    if(!ranges) {
-        return overlapFracs;
-    }
-    let segments = ranges.segments;
-    let index = binarySearchMap(segments, baseRange.firstTime, x => x.firstTime);
-    if(index < 0) {
-        index = ~index - 1;
-        if(index < 0) {
-            index = 0;
-        }
-    }
-
-    while(index < segments.length && segments[index].firstTime < baseRange.lastTime) {
-        let receivedStart = Math.max(segments[index].firstTime, baseRange.firstTime);
-        let receivedEnd = Math.min(segments[index].lastTime, baseRange.lastTime);
-
-        overlapFracs.push({
-            startFrac: toFracPos(receivedStart),
-            sizeFrac: toFracPos(receivedEnd) - toFracPos(receivedStart)
-        });
-        index++;
-    }
-
-    return overlapFracs;
-}
-
-
-const unitTypeList: UnitType[] = ["ms", "s", "m", "h", "d", "mon", "y"];
-type UnitType = "ms" | "s" | "m" | "h" | "d" | "mon" | "y";
-
-function getPreviousUnitBoundary(time: number, unit: UnitType): number {
-    let unitIndex = unitTypeList.indexOf(unit);
-    if(Math.abs(time - setUnitValue(time, "ms", 0)) > 1000) {
-        // For DST setting any fields for certain times wipes out the timezone. So... that would matter (for "h" unit type and lower),
-        //  set the times differently (explicitly subtract milliseconds).
-        if(unitIndex <= unitTypeList.indexOf("h")) {
-            if(unitIndex <= unitTypeList.indexOf("h")) {
-                time -= new Date(time).getMinutes() * 60 * 1000;
-            }
-            if(unitIndex <= unitTypeList.indexOf("m")) {
-                time -= new Date(time).getSeconds() * 1000;
-            }
-            if(unitIndex <= unitTypeList.indexOf("s")) {
-                time -= new Date(time).getMilliseconds();
-            }
-            return time;
-        }
-    }
-    let smallerUnits = unitTypeList.filter(x => unitTypeList.indexOf(x) < unitIndex);
-    for(let smallerUnit of smallerUnits) {
-        time = setUnitValue(time, smallerUnit, 0);
-    }
-    return time;
-}
-
-/** Gives the next boundary on the indicated unit. (as in, the time when the indicator of that unit changes).
- * 
- *      For DST we consider 1am DST and 1am NO DST different hour units, so although the indicator may not change
- *          (or it might, if DST / NO DST is shown), we will have a boundary between them (making every hour almost exactly
- *          an hour, instead of one hour being 2 hours).
- * 
- *      Operates in the local timezone. In Javascript the native date object doesn't let us do anything more (except for UTC,
- *          but this function in UTC is trivial).
- */
-function getNextUnitBoundary(time: number, unit: UnitType): number {
-    let prevBoundary = getPreviousUnitBoundary(time, unit);
-    let nextTime = setUnitValue(prevBoundary, unit, getUnitValue(time, unit) + 1);
-
-    // Stupid DST...
-    if(unit === "h") {
-        let delta = (nextTime - prevBoundary);
-        if(delta > 1000 * 60 * 60 * 1.5) {
-            // We left daylight savings, an hour repeated
-            nextTime -= 1000 * 60 * 60 * 1;
-        }
-        if(delta < 1000 * 60 * 60 * 0.5) {
-            // We entered daylight savings, an hour was skipped
-            nextTime += 1000 * 60 * 60 * 1;
-        }
-    }
-
-    return nextTime;
-}
-function getUnitValue(time: number, unit: UnitType): number {
-    switch(unit) {
-        default: {
-            // Missing handler for a unit
-            let x: never = unit;
-            throw new Error(`No handler for ${unit}`);
-        }
-        case "ms": return new Date(time).getMilliseconds();
-        case "s": return new Date(time).getSeconds();
-        case "m": return new Date(time).getMinutes();
-        case "h": return new Date(time).getHours();
-        // Force zero index
-        case "d": return new Date(time).getDate() - 1;
-        case "mon": return new Date(time).getMonth();
-        case "y": return new Date(time).getFullYear();
-    }
-}
-/** It's expected that invalid values will just roll over here. */
-function setUnitValue(time: number, unit: UnitType, value: number): number {
-    switch(unit) {
-        default: {
-            // Missing handler for a unit
-            let x: never = unit;
-            throw new Error(`No handler for ${unit}`);
-        }
-        case "ms": return new Date(time).setMilliseconds(value);
-        case "s": return new Date(time).setSeconds(value);
-        case "m": return new Date(time).setMinutes(value);
-        case "h": return new Date(time).setHours(value);
-        // Force zero index
-        case "d": return new Date(time).setDate(value + 1);
-        case "mon": return new Date(time).setMonth(value);
-        case "y": return new Date(time).setFullYear(value);
-    }
-}
-
-function getCurrentUnitSize(time: number, unit: UnitType): number {
-    return getNextUnitBoundary(time, unit) - getPreviousUnitBoundary(time, unit);
-}
-
-type UnitDurationObj = {
-    fracPos: number;
-    fracSize: number;
-    duration: number;
-    // Global time
-    time: number;
-    // Time formated. Ex, 5h, or 5am, or Wed, 9th, etc.
-    unitTime: string;
-    // Visual importance, used to thin the durations we show. For example, we probably can't show 100 minute labels.
-    //  So we will show less, but if we show any we should show the half hour marks, instead of random times.
-    // Higher means we are more likely to show as a label, or at least a tick.
-    importances: { [key in 0|1|2]: boolean };
-};
-type Unit = {
-    unit: UnitType;
-
-    // Default, could change with leap hours, leap years and always changes with months
-    defaultDuration: number;
-
-    defaultMinorCount: number;
-    defaultMajorCount: number;
-
-    /** Gets the duration of the unit at that specific time */
-    getDurationAt(time: number): number;
-
-    /** Fractional alignment of unit that falls on that time. From 0 (unit starts on time) to just less than 1 (unit ends just after the time). */
-    getAlignment(time: number): number;
-
-    /** Gets list of durations for this time span.
-     *      If startTime is offset from unit boundaries we give the full duration, which may extend beyond startTime. Same for endTime.
-     * 
-     *      It is highly recommend you add a bufferFraction. Both to prevent labels that may have a duration out of the view, but a label
-     *          in the view from being hidden, and then suddenly appearing (with a buffer they can appear naturally, as if they were always there),
-     *          and because the end behavior of this isn't great (if endTime is on or close to a boundary durations may be excluded, or included, randomly).
-     * 
-     * */
-    getDurations(startTime: number, endTime: number, bufferFraction: number): UnitDurationObj[];
-};
-const unitList: Unit[] = (() => {
-    let increments: Unit[] = [];
-    let lastUnitMs = 1;
-    function addNextUnitIncrement(unit: UnitType, factor: number) {
-        let index = increments.length;
-        let defaultDuration = lastUnitMs * factor;
-        lastUnitMs = defaultDuration;
-
-        function getLargerUnitNextBoundary(time: number) {
-            let nextObj = increments[index + 1];
-            if(nextObj) {
-                return getNextUnitBoundary(time, nextObj.unit);
-            }
-            throw new Error(`Could not find unit larger than ${unit}`);
-        }
-        function getLargerUnitPrevBoundary(time: number) {
-            let nextObj = increments[index + 1];
-            if(nextObj) {
-                return getPreviousUnitBoundary(time, nextObj.unit);
-            }
-            throw new Error(`Could not find unit larger than ${unit}`);
-        }
-
-        // Both should usually divide the number of units before we wrap over evenly. However, with DST they can't, and as a result there might be
-        //  more space than usual between ticks, or ticks may be closer together than usual. Oh well...
-        let { majorCount, minorCount } = (() => {
-            switch(unit) {
-                default: {
-                    // Missing handler for a unit
-                    let x: never = unit;
-                    throw new Error(`No handler for ${unit}`);
-                }
-                // type UnitType = "ms" | "s" | "m" | "h" | "d";
-                case "ms": return { majorCount: 500, minorCount: 100 };
-                case "s": return { majorCount: 30, minorCount: 10 };
-                case "m": return { majorCount: 30, minorCount: 10 };
-                case "h": return { majorCount: 12, minorCount: 4 };
-                case "d": return { majorCount: 14, minorCount: 7 };
-                case "mon": return { majorCount: 6, minorCount: 2 };
-                case "y": return { majorCount: 5, minorCount: 2 };
-            }
-        })();
-
-        increments.push({
-            unit,
-            defaultDuration,
-            defaultMinorCount: minorCount,
-            defaultMajorCount: majorCount,
-            getDurationAt(time: number): number {
-                return getCurrentUnitSize(time, unit);
-            },
-            getAlignment(time: number): number {
-                return (time - getPreviousUnitBoundary(time, unit)) / getCurrentUnitSize(time, unit);
-            },
-            getDurations(startTime: number, endTime: number, bufferFraction: number): UnitDurationObj[] {
-                let durations: UnitDurationObj[] = [];
-                
-                let viewDuration = endTime - startTime;
-                let time = startTime - viewDuration * bufferFraction;
-                let effectiveEndTime = endTime + viewDuration * bufferFraction;
-
-                time = getPreviousUnitBoundary(time, unit);
-
-                let localIndex: number;
-                if(unit === "y") {
-                    localIndex = new Date(time).getFullYear();
-                } else {                   
-                    // localIndex resets every time the unit larger than us increases by 1
-                    localIndex = 0;
-
-                    let indexZeroStart = getLargerUnitPrevBoundary(time);
-                    let tempTime = indexZeroStart;
-                    while(true) {
-                        tempTime += getCurrentUnitSize(tempTime, unit);
-                        if(tempTime > time) break;
-                        localIndex++;
-                    }
-                }
-
-                while(time < effectiveEndTime) {
-                    if(durations.length > 1000) {
-                        debugger;
-                    }
-                    let nextTime = getNextUnitBoundary(time, unit);
-                    let duration = getCurrentUnitSize(time, unit);
-
-                    let fracPos = (time - startTime) / viewDuration;
-                    let fracSize = duration / viewDuration;
-
-                    let unitTime: string;
-                    {
-                        unitTime = localIndex + unit;
-                        if(unit === "h") {
-                            let index = new Date(time).getHours();
-                            let suffix = index < 12 ? "am" : "pm";
-                            index = index % 12;
-                            if(index === 0) {
-                                index = 12;
-                            }
-                            unitTime = index + suffix;
-                        }
-                        if(unit === "d") {
-                            unitTime = "Day " + (localIndex + 1);
-                        }
-                        if(unit === "mon") {
-                            let months = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
-                            unitTime = months[localIndex];
-                        }
-                        if(unit === "y") {
-                            unitTime = localIndex.toString();
-                        }
-                    }
-
-                    durations.push({
-                        fracPos,
-                        fracSize,
-                        time,
-                        duration,
-                        unitTime,
-                        // On days where DST stops the time increments will be funny. (12am, 3am, 7am, 11am, 3pm, 7pm, 11pm). It corrects itself after that day, so...
-                        //  it's fine, and every indicator is still correct (and spaced at 4 hour increments).
-                        importances: {
-                            2: localIndex % majorCount === 0,
-                            1: localIndex % minorCount === 0,
-                            0: true
-                        }
-                    });
-
-                    localIndex++;
-                    if(unit !== "y") {
-                        let localIndexRollover = getLargerUnitNextBoundary(time);
-                        if(nextTime >= localIndexRollover) {
-                            localIndex = 0;
-                        }
-                    }
-                    time = nextTime;
-                }
-
-                return durations;
-            }
-        });
-    }
-    addNextUnitIncrement("ms", 1);
-    addNextUnitIncrement("s", 1000);
-    addNextUnitIncrement("m", 60);
-    addNextUnitIncrement("h", 60);
-    addNextUnitIncrement("d", 24);
-    addNextUnitIncrement("mon", 365 / 12);
-    addNextUnitIncrement("y", 12);
-    //addNextUnitIncrement("w", 7);
-
-    // TODO:
-    //  - Leap hours
-    //      - Leap seconds will need to be dealt with on the server, preferrably by bleeding the second across the day.
-    //  - Weeks need days of week
-    //  - Months need variable length, and names
-    
-    return increments;
-})();
 
 //todonext
 // - unified trackbar
@@ -372,8 +26,95 @@ const unitList: Unit[] = (() => {
 //      - should show what rates are available at various times
 //      - when playing automatically switch rates when future video for the current rate isn't available?
 
+//todonext
+// On scroll have a visual indicator to show location
+//  - Can we animate zoom in/out?
+//  - When zoom out flash/highlight the area that was previously shown
+//  - On zoom in flash/highlight the position that was centered
+
+
+//todonext
+//  - Lock onto (center) play line / auto locked off / locked off
+//      - Add a stem that overlaps the video (or whatever is above us). They can hide it by unlocking the play time and scrolling the viewport, if they absolutely have to.
+//  - Display ranges for different rate levels
+//      - Perhaps overlap all ranges, but then highlight it differently or something to show when any rates are missing?
+//  - Correct measurement of text and alignment
+//  - Days of week, and color indicators option for colored weekends
+//  - Navigation features
+//      - Drag to select and zoom in
+//      - Middle click to zoom out to level of unit.
+//  - Have labels be in one of two modes
+//      - Fit within range, so every range has a label
+//      - Not within range, so we show the labels a bit farther up?, and downsample them so the text doesn't overlap
+//      - We could also have a minimum text margin (based on the size of the text? or max size, or average?), and downsample like that
+//          - The results would be fairly similiar
+//  - Keep unused small increments as greyed as boxes, so the height doesn't change.
+//  - Maybe we shouldn't playtime lines when the user clicks? The only reason we animate them is so they line up with the grid
+//      when the grid moves, but if the grid isn't moving they should probably be exact.
+
+// When ranges get small enough make them actual ticks, with major and minor ticks.
+// Don't proc major/minor counts if they will collide with rollover (ex, don't proc the rate of 7 if in 7 we will rollover).
+// Day of week next to day
+// Maybe we could have a daylight indicator as another bar? It could be pretty useful in identifying the time,
+//  both in medium (hourly) views, and in daily views, where the cycle can be seen.
+
+// Maybe scrollwheel to move when over an indicator?
+// But then also someway to zoom in/out? Maybe scroll wheel zooms, but
+//  scrollwheel side/side can pan?
+// Drag to select a region (and zoom into it)?
+// Play time indicator? Perhaps it is a line/flag that goes up and overlaps the video? And maybe... it has an
+//  "edit" button/link at the end of the time, to directly input.
+// Also start/end times of the view should probably have direct input?
+// Maybe middle click, or double click? to open up "select video" on unit line. This puts an overlay on that
+//  bar that is slightly bigger (with shadows or something to show it is popping out / is a dialog), that has
+//  all the unit times for the unit (all the months, or hours, etc), which are clearly clickable, and then
+//  clicking on them sets the zoom to be that exact unit (with the unit values above that unit preserved).
+//  - Perhaps start the numbering offset somewhat? so it centers around the current time. That way you can be working
+//      around like midnight, but still have the hours for both days?
+
+// Actually... if we had kind of like a multi radial thing, with numbers spanning each unit count,
+//  and then had a line where the current play indicator was, and where video was? That would make it really
+//  easy to go from a large span of time to small. Except... the small spans of time might be confusing,
+//  as they would be essentially meaningless when you are jumping around at larger units of time.
+//  - I could autoalign all lesser units to 0 when you seek on a larger scale?
+// Maybe instead of that, we could just add quick "zoom out" buttons to each unit, to show a bunch of that unit type as labels.
+//  - Or even an "set" mode, where the labels become links, and clicking on them zooms into that. So you zoom all the way out,
+//      and then click the month, day, hour, minute, second.
+
+
+interface IProps {
+    // TODO: Allow ranges to be mutated, by changing endTimes of the last range,
+    //  OR by adding new ranges. Removing ranges will never be allowed.
+    // ranges are sorted be time
+    receivedRanges: NALRange[]
+    serverRanges: NALRange[];
+    receivedFrames: NALTime[];
+
+    currentPlayTime: number;
+    targetPlayTime: number;
+
+
+    debugVideo: boolean;
+
+    onTimeClick: (time: number) => void;
+}
+
+interface Viewport {
+    startTime: number;
+    endTime: number;
+}
+
+interface IState {
+    viewport: Viewport;
+
+    viewLocked: boolean;
+    softViewUnlocked: boolean;
+}
+
 const viewportStart = "viewportStart";
 const viewportEnd = "viewportEnd";
+const viewLockedConst = "viewLocked";
+const softViewUnlocked = "softViewUnlocked";
 
 export class RangeSummarizer extends React.Component<IProps, IState> {
     state: IState = this.initState();
@@ -382,19 +123,35 @@ export class RangeSummarizer extends React.Component<IProps, IState> {
             viewport: {
                 startTime: getIntialInputNumberValue(viewportStart, +new Date("Tue Aug 07 2018 18:32:34 GMT-0400")),
                 endTime: getIntialInputNumberValue(viewportEnd, +new Date("Tue Aug 07 2018 18:32:34 GMT-0400") + 60 * 1000 * 15)
-            }
+            },
+            viewLocked: getInitialCheckboxValue(viewLockedConst),
+            softViewUnlocked: getInitialCheckboxValue(softViewUnlocked),
         };
     };
 
     componentWillUpdate(nextProps: IProps, nextState: IState) {
         setInputValue(viewportStart, nextState.viewport.startTime);
         setInputValue(viewportEnd, nextState.viewport.endTime);
+        setInputValue(viewLockedConst, nextState.viewLocked);
+        setInputValue(softViewUnlocked, nextState.softViewUnlocked);
+
+        if(nextState.viewLocked) {
+            if(this.props.targetPlayTime !== nextProps.targetPlayTime) {
+                let { targetPlayTime } = nextProps;
+                let { viewport } = nextState;
+                let size = viewport.endTime - viewport.startTime;
+                viewport.startTime = targetPlayTime - size / 2;
+                viewport.endTime = targetPlayTime + size / 2;
+
+                this.setState({ viewport });
+            }
+        }
     }
 
-    private async clickTimeBar(e: React.MouseEvent<HTMLDivElement>, range: NALRange) {
+    private async clickTimeBar(e: React.MouseEvent<HTMLElement>, range: NALRange) {
         let now = getTimeSynced();
 
-        let elem = e.currentTarget as HTMLDivElement;
+        let elem = e.currentTarget as HTMLElement;
         let rect = elem.getBoundingClientRect();
 
         let fraction = (e.clientX - rect.left) / rect.width;
@@ -470,19 +227,105 @@ export class RangeSummarizer extends React.Component<IProps, IState> {
         );
     }
 
-    private renderRuler(): JSX.Element {
-        let { viewport } = this.state;
+    private animateViewport(viewport: Viewport, highlighted: number|Viewport|undefined) {
+        this.setState({ viewport });
+        /*
+        this.setState({ viewportAnimation: viewport, onViewportRender: () => {
+            setTimeout(() => {
+                this.setState({ viewportAnimation: undefined, viewport });
+            }, 0);
+        } });
+        */
+    }
 
-        // TODO:
-        //  Actually, maybe take the largest removed unit, and put it's major ticks as ticks on the next largest unit,
-        //      to give more granularity. As if we are viewing a period of 8 hours, or even 4 hours, there would be
-        //      240 or 480 minute ticks (way too many), but too few hour ticks (only 8), so we really want to combine them.
-        //      OR... maybe we should allow way more base units, as even if there are 600 minute units, there will only be
-        //      like 20 major ticks, which don't even need to show up as labels, so it is really alright.
+    private onWheelRuler(event: React.WheelEvent<HTMLElement>) {
+        if(event.deltaY !== 0) {
+            let { viewport } = this.state;
+
+            let s = viewport.startTime;
+            let e = viewport.endTime;
+            let size = e - s;
+
+            if(event.deltaY < 0) {
+                let elem = event.currentTarget;
+                let rect = elem.getBoundingClientRect();
+
+                let fraction = (event.clientX - rect.left) / rect.width;              
+                let pos = s + size * fraction;
+                //s = pos - (pos - s) * 0.5;
+                //e = pos - (e - pos) * 0.5;
+                s = s + size * fraction * 0.5;
+                e = e - size * (1 - fraction) * 0.5;
+
+                this.setState({ viewLocked: false, softViewUnlocked: this.state.viewLocked || this.state.softViewUnlocked });
+            } else {
+                let center = (s + e) * 0.5;
+                s = center - size * 1;
+                e = center + size * 1;
+            }
+
+            viewport.startTime = s;
+            viewport.endTime = e;
+
+            this.animateViewport(viewport, undefined);
+            //this.setState({ viewport });
+
+            event.preventDefault();
+        }
+        if(event.deltaX !== 0) {
+            let { viewport } = this.state;
+
+            let s = viewport.startTime;
+            let e = viewport.endTime;
+            let size = e - s;
+
+            if(event.deltaX < 0) {
+                s = s - size * 0.25;
+                e = e - size * 0.25;
+            } else {
+                s = s + size * 0.25;
+                e = e + size * 0.25;
+            }
+
+            viewport.startTime = s;
+            viewport.endTime = e;
+
+            this.animateViewport(viewport, undefined);
+
+            this.setState({ viewLocked: false, softViewUnlocked: this.state.viewLocked || this.state.softViewUnlocked });
+
+            event.preventDefault();
+        }
+    }
+
+    private onClickRuler(event: React.MouseEvent<HTMLElement>) {
+        if(event.button !== 0) return;
+
+        let elem = event.currentTarget as HTMLElement;
+        let rect = elem.getBoundingClientRect();
+        let fraction = (event.clientX - rect.left) / rect.width;
+
+        let { viewport } = this.state;
+        let clickTime = viewport.startTime + (viewport.endTime - viewport.startTime) * fraction;
+
+        this.props.onTimeClick(clickTime);
+
+        if(this.state.softViewUnlocked && !this.state.viewLocked) {
+            this.setState({ viewLocked: true });
+        }
+        this.setState({ softViewUnlocked: false });
+    }
+
+    private renderUnits(): JSX.Element[] {
+        let lastFreezedTimes = this.lastFreezedTimes;
+        let newFreezedTimes: typeof lastFreezedTimes = {};
+        this.lastFreezedTimes = newFreezedTimes;
+
+        let viewport = this.state.viewport;
 
         let duration = viewport.endTime - viewport.startTime;
-        let unitsInScope = unitList.filter(x => duration / x.defaultDuration < 160);
-        let maxLabelCount = 8;
+        
+        let maxLabelCount = 20;
 
         // TODO: Actually make ticks work...
         let maxTickCount = 30;
@@ -490,16 +333,18 @@ export class RangeSummarizer extends React.Component<IProps, IState> {
         // TODO: We should actually calculate this...
         let textSizeFractionOfBar = 0.08;
 
-        let unitsUI = unitsInScope.map(unit => {
-            const seek = (quantity: number) => {
-                let offset = quantity * unit.defaultDuration;
-                this.state.viewport.startTime += offset;
-                this.state.viewport.endTime += offset;
-                this.setState({
-                    viewport: this.state.viewport
-                });
-            };
+        let bufferFraction = 1;
 
+        let unitsInScope = unitList.filter((x, i) => i >= 2 || duration / x.defaultDuration < 160);
+        return unitsInScope.map(unit => {
+            let durations = duration / unit.defaultDuration < 160 ? unit.getDurations(viewport.startTime, viewport.endTime, bufferFraction) : [];
+
+            // TODO: This is a temporary fix for rounding issues with very large sizes (causing the text label to not appear in the correct
+            //  position for large ranges). It doesn't work if you are close to a year boundary... but that should be fine for now.
+            if(durations.length === 1 && durations[0].fracSize > 1000) {
+                durations[0].fracSize = 1000;
+                durations[0].fracPos = -200;
+            }
 
             let estimatedCount = duration / unit.defaultDuration;
             let majorCount = Math.floor(estimatedCount / unit.defaultMajorCount);
@@ -507,57 +352,28 @@ export class RangeSummarizer extends React.Component<IProps, IState> {
             let noneCount = estimatedCount;
 
             let minLabelImportance: 0|1|2 = 0;
-            if(noneCount > maxLabelCount) {
-                minLabelImportance = 1;
-                if(minorCount > maxLabelCount) {
-                    minLabelImportance = 2;
-                    if(majorCount > maxLabelCount) {
-                        minLabelImportance = 3 as any;
-                        console.warn(`Hiding labels from ${unit.defaultDuration}, as the major count is still too great. Either the major frequency is too high, or our threshold for hiding units is too high or our threshold for the max labels we can show is too low.`);
+            if(durations.length > 0) {
+                if(noneCount > maxLabelCount) {
+                    minLabelImportance = 1;
+                    if(minorCount > maxLabelCount) {
+                        minLabelImportance = 2;
+                        if(majorCount > maxLabelCount) {
+                            minLabelImportance = 3 as any;
+                            console.warn(`Hiding labels from ${unit.defaultDuration}, as the major count is still too great. Either the major frequency is too high, or our threshold for hiding units is too high or our threshold for the max labels we can show is too low.`);
+                        }
                     }
                 }
             }
 
-            // unitsInScope should filter out bad calls to this (ex, millisecond ticks for 1 year of data, which will generate way
-            //  too many objects and probably crash the browser).
-            let durations = unit.getDurations(viewport.startTime, viewport.endTime, 0.2);
-            if(durations.length === 0) {
-                return null;
-            }
+            let lastFreezed = lastFreezedTimes[unit.unit] || {};
+            let newFreezed = newFreezedTimes[unit.unit] = newFreezedTimes[unit.unit] || {};
 
-            //todonext
-            // Ticks
-            //  - Should be choosen from 
-            // Day of week next to day
-            // Maybe we could have a daylight indicator as another bar? It could be pretty useful in identifying the time,
-            //  both in medium (hourly) views, and in daily views, where the cycle can be seen.
-
-            // Maybe scrollwheel to move when over an indicator?
-            // But then also someway to zoom in/out? Maybe scroll wheel zooms, but
-            //  scrollwheel side/side can pan?
-            // Drag to select a region (and zoom into it)?
-            // Play time indicator? Perhaps it is a line/flag that goes up and overlaps the video? And maybe... it has an
-            //  "edit" button/link at the end of the time, to directly input.
-            // Also start/end times of the view should probably have direct input?
-            // Maybe middle click, or double click? to open up "select video" on unit line. This puts an overlay on that
-            //  bar that is slightly bigger (with shadows or something to show it is popping out / is a dialog), that has
-            //  all the unit times for the unit (all the months, or hours, etc), which are clearly clickable, and then
-            //  clicking on them sets the zoom to be that exact unit (with the unit values above that unit preserved).
-            //  - Perhaps start the numbering offset somewhat? so it centers around the current time. That way you can be working
-            //      around like midnight, but still have the hours for both days?
-
-            // Actually... if we had kind of like a multi radial thing, with numbers spanning each unit count,
-            //  and then had a line where the current play indicator was, and where video was? That would make it really
-            //  easy to go from a large span of time to small. Except... the small spans of time might be confusing,
-            //  as they would be essentially meaningless when you are jumping around at larger units of time.
-            //  - I could autoalign all lesser units to 0 when you seek on a larger scale?
-            // Maybe instead of that, we could just add quick "zoom out" buttons to each unit, to show a bunch of that unit type as labels.
-            //  - Or even an "set" mode, where the labels become links, and clicking on them zooms into that. So you zoom all the way out,
-            //      and then click the month, day, hour, minute, second.
-
-            function getCenter(posObj: UnitDurationObj, textSizeFractionOfBar: number): number {
+            function getCenter(posObj: UnitDurationObj, textSizeFractionOfBar: number): { pos: number, aligned: boolean } {
                 let barMargin = Math.min(posObj.fracSize / 2, textSizeFractionOfBar);
                 let unitChunkMargin = textSizeFractionOfBar / posObj.fracSize;
+                if(unitChunkMargin > 0.5) {
+                    unitChunkMargin = 0.5;
+                }
 
                 let centerPos = posObj.fracPos + posObj.fracSize * 0.5;
                 if(centerPos < barMargin) {
@@ -566,95 +382,212 @@ export class RangeSummarizer extends React.Component<IProps, IState> {
                     //  posObj.fracSize * X not outside of [textSizeFractionOfBar, posObj.fracSize - textSizeFractionOfBar]
 
                     // textSizeFractionOfBar
-                    let pos = Math.min(1 - unitChunkMargin, (barMargin - posObj.fracPos) / posObj.fracSize);
-                    return pos;
+                    let pos = (barMargin - posObj.fracPos) / posObj.fracSize;
+                    if(pos < 1 - unitChunkMargin) {
+                        return { pos, aligned: true };
+                    }
+                    return {
+                        pos: 1 - unitChunkMargin,
+                        aligned: false
+                    };
                 }
                 if(centerPos > 1 - barMargin) {
                     // 1 - barMargin = posObj.fracPos + posObj.fracSize * X
-                    let pos = Math.max(unitChunkMargin, (1 - barMargin - posObj.fracPos) / posObj.fracSize);
-                    return pos;
+                    let pos = (1 - barMargin - posObj.fracPos) / posObj.fracSize;
+                    if(pos > unitChunkMargin) {
+                        return { pos, aligned: true };
+                    }
+                    return {
+                        pos: unitChunkMargin,
+                        aligned: false
+                    };
                 }
-                return 0.5;
+                return { pos: 0.5, aligned: false };
             }
 
             return (
-                <div className="RangeSummarizer-ruler-unitsHolder" key={unit.defaultDuration}>
-                    <div className="RangeSummarizer-ruler-unitsHolder-seekButtons RangeSummarizer-ruler-unitsHolder-seekButtons--minus">
-                        <button onClick={() => seek(-5)}>-5{unit.unit}</button>
-                        <button onClick={() => seek(-1)}>-1{unit.unit}</button>
-                    </div>
-                    <div className="RangeSummarizer-ruler-units">
-                        {durations.filter(x => x.importances[minLabelImportance]).map(posObj => (
-                            <div
-                                className="RangeSummarizer-ruler-units-unitLabel"
-                                style={{ left: posObj.fracPos * 100 + "%", width: posObj.fracSize * 100 + "%" }}
-                                key={"label" + posObj.time}
-                                title={`${new Date(posObj.time).toString()}`}
-                            >
-                                <div className="RangeSummarizer-ruler-units-unitLabel-text" style={{ left: getCenter(posObj, textSizeFractionOfBar) * 100 + "%" }}>
-                                    {posObj.unitTime}
+                <div
+                    className="RangeSummarizer-ruler-units"
+                    key={unit.defaultDuration}
+                >
+                    {durations.map(posObj => {
+                        let centerObj = getCenter(posObj, textSizeFractionOfBar);
+                        if(centerObj.aligned) {
+                            newFreezed[posObj.time] = true;
+                        }
+                        return (
+                            <React.Fragment key={"unit" + posObj.time}>
+                                <div
+                                    className={`RangeSummarizer-ruler-units-unitTray`}
+                                    style={{ left: posObj.fracPos * 100 + "%", width: posObj.fracSize * 100 + "%" }}
+                                    key={"tray" + posObj.time}
+                                    title={`${new Date(posObj.time).toString()}`}
+                                >
+                                    <div className="RangeSummarizer-ruler-units-unitLabel-tray"></div>
+                                    <div className="RangeSummarizer-ruler-units-unitLabel-trayLeft"></div>
+                                    <div className="RangeSummarizer-ruler-units-unitLabel-trayRight"></div>
                                 </div>
-                                <div className="RangeSummarizer-ruler-units-unitLabel-tray"></div>
-                                <div className="RangeSummarizer-ruler-units-unitLabel-trayLeft"></div>
-                                <div className="RangeSummarizer-ruler-units-unitLabel-trayRight"></div>
-                            </div>
-                        ))}
-                    </div>
-                    <div className="RangeSummarizer-ruler-unitsHolder-seekButtons RangeSummarizer-ruler-unitsHolder-seekButtons--plus">
-                        <button onClick={() => seek(+1)}>+1{unit.unit}</button>
-                        <button onClick={() => seek(+5)}>+5{unit.unit}</button>
-                    </div>
+                                <div
+                                    className={`RangeSummarizer-ruler-units-unitLabel ${centerObj.aligned && lastFreezed[posObj.time] ? "RangeSummarizer-ruler-units-unitLabel--noAnimation" : ""} ${centerObj.aligned ? "RangeSummarizer-ruler-units-unitLabel--aligned" : ""}`}
+                                    style={{ left: posObj.fracPos * 100 + "%", width: posObj.fracSize * 100 + "%" }}
+                                    key={"label" + posObj.time}
+                                    title={`${new Date(posObj.time).toString()}`}
+                                >
+                                    {posObj.importances[minLabelImportance] && (
+                                        <div
+                                            className={`RangeSummarizer-ruler-units-unitLabel-text`}
+                                            style={{ left: centerObj.pos * 100 + "%" }}
+                                        >
+                                            {posObj.unitTime}
+                                        </div>
+                                    )}
+                                </div>
+                            </React.Fragment>
+                        );
+                    })}
                 </div>
             )
         });
+    }
 
-        const zoom = (factor: number) => {
-            let { viewport } = this.state;
-            let s = viewport.startTime;
-            let e = viewport.endTime;
+    private toggleViewLock() {
+        let { currentPlayTime } = this.props;
+        let { viewport } = this.state;
+        let s = viewport.startTime;
+        let e = viewport.endTime;
+        let size = e - s;
 
-            let center = (s + e) / 2;
-            let size = (e - s) * factor;
+        viewport.startTime = currentPlayTime - size / 2;
+        viewport.endTime = currentPlayTime + size / 2;
 
-            s = center - size / 2;
-            e = center + size / 2;
+        this.setState({ viewport, viewLocked: !this.state.viewLocked, softViewUnlocked: false });
+    }
 
-            viewport.startTime = s;
-            viewport.endTime = e;
+    private renderVideo(): JSX.Element {
+        let {
+            serverRanges,
+            receivedRanges,
+            receivedFrames,
 
-            this.setState({ viewport });
-        };
+            targetPlayTime,
+            currentPlayTime,
+        } = this.props;
+        let {
+            viewport,
+            viewLocked,
+            softViewUnlocked,
+        } = this.state;
+
+        function pos(time: number) {
+            return (time - viewport.startTime) / (viewport.endTime - viewport.startTime);
+        }
+        function filterSegments(ranges: NALRange[]): NALRange[] {
+            return ranges.filter(x =>
+                viewport.startTime <= x.firstTime && x.firstTime <= viewport.endTime || viewport.startTime <= x.lastTime && x.lastTime <= viewport.endTime
+                || x.firstTime <= viewport.startTime && viewport.startTime <= x.lastTime || x.firstTime <= viewport.endTime && viewport.endTime <= x.lastTime
+            );
+        }
+        function filterFrames<T extends {time: number}>(timeObjs: T[] | undefined): T[] {
+            if(!timeObjs) return [];
+            return timeObjs.filter(x => viewport.startTime <= x.time && x.time <= viewport.endTime);
+        }
+
+        let enableFrameLevelDisplay = (viewport.endTime - viewport.startTime) < 10000;
 
         return (
-            <div className="RangeSummarizer-ruler">
-                <div>
-                    Duration: {formatDuration(duration)}
+            <div className={`RangeSummarizer-ruler-video ${!viewLocked ? "RangeSummarizer-ruler-video--viewUnlocked" : ""} ${softViewUnlocked ? "RangeSummarizer-ruler-video--softViewUnlocked" : ""}`}>
+                <div
+                    className="RangeSummarizer-ruler-video-cutOffOverflow"
+                >
+                    {filterSegments(serverRanges).map(range => (
+                        <div
+                            key={"serverRange-" + range.firstTime}
+                            className="RangeSummarizer-ruler-video-serverRange"
+                            style={{
+                                left: pos(range.firstTime) * 100 + "%",
+                                width: (pos(range.lastTime) - pos(range.firstTime)) * 100 + "%"
+                            }}
+                        ></div>
+                    ))}
+
+                    {filterSegments(receivedRanges).map(range => (
+                        <div
+                            key={"receivedRange-" +range.firstTime}
+                            className="RangeSummarizer-ruler-video-receivedRange"
+                            style={{
+                                left: pos(range.firstTime) * 100 + "%",
+                                width: (pos(range.lastTime) - pos(range.firstTime)) * 100 + "%"
+                            }}
+                        ></div>
+                    ))}
+
+                    {enableFrameLevelDisplay && filterFrames(receivedFrames).map(timeObj => (
+                        <div
+                            key={"receivedFrame-" + timeObj.time}
+                            className={`RangeSummarizer-ruler-video-receivedFrame ${timeObj.type === NALType.NALType_keyframe ? "RangeSummarizer-ruler-video-receivedFrame--keyframe" : ""}`}
+                            style={{
+                                left: pos(timeObj.time) * 100 + "%"
+                            }}
+                        ></div>
+                    ))}
                 </div>
-                <div>
-                    Start Time: {new Date(viewport.startTime).toString()}
-                    <InputNumber globalKey={viewportStart} onValue={x => { this.state.viewport.startTime = x; this.setState({ viewport: this.state.viewport }); }} />
+
+                <div className="RangeSummarizer-ruler-video-targetPlayLine" style={{ left: pos(targetPlayTime) * 100 + "%" }}>
+                    <div className="RangeSummarizer-ruler-video-targetPlayLine-time">
+                        {formatDate(targetPlayTime)}
+                    </div>
                 </div>
-                <div>
-                    End Time: {new Date(viewport.endTime).toString()}
-                    <InputNumber globalKey={viewportEnd} onValue={x => { this.state.viewport.endTime = x; this.setState({ viewport: this.state.viewport }); }} />
+                <div className="RangeSummarizer-ruler-video-playLine" style={{ left: pos(currentPlayTime) * 100 + "%" }}></div>
+
+                <ClickAnim
+                    button={<div className="RangeSummarizer-ruler-video-lock">
+                        <span className="RangeSummarizer-ruler-video-lock-text">Unlocked View</span>
+                        <Checkbox globalKey={viewLockedConst} indeterminate={softViewUnlocked} onValue={() => {}} />
+                    </div>}
+                    onClick={() => this.toggleViewLock() }
+                    hoverClassName="RangeSummarizer-ruler-video-lock--hover"
+                />
+                
+            </div>
+        );
+    }
+
+    private lastFreezedTimes: { [unit: string]: { [time: number]: boolean } } = {};
+    private renderRuler(): JSX.Element {
+        
+        let viewport = this.state.viewport;
+
+        // TODO:
+        //  Actually, maybe take the largest removed unit, and put it's major ticks as ticks on the next largest unit,
+        //      to give more granularity. As if we are viewing a period of 8 hours, or even 4 hours, there would be
+        //      240 or 480 minute ticks (way too many), but too few hour ticks (only 8), so we really want to combine them.
+        //      OR... maybe we should allow way more base units, as even if there are 600 minute units, there will only be
+        //      like 20 major ticks, which don't even need to show up as labels, so it is really alright.
+
+        return (
+            <div
+                className="RangeSummarizer-ruler"
+            >
+                {this.renderVideo()}
+                <div
+                    className="RangeSummarizer-rulerClickArea"
+                    onWheel={x => this.onWheelRuler(x)}
+                    onClick={x => this.onClickRuler(x)}
+                >
+                    {this.renderUnits()}
                 </div>
-                <div>
-                    <button onClick={() => zoom(0.5)}>Zoom In</button>
-                    <button onClick={() => zoom(2)}>Zoom Out</button>
-                </div>
-                {unitsUI}
             </div>
         )
     }
 
-    private renderBar(): JSX.Element {
+    private renderNew(): JSX.Element {
         let { viewport } = this.state;
         let { serverRanges } = this.props;
-        let segments = serverRanges.segments;
+        //let segments = serverRanges.segments;
 
-        let beforeRanges = segments.filter(x => x.firstTime < viewport.startTime);
-        let afterRanges = segments.filter(x => x.lastTime > viewport.endTime);
-        let ranges = segments.filter(x => !(x.lastTime < viewport.startTime || x.firstTime > viewport.endTime));
+        //let beforeRanges = segments.filter(x => x.firstTime < viewport.startTime);
+        //let afterRanges = segments.filter(x => x.lastTime > viewport.endTime);
+        //let ranges = segments.filter(x => !(x.lastTime < viewport.startTime || x.firstTime > viewport.endTime));
 
         // Absolute times at start and end of viewport.
         // Maybe we can have ruler for the whole duration? And then highlight the areas where there is actually view.
@@ -666,91 +599,25 @@ export class RangeSummarizer extends React.Component<IProps, IState> {
         //  and units that are too large also with less heigh/font size.
         //  So there is a bubble/zoom effect on the sizes that are the most in line with the current zoom level?
 
+        let realDuration = this.state.viewport.endTime - this.state.viewport.startTime;
 
         return (
-            <div className="RangeSummarizer-bar">
+            <div className="RangeSummarizer-new">
+                <div>
+                    View Capture Duration: {formatDuration(realDuration)}
+                </div>
+                <div>
+                    Start Time: {new Date(viewport.startTime).toString()}
+                    <InputNumber globalKey={viewportStart} onValue={x => { this.state.viewport.startTime = x; this.setState({ viewport: this.state.viewport }); }} />
+                </div>
+                <div>
+                    End Time: {new Date(viewport.endTime).toString()}
+                    <InputNumber globalKey={viewportEnd} onValue={x => { this.state.viewport.endTime = x; this.setState({ viewport: this.state.viewport }); }} />
+                </div>
+
                 {this.renderRuler()}
-                {this.renderExcludedRanges(beforeRanges, -1)}
-                {this.renderExcludedRanges(afterRanges, +1)}
-            </div>
-        );
-    }
-
-    private renderSegments() {
-        let { receivedRanges, serverRanges, requestedRanges, receivedFrames, debugVideo } = this.props;
-        if(!serverRanges) return null;
-
-        let rate = this.props.rate;
-        let mult = this.props.speedMultiplier;
-
-        // Show loaded percent, and current frame position indicator.
-        let segments = serverRanges.segments.slice().reverse();
-
-        let now = getTimeSynced();
-
-        let currentRealTime = this.props.currentPlayTime;
-
-        return (
-            <div>
-                {
-                    segments.map((range, index) => {
-                        let isPlaying = false;
-                        let selectedFrac = 0;
-                        function toFracPos(pos: number) {
-                            return (pos - range.firstTime) / (range.lastTime - range.firstTime);
-                        }
-                        
-                        if(range.firstTime <= currentRealTime && currentRealTime <= range.lastTime) {
-                            isPlaying = true;
-                            selectedFrac = toFracPos(currentRealTime);
-                        }
-
-                        let receivedOverlapFracs = getOverlaps(range, receivedRanges, toFracPos);
-                        let requestedOverlapFracs = getOverlaps(range, requestedRanges, toFracPos);
-
-                        receivedFrames = receivedFrames || [];
-                        let frameIndex = findAtOrAfterIndex(receivedFrames, range.firstTime, x => x.time);
-                        let endFrameIndex = findAtOrBeforeIndex(receivedFrames, range.lastTime, x => x.time);
-                        let frames = receivedFrames.slice(frameIndex, endFrameIndex);
-
-                        return (
-                            <div
-                                className={`RangeSummarizer-segment ${isPlaying && "RangeSummarizer-segment--playing" || ""}`}
-                                key={index}
-                                onClick={(e) => this.clickTimeBar(e, range)}
-                            >
-                                <div>
-                                    {formatDuration(range.lastTime - range.firstTime)}, {formatDuration(now - range.firstTime)} AGO
-                                    {
-                                        rate !== 1 && (
-                                        <span>
-                                            , {formatDuration(RealDurationToVideoDuration(range.lastTime - range.firstTime, rate, mult))} play time
-                                        </span>
-                                    )}
-                                    {debugVideo && (
-                                        ` (${range.firstTime} to ${range.lastTime})`
-                                    )}
-                                </div>
-
-                                <div className="RangeSummarizer-segment-bars">
-                                    {requestedOverlapFracs.map((overlap, i) => (
-                                        <div key={i} className="RangeSummarizer-segment-requestRange" style={{marginLeft: overlap.startFrac * 100 + "%", width: overlap.sizeFrac * 100 + "%"}}></div>
-                                    ))}
-
-                                    {receivedOverlapFracs.map((overlap, i) => (
-                                        <div key={i} className="RangeSummarizer-segment-loadedRange" style={{marginLeft: overlap.startFrac * 100 + "%", width: overlap.sizeFrac * 100 + "%"}}></div>
-                                    ))}
-
-                                    {isPlaying &&<div className="RangeSummarizer-segment-playMarker" style={{marginLeft: selectedFrac * 100 + "%"}}></div>}
-
-                                    {debugVideo && frames.map(frame => (
-                                        <div key={frame.time} className="RangeSummarizer-segment-time" style={{marginLeft: toFracPos(frame.time) * 100 + "%"}}></div>
-                                    ))}
-                                </div>
-                            </div>
-                        );
-                    })
-                }
+                {/*this.renderExcludedRanges(beforeRanges, -1)*/}
+                {/*this.renderExcludedRanges(afterRanges, +1)*/}
             </div>
         );
     }
@@ -760,8 +627,7 @@ export class RangeSummarizer extends React.Component<IProps, IState> {
 
         return (
             <div className="RangeSummarizer">
-                {this.renderBar()}
-                {this.renderSegments()}
+                {this.renderNew()}
             </div>
         );
     }

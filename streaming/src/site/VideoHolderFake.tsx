@@ -6,7 +6,7 @@ import { IVideoHolder } from "./VideoHolder";
 interface IProps {
     videoProps: React.VideoHTMLAttributes<HTMLVideoElement>;
     rate: number;
-    speedMultiplier: number;
+    playRate: number;
 }
 interface IState {
     videoParts: MP4Video[];

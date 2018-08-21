@@ -16,6 +16,7 @@ import { createSimulatedFrame } from "./util/jpeg";
 import { randomUID } from "./util/rand";
 import { DownsampledInstance, Downsampler } from "./NALStorage/Downsampler";
 import { RoundRecordTime } from "./NALStorage/TimeMap";
+import { Fragment } from "../node_modules/@types/react";
 
 // Make sure we kill any previous instances
 console.log("pid", process.pid);
@@ -63,7 +64,7 @@ try {
 
 const sourceId = randomUID("camera");
 
-type Frame = {frame: Buffer; frameTime: number};
+type Frame = {frame: Buffer; frameTime: number, frameTimes: number[]};
 function createEncodeLoop(
     rawJpegFramePipe: PChanReceive<Frame>,
     receiver: IReceiver,
@@ -79,30 +80,10 @@ function createEncodeLoop(
 
     // Downsample to the requested FPS.
     let jpegFramePipe = TransformChannelAsync<Frame, Buffer>(async ({inputChan, outputChan}) => {
-        let curFrameTimes: number[] = [];
-        let frameDuration = 1000 / fps;
-        let nextFrameTime = clock() + frameDuration;
-        let curLag = 0;
         while(true) {
             let frameObj = await inputChan.GetPromise();
-            let frame = frameObj.frame;
-            let rawFrameTime = frameObj.frameTime;
-            if(rawFrameTime === undefined) {
-                console.error(`No time for frame. That should be impossible`);
-                rawFrameTime = Date.now();
-            }
-            curFrameTimes.push(rawFrameTime);
-            
-            let curTime = clock();
-            if(curTime < nextFrameTime - curLag) continue;               
-            let frameLag = curTime - nextFrameTime;
-            curLag += frameLag;
-            nextFrameTime = nextFrameTime + frameDuration;
-            //console.log({frameLag, nextFrameTime, curTime});
-            let frameTimes = curFrameTimes;
-            curFrameTimes = [];
-            outputJpegFrameTimes.push(frameTimes);
-            outputChan.SendValue(frame);
+            outputJpegFrameTimes.push(frameObj.frameTimes);
+            outputChan.SendValue(frameObj.frame);
         }
     })(rawJpegFramePipe);
 
@@ -162,6 +143,10 @@ function createEncodeLoop(
                         console.error("Frames timings messed up, pushed way more frames than frames received");
                     }
 
+                    //todonext
+                    // The frame times where are off. It becomes really obvious with 256x video, which is clearly about ~6 seconds
+                    //  off from reality. Faster rates should be more off, they should have more view latency, but the frame times
+                    //  should still be accurate!
                     frameRecordTimes = frameRecordTimes || [getTimeSynced()];
                     let frameRecordTime = frameRecordTimes[frameRecordTimes.length - 1];
 
@@ -184,7 +169,7 @@ function createEncodeLoop(
                     // TODO: For some reason high rate video appears to be delayed by too much. It should be delayed by
                     //  rate (before it gets any frames) plus maybe rate * key_frame_rate ? (for the first video to finish?).
                     //  But rate 16 seems to take 64 frames to start, but I don't know why...
-                    console.log(`Send NAL slice, delayed ${delay}ms, rate ${rate}, index ${index++}`);
+                    console.log(`Send NAL slice, delayed ${delay}ms, rate ${rate}, index ${index++}, times ${JSON.stringify(frameRecordTimes)}`);
                     receiver.acceptNAL_VOID({
                         nal: nalUnit,
                         recordInfo: { type: "slice", frameRecordTimes, frameRecordTime },
@@ -303,6 +288,10 @@ class StreamLoop {
 
         let downsampler = new Downsampler(downsampleRate, JpegEncoder, ratePrevCounts[1]);
 
+        let curFrameTimes: number[] = [];
+        let frameDuration = 1000 / fps;
+        let nextFrameTime = clock() + frameDuration;
+        let curLag = 0;
         const frameLoop = () => {
             try {
                 camera.capture(async (success) => {
@@ -312,8 +301,22 @@ class StreamLoop {
                         return;
                     }
                     // Code to test frame delay and timing accuracy: http://output.jsbin.com/yewodox/4
-                    let frameTime = RoundRecordTime(getTimeSynced());
+                    let c = clock();
+                    let now = Date.now();
+                    let rawFrameTime = getTimeSynced();
+                    let frameTime = RoundRecordTime(rawFrameTime);
+
+                    curFrameTimes.push(frameTime);
+
                     try {
+                        let curTime = clock();
+                        if(curTime < nextFrameTime - curLag) return;
+                        let frameLag = curTime - nextFrameTime;
+                        curLag += frameLag;
+                        nextFrameTime = nextFrameTime + frameDuration;
+                        let frameTimes = curFrameTimes;
+                        curFrameTimes = [];
+
                         if(!success) {
                             console.error("Failed to capture frame");
                             return;
@@ -325,7 +328,8 @@ class StreamLoop {
                         //console.log(`Got frame ${frame.length} at time ${frameTime}`);
                         downsampler.AddValue({
                             frame,
-                            frameTime
+                            frameTime,
+                            frameTimes,
                         });
                     } catch(e) {
                         console.log(`Error in capture`, e);

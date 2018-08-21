@@ -1,12 +1,11 @@
 import * as React from "react";
 import { PChan, TransformChannel } from "pchannel";
 import { RealTimeToVideoTime, VideoTimeToRealTime } from "../NALStorage/TimeMap";
-import { PollLoop } from "./PollLoop";
 
 interface IProps {
     videoProps: React.VideoHTMLAttributes<HTMLVideoElement>;
     rate: number;
-    speedMultiplier: number;
+    playRate: number;
 }
 interface IState {
     
@@ -26,9 +25,15 @@ export class VideoHolder extends React.Component<IProps, IState> implements IVid
     private updateEndQueue: PChan<void>|undefined;
 
     public shouldComponentUpdate(nextProps: IProps, nextState: IState): boolean {
-        const get = (props: IProps) => ({ rate: props.rate, speedMultiplier: props.speedMultiplier });
+        if(this.props.rate !== nextProps.rate) {
+            throw new Error(`VideoHolders should not change rate`);
+        }
 
-        return JSON.stringify(get(nextProps)) !== JSON.stringify(get(this.props));
+        if(this.videoElement) {
+            this.videoElement.playbackRate = nextProps.playRate;
+        }
+
+        return true;
     }
 
     // TODO: If we ever call remove, we need to combine it in this loop, as both set updating to true.
@@ -48,13 +53,13 @@ export class VideoHolder extends React.Component<IProps, IState> implements IVid
     public SeekToTime(time: number) {
         console.log(`Seek ${time}`);
         if(this.videoElement) {
-            let newTime = RealTimeToVideoTime(time, this.props.rate, this.props.speedMultiplier) / 1000;;
+            let newTime = RealTimeToVideoTime(time, this.props.rate) / 1000;
             this.videoElement.currentTime = newTime;
         }
     }
 
     public GetCurrentTime(): number {
-        return this.videoElement && VideoTimeToRealTime(this.videoElement.currentTime * 1000, this.props.rate, this.props.speedMultiplier) || 0;
+        return this.videoElement && VideoTimeToRealTime(this.videoElement.currentTime * 1000, this.props.rate) || 0;
     }
 
     public element: HTMLVideoElement|null|undefined;
@@ -63,13 +68,14 @@ export class VideoHolder extends React.Component<IProps, IState> implements IVid
         if(!vid) return;
         if(this.videoElement === vid) return;
 
+        vid.playbackRate = this.props.playRate;
+
         console.log("New video element");
         this.videoElement = vid;      
 
         var push = new MediaSource();
         vid.src = URL.createObjectURL(push);
         push.addEventListener("sourceopen", async () => {
-            console.log(`addSourceBuffer, rate: ${this.props.rate}`);
             var buf = push.addSourceBuffer('video/mp4; codecs="avc1.640028"');
             this.vidBuffer = buf;
             let queue = this.updateEndQueue = new PChan<void>();

@@ -121,44 +121,21 @@ type VideoTime = number | "live";
 type TimeRange = { firstFrameTime: number, lastFrameTime: VideoTime };
 type RecordTimeRange = { firstFrameTime: number, lastFrameTime: number };
 
-type NALRange = { firstTime: number; lastTime: number; };
+type NALRange = { firstTime: number; lastTime: number; frameCount: number; };
 type MP4Video = {
     rate: number;
-    speedMultiplier: number;
-    /** All video ends right before the next keyframe, unless incomplete is true, then the video may end early. */
-    incomplete: boolean;
+
+    /** All video ends right before the next keyframe, unless this is undefined, then the video may end early. */
+    nextKeyFrameTime?: number;
 
     mp4Video: Buffer;
     frameTimes: NALTime[];
 };
 
-type NALRanges = {
-    rate: number;
 
-    /** FrameTimes may be added which overlap a segment. This happens when a segment is downloaded from S3,
-     *      and we now have individual frame timings.
-     * 
-     * Sorted by time
-     * Should not have duplicates
-     * Should not be mutable, except for deletions, which only occur in the oldest frames
-     */
-    frameTimes: NALTime[];
-
-    /** Segments ranges may be created which overlap existing frameTimes. This happens when
-     *      previously local data gets put into a segment and written to S3.
-     * 
-     * Sorted by startTime.
-     * Segments should not overlap each other, or ever be mutated except for deletions, which only occur in the oldest frames
-    */
-    segmentRanges: NALRange[];
-
-    /** If not undefined, everything at or before this time has been deleted from the server, and no writes will ever be allow before or at this time. */
-    deletionTime?: number;
-};
 
 interface IBrowserReceiver extends Controller<IBrowserReceiver> {
-    acceptVideo_VOID(video: MP4Video, requestRange: NALRange): void;
-    acceptNewTimeRanges_VOID(ranges: NALRanges): void;
+    acceptNewTimeRanges_VOID(rate: number, ranges: NALRange[]): void;
 }
 
 interface IHost extends
@@ -171,21 +148,28 @@ ITimeServer {
     /** If we have data at a frame level there will be ranges of zero length.
      *      The data will be sorted by time.
      * 
-     *  After calling this new time ranges will be passed back via calls to acceptNewTimeRanges_VOID.
+     *  After calling this new time ranges will be passed back via calls to acceptNewTimeRange_VOID.
      *      If ranges have the same startTime as a previous range, the end time may change.
     */
-    syncTimeRanges(rate: number, speedMultiplier: number): Promise<NALRanges>;
+    syncTimeRanges(rate: number): Promise<NALRange[]>;
 
+    // TODO: Add a "live" flag that blocks until the video is available (and so never returns NO_VIDEO_AVAILABLE).
     /**
      * @param startTime Video is returned starting at the first key frame before or at this startTime (or after is nothing is at or before).
-     * @param lastTime All keyframes returned will be at or before this time.
+     * @param minFrames At least minFrames will be returned, unless not enough frames exist. Otherwise the amount of frames returned is up to
+     *                      just before the next i frame after the minFrames are counted.
+     * @param nextReceivedFrameTimes (For each rate) Is the time of next frame after startTime the client has. We won't return frames after (or at) this time.
+     *                                  This is assumed to be the first time of a video, and so a key frame. If it isn't this frame may be returned.
+     * @param rate Rate of the video. The video plays at a multiple of this speed by default.
      * @param startTimeExclusive If true startTime now becomes exclusive, and the video is returned starting at the first key frame AFTER startTime.
-     * @param endTimeMinusOne If true we exclude the last video segment (unless the segment after that starts perfectly on the endTime).
-     *                          So if the endTime is a previous startTime we don't send the last segment (the previous start segment) twice.
-     * @param rate 
-     * @param speedMultiplier 
      */
-    GetVideo(startTime: number, lastTime: number, startTimeExclusive: boolean, endTimeMinusOne: boolean, rate: number, speedMultiplier: number): Promise<void>;
+    GetVideo(
+        startTime: number,
+        minFrames: number,
+        nextReceivedFrameTime: number|undefined,
+        rate: number,
+        startTimeExclusive: boolean,
+    ): Promise<MP4Video | "VIDEO_EXCEEDS_NEXT_TIME" | "VIDEO_EXCEEDS_LIVE_VIDEO" | "CANCELLED">;
 
     CancelVideo(): Promise<void>;
 
