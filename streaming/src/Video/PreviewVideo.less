@@ -1,0 +1,50 @@
+.PreviewVideo {
+    width: 100%;
+
+    &-ruler {
+        width: 100%;
+        
+        /** We use the size of PreviewVideo to calculate other sizes, so we cannot have a border size mess up our size. */
+        outline: 1px solid black;
+        box-sizing: content-box;
+
+        position: relative;
+
+        overflow: hidden;
+    }
+
+    .rulerAnimation() {
+        transition-duration: 100ms;
+    }
+
+    &-img {
+        position: absolute;
+
+        outline: 1px solid black;
+        box-sizing: content-box;
+
+        .rulerAnimation();
+        transition-property: left, width, top;
+        img {
+            width: 100%;
+        }
+
+        &--duplicateFrames {
+            opacity: 0.5;
+        }
+
+        &-info {
+            position: absolute;
+            top: 0px;
+        }
+
+        &-playLine {
+            position: absolute;
+            top: 0%;
+            height: 100%;
+            width: 1px;
+            background: hsla(133, 75%, 75%, 1);
+            opacity: 0.25;
+        }
+    }
+}

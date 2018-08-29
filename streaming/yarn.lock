@@ -3075,9 +3075,9 @@ mkdirp@0.5.1, mkdirp@0.5.x, mkdirp@^0.5.0, mkdirp@^0.5.1, mkdirp@~0.5.0, mkdirp@
   dependencies:
     minimist "0.0.8"
 
-mp4-typescript@^0.3.2:
-  version "0.3.2"
-  resolved "https://registry.yarnpkg.com/mp4-typescript/-/mp4-typescript-0.3.2.tgz#10f969aca62623aef030c2ddffd3aa920777834b"
+mp4-typescript@0.3.6:
+  version "0.3.6"
+  resolved "https://registry.yarnpkg.com/mp4-typescript/-/mp4-typescript-0.3.6.tgz#aad8f40c053bbf358abe1fe368808b1d10b7fa7e"
   dependencies:
     jimp "^0.2.28"
     nan "^2.10.0"
@@ -3219,9 +3219,22 @@ node-libs-browser@^2.0.0:
     util "^0.10.3"
     vm-browserify "0.0.4"
 
+node-localstorage@^1.3.1:
+  version "1.3.1"
+  resolved "https://registry.yarnpkg.com/node-localstorage/-/node-localstorage-1.3.1.tgz#3177ef42837f398aee5dd75e319b281e40704243"
+  dependencies:
+    write-file-atomic "^1.1.4"
+
 "node-powershell@https://github.com/yeerkkiller1/node-powershell":
   version "3.3.1"
   resolved "https://github.com/yeerkkiller1/node-powershell#2cd24ccda844cff3ab65d73fce5de3c832cc3107"
+  dependencies:
+    bluebird "^3.5.1"
+    chalk "^2.1.0"
+
+"node-powershell@https://github.com/yeerkkiller1/node-powershell#EOI":
+  version "3.3.1"
+  resolved "https://github.com/yeerkkiller1/node-powershell#f0133b9b4ee0da48ef620f3e09befeca4d07fe54"
   dependencies:
     bluebird "^3.5.1"
     chalk "^2.1.0"
@@ -3453,7 +3466,7 @@ p-finally@^1.0.0:
   version "1.0.0"
   resolved "https://registry.yarnpkg.com/p-finally/-/p-finally-1.0.0.tgz#3fbcfb15b899a44123b34b6dcc18b724336a2cae"
 
-p-info@0.1.15, p-info@^0.1.15:
+p-info@^0.1.15:
   version "0.1.15"
   resolved "https://registry.yarnpkg.com/p-info/-/p-info-0.1.15.tgz#830301b70a7933bafa5f1e52569d0903e6dd8333"
   dependencies:
@@ -3462,6 +3475,17 @@ p-info@0.1.15, p-info@^0.1.15:
     pchannel "^0.3.4"
     table-parser "^1.0.1"
     upgrade "^1.1.0"
+
+p-info@^0.2.1:
+  version "0.2.1"
+  resolved "https://registry.yarnpkg.com/p-info/-/p-info-0.2.1.tgz#3a846f98e59424fdcdf93e1a15e4cc637ef49a5b"
+  dependencies:
+    "@types/node-powershell" "^3.1.0"
+    node-powershell "https://github.com/yeerkkiller1/node-powershell#EOI"
+    pchannel "^0.3.4"
+    table-parser "^1.0.1"
+    upgrade "^1.1.0"
+    webpack-node-externals "^1.7.2"
 
 p-limit@^1.1.0:
   version "1.3.0"
@@ -4554,6 +4578,10 @@ signal-exit@^3.0.0, signal-exit@^3.0.2:
   version "3.0.2"
   resolved "https://registry.yarnpkg.com/signal-exit/-/signal-exit-3.0.2.tgz#b5fdc08f1287ea1178628e415e25132b73646c6d"
 
+slide@^1.1.5:
+  version "1.1.6"
+  resolved "https://registry.yarnpkg.com/slide/-/slide-1.1.6.tgz#56eb027d65b4d2dce6cb2e2d32c4d4afc9e1d707"
+
 snapdragon-node@^2.0.1:
   version "2.1.1"
   resolved "https://registry.yarnpkg.com/snapdragon-node/-/snapdragon-node-2.1.1.tgz#6c175f86ff14bdb0724563e8f3c1b021a286853b"
@@ -5033,9 +5061,9 @@ type-is@~1.6.15, type-is@~1.6.16:
     media-typer "0.3.0"
     mime-types "~2.1.18"
 
-typescript@^2.8.1:
-  version "2.9.2"
-  resolved "https://registry.yarnpkg.com/typescript/-/typescript-2.9.2.tgz#1cbf61d05d6b96269244eb6a3bce4bd914e0f00c"
+typescript@3.0.1:
+  version "3.0.1"
+  resolved "https://registry.yarnpkg.com/typescript/-/typescript-3.0.1.tgz#43738f29585d3a87575520a4b93ab6026ef11fdb"
 
 ua-parser-js@^0.7.18, ua-parser-js@^0.7.9:
   version "0.7.18"
@@ -5407,6 +5435,14 @@ wrap-ansi@^2.0.0:
 wrappy@1:
   version "1.0.2"
   resolved "https://registry.yarnpkg.com/wrappy/-/wrappy-1.0.2.tgz#b5243d8f3ec1aa35f1364605bc0d1036e30ab69f"
+
+write-file-atomic@^1.1.4:
+  version "1.3.4"
+  resolved "https://registry.yarnpkg.com/write-file-atomic/-/write-file-atomic-1.3.4.tgz#f807a4f0b1d9e913ae7a48112e6cc3af1991b45f"
+  dependencies:
+    graceful-fs "^4.1.11"
+    imurmurhash "^0.1.4"
+    slide "^1.1.5"
 
 write-file-atomic@^2.0.0:
   version "2.3.0"

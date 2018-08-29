@@ -3,17 +3,18 @@ import { PropsMapReduce } from "../util/PropsMapReduce";
 
 // Polyfills.
 import "../util/math";
-import { binarySearchMap, binarySearchNumber, binarySearch, findAtOrBefore, findAtOrAfter, findAtOrAfterIndex, findAtOrBeforeIndex } from "../util/algorithms";
+import { binarySearchMap, binarySearchNumber, binarySearch, findAtOrBefore, findAtOrAfter, findAtOrAfterIndex, findAtOrBeforeIndex, findAtOrBeforeOrAfter } from "../util/algorithms";
 import { formatDuration, formatDate } from "../util/format";
 import { getTimeSynced } from "../util/time";
 
 import "./RangeSummarizer.less";
 import { group, sum } from "../util/math";
-import { RealTimeToVideoTime, RealDurationToVideoDuration } from "./TimeMap";
+import { RealTimeToVideoTime, RealDurationToVideoDuration, GetRangeFPSEstimate, GetVideoFPSEstimate } from "../NALStorage/TimeMap";
 import { getIntialInputNumberValue, InputNumber, setInputValue, getInitialCheckboxValue, Checkbox } from "../util/Input";
 import { unitList, UnitDurationObj, UnitType } from "../util/timeUnits";
-import { keyBy, mapObjectValues } from "../util/misc";
+import { keyBy, mapObjectValues, cloneDeep } from "../util/misc";
 import { ClickAnim } from "../util/ClickAnim";
+import { PreviewVideo } from "./PreviewVideo";
 
 
 //todonext
@@ -83,18 +84,21 @@ import { ClickAnim } from "../util/ClickAnim";
 
 
 interface IProps {
+    server: IHost;
+
     // TODO: Allow ranges to be mutated, by changing endTimes of the last range,
     //  OR by adding new ranges. Removing ranges will never be allowed.
     // ranges are sorted be time
     receivedRanges: NALRange[]
     serverRanges: NALRange[];
-    receivedFrames: NALTime[];
+    receivedFrames: NALInfoTime[];
 
     currentPlayTime: number;
     targetPlayTime: number;
 
-
     debugVideo: boolean;
+
+    loadedVideos: MP4Video[];
 
     onTimeClick: (time: number) => void;
 }
@@ -135,6 +139,13 @@ export class RangeSummarizer extends React.Component<IProps, IState> {
         setInputValue(viewLockedConst, nextState.viewLocked);
         setInputValue(softViewUnlocked, nextState.softViewUnlocked);
 
+        if(nextProps.targetPlayTime !== this.props.targetPlayTime) {
+            if(this.state.softViewUnlocked && !this.state.viewLocked) {
+                this.setState({ viewLocked: true });
+            }
+            this.setState({ softViewUnlocked: false });
+        }
+
         if(nextState.viewLocked) {
             if(this.props.targetPlayTime !== nextProps.targetPlayTime) {
                 let { targetPlayTime } = nextProps;
@@ -146,85 +157,6 @@ export class RangeSummarizer extends React.Component<IProps, IState> {
                 this.setState({ viewport });
             }
         }
-    }
-
-    private async clickTimeBar(e: React.MouseEvent<HTMLElement>, range: NALRange) {
-        let now = getTimeSynced();
-
-        let elem = e.currentTarget as HTMLElement;
-        let rect = elem.getBoundingClientRect();
-
-        let fraction = (e.clientX - rect.left) / rect.width;
-
-        let end = range.lastTime;
-        let offsetTime = (end - range.firstTime) * fraction;
-        let time = range.firstTime + offsetTime;
-        let timeAgo = formatDuration(now - time);
-
-        console.log(`${timeAgo} AGO`);
-        
-        this.props.onTimeClick(time);
-    }
-
-    private renderExcludedRanges(ranges: NALRange[], direction: -1|1): JSX.Element|null {
-        if(ranges.length === 0) {
-            return null;
-        }
-        let { viewport } = this.state;
-
-        // ranges could be partially excluded, so remember that...
-
-        let rangeClosestTime = direction === -1 ? ranges.last().lastTime : ranges[0].firstTime;
-        let viewportClosestTime = direction === -1 ? viewport.startTime : viewport.endTime;
-
-        let gap = (rangeClosestTime - viewportClosestTime) * direction;
-        if(gap < 0) {
-            gap = 0;
-        }
-
-        let size = sum(ranges.map(x => {
-            let size = x.lastTime - x.firstTime;
-            if(direction === -1) {
-                if(x.lastTime > viewport.startTime) {
-                    size -= x.lastTime - viewport.startTime;
-                }
-            } else {
-                if(x.firstTime < viewport.endTime) {
-                    size -= viewport.endTime - x.firstTime;
-                }
-            }
-
-            return size;
-        }));
-
-        let gapUI: JSX.Element|null = null;
-        let excludedRangesUI: JSX.Element|null = null;
-
-        if(gap > 0) {
-            gapUI = (
-                <div key="gap">
-                    Gap: {formatDuration(gap)}
-                </div>
-            );
-        }
-
-        excludedRangesUI = (
-            <div key="excluded">
-                <div>Closest time: {rangeClosestTime}</div>
-                <div>Size: {formatDuration(size)}</div>
-            </div>
-        );
-
-        let ui = [gapUI, excludedRangesUI];
-        if(direction === -1) {
-            ui.reverse();
-        }
-
-        return (
-            <div>
-                {ui}
-            </div>
-        );
     }
 
     private animateViewport(viewport: Viewport, highlighted: number|Viewport|undefined) {
@@ -250,16 +182,21 @@ export class RangeSummarizer extends React.Component<IProps, IState> {
                 let elem = event.currentTarget;
                 let rect = elem.getBoundingClientRect();
 
-                let fraction = (event.clientX - rect.left) / rect.width;              
-                let pos = s + size * fraction;
-                //s = pos - (pos - s) * 0.5;
-                //e = pos - (e - pos) * 0.5;
+                let fraction = (event.clientX - rect.left) / rect.width;
+
+                if(this.state.viewLocked) {
+                    fraction = 0.5;
+                }
+
                 s = s + size * fraction * 0.5;
                 e = e - size * (1 - fraction) * 0.5;
 
-                this.setState({ viewLocked: false, softViewUnlocked: this.state.viewLocked || this.state.softViewUnlocked });
+                if(fraction !== 0.5) {
+                    this.setState({ viewLocked: false, softViewUnlocked: this.state.viewLocked || this.state.softViewUnlocked });
+                }
             } else {
                 let center = (s + e) * 0.5;
+
                 s = center - size * 1;
                 e = center + size * 1;
             }
@@ -292,7 +229,11 @@ export class RangeSummarizer extends React.Component<IProps, IState> {
 
             this.animateViewport(viewport, undefined);
 
-            this.setState({ viewLocked: false, softViewUnlocked: this.state.viewLocked || this.state.softViewUnlocked });
+            if(this.state.softViewUnlocked && (s + e) / 2 === this.props.targetPlayTime) {
+                this.setState({ viewLocked: true, softViewUnlocked: false });
+            } else {
+                this.setState({ viewLocked: false, softViewUnlocked: this.state.viewLocked || this.state.softViewUnlocked });
+            }
 
             event.preventDefault();
         }
@@ -309,11 +250,6 @@ export class RangeSummarizer extends React.Component<IProps, IState> {
         let clickTime = viewport.startTime + (viewport.endTime - viewport.startTime) * fraction;
 
         this.props.onTimeClick(clickTime);
-
-        if(this.state.softViewUnlocked && !this.state.viewLocked) {
-            this.setState({ viewLocked: true });
-        }
-        this.setState({ softViewUnlocked: false });
     }
 
     private renderUnits(): JSX.Element[] {
@@ -491,8 +427,33 @@ export class RangeSummarizer extends React.Component<IProps, IState> {
             if(!timeObjs) return [];
             return timeObjs.filter(x => viewport.startTime <= x.time && x.time <= viewport.endTime);
         }
+        function formatRangeCSS(range: NALRange): React.CSSProperties {
+            // Dammit, css is 16 bit precision? At a render level too, so we can't cheat it by using left and translateX
+            // So... we have to make sure the ranges aren't very large, which means we can't just use pos.
 
-        let enableFrameLevelDisplay = (viewport.endTime - viewport.startTime) < 10000;
+            let start = pos(range.firstTime);
+            let end = pos(range.lastTime);
+
+            if(start < -10) {
+                start = -10;
+            }
+            if(end > 10) {
+                end = 10;
+            }
+
+            return {
+                left: start * 100 + "%",
+                width: (end - start) * 100 + "%",
+            };
+        }
+
+        let enableFrameLevelDisplay = receivedFrames.length < 100 || (viewport.endTime - viewport.startTime) < 10000;
+
+        let curSeqNum = -1;
+        let curPlayTimeObj = findAtOrBefore(receivedFrames, currentPlayTime, x => x.time);
+        if(curPlayTimeObj) {
+            curSeqNum = curPlayTimeObj.addSeqNum;
+        }
 
         return (
             <div className={`RangeSummarizer-ruler-video ${!viewLocked ? "RangeSummarizer-ruler-video--viewUnlocked" : ""} ${softViewUnlocked ? "RangeSummarizer-ruler-video--softViewUnlocked" : ""}`}>
@@ -503,10 +464,7 @@ export class RangeSummarizer extends React.Component<IProps, IState> {
                         <div
                             key={"serverRange-" + range.firstTime}
                             className="RangeSummarizer-ruler-video-serverRange"
-                            style={{
-                                left: pos(range.firstTime) * 100 + "%",
-                                width: (pos(range.lastTime) - pos(range.firstTime)) * 100 + "%"
-                            }}
+                            style={formatRangeCSS(range)}
                         ></div>
                     ))}
 
@@ -514,10 +472,7 @@ export class RangeSummarizer extends React.Component<IProps, IState> {
                         <div
                             key={"receivedRange-" +range.firstTime}
                             className="RangeSummarizer-ruler-video-receivedRange"
-                            style={{
-                                left: pos(range.firstTime) * 100 + "%",
-                                width: (pos(range.lastTime) - pos(range.firstTime)) * 100 + "%"
-                            }}
+                            style={formatRangeCSS(range)}
                         ></div>
                     ))}
 
@@ -532,9 +487,13 @@ export class RangeSummarizer extends React.Component<IProps, IState> {
                     ))}
                 </div>
 
-                <div className="RangeSummarizer-ruler-video-targetPlayLine" style={{ left: pos(targetPlayTime) * 100 + "%" }}>
+                <div
+                    className="RangeSummarizer-ruler-video-targetPlayLine"
+                    style={{ left: pos(targetPlayTime) * 100 + "%" }}
+                    title={`${targetPlayTime}`}
+                >
                     <div className="RangeSummarizer-ruler-video-targetPlayLine-time">
-                        {formatDate(targetPlayTime)}
+                        {formatDate(targetPlayTime)} {curSeqNum < 0 ? "" : curSeqNum}
                     </div>
                 </div>
                 <div className="RangeSummarizer-ruler-video-playLine" style={{ left: pos(currentPlayTime) * 100 + "%" }}></div>
@@ -571,6 +530,8 @@ export class RangeSummarizer extends React.Component<IProps, IState> {
                 {this.renderVideo()}
                 <div
                     className="RangeSummarizer-rulerClickArea"
+                    data-view-start={viewport.startTime}
+                    data-view-end={viewport.endTime}
                     onWheel={x => this.onWheelRuler(x)}
                     onClick={x => this.onClickRuler(x)}
                 >
@@ -580,7 +541,7 @@ export class RangeSummarizer extends React.Component<IProps, IState> {
         )
     }
 
-    private renderNew(): JSX.Element {
+    public render() {
         let { viewport } = this.state;
         let { serverRanges } = this.props;
         //let segments = serverRanges.segments;
@@ -601,33 +562,36 @@ export class RangeSummarizer extends React.Component<IProps, IState> {
 
         let realDuration = this.state.viewport.endTime - this.state.viewport.startTime;
 
+        let currentVideo = findAtOrBeforeOrAfter(this.props.loadedVideos, (viewport.endTime + viewport.startTime) / 2, x => x.frameTimes[0].time);
+        let viewportFPSEstimate: number = currentVideo ? GetVideoFPSEstimate(currentVideo) * currentVideo.rate : 10;
+        let videoDimensionsEstimate: { width: number; height: number; } = currentVideo ? { width: currentVideo.width, height: currentVideo.height } : { width: 1920, height: 1080 };
+
         return (
-            <div className="RangeSummarizer-new">
+            <div className="RangeSummarizer">
                 <div>
                     View Capture Duration: {formatDuration(realDuration)}
                 </div>
+                {/*
                 <div>
                     Start Time: {new Date(viewport.startTime).toString()}
-                    <InputNumber globalKey={viewportStart} onValue={x => { this.state.viewport.startTime = x; this.setState({ viewport: this.state.viewport }); }} />
+                    <InputNumber globalKey={viewportStart} onValue={x => { viewport.startTime = x; this.setState({ viewport: viewport }); }} />
                 </div>
                 <div>
                     End Time: {new Date(viewport.endTime).toString()}
-                    <InputNumber globalKey={viewportEnd} onValue={x => { this.state.viewport.endTime = x; this.setState({ viewport: this.state.viewport }); }} />
+                    <InputNumber globalKey={viewportEnd} onValue={x => { viewport.endTime = x; this.setState({ viewport: viewport }); }} />
                 </div>
+                */}
+
+                {/*<PreviewVideo
+                    viewport={cloneDeep(viewport)}
+                    viewportFPSEstimate={viewportFPSEstimate}
+                    videoDimensionsEstimate={videoDimensionsEstimate}
+                    setViewport={viewport => this.setState({viewport})}
+                />*/}
 
                 {this.renderRuler()}
                 {/*this.renderExcludedRanges(beforeRanges, -1)*/}
                 {/*this.renderExcludedRanges(afterRanges, +1)*/}
-            </div>
-        );
-    }
-
-    public render() {
-        let { props, state } = this;
-
-        return (
-            <div className="RangeSummarizer">
-                {this.renderNew()}
             </div>
         );
     }

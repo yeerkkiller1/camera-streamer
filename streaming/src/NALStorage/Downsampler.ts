@@ -3,8 +3,8 @@ import { isInteger } from "../util/type";
 type DownsampleCtorT<T extends Ctor<DownsampledInstance>> = FirstArg<UnwrapCtor<T>["AddValue"]>;
 export interface DownsampledInstance<T = any> {
     Rate: number;
-    AddValue(val: T): void;
-    DroppedValue?: (val: T) => void;
+    AddValue(val: T): Promise<void>|void;
+    DroppedValue?: (val: T) => Promise<void>|void;
 }
 export class Downsampler<T extends new(rate: number) => DownsampledInstance<any>> {
     constructor(
@@ -43,7 +43,7 @@ export class Downsampler<T extends new(rate: number) => DownsampledInstance<any>
     private getRate(count: number) {
         return Math.pow(this.BaseRate, Math.floor(Math.log(count) / Math.log(this.BaseRate)));
     }
-    public AddValue(val: DownsampleCtorT<T>): void {
+    public async AddValue(val: DownsampleCtorT<T>): Promise<void> {
         let curCount = ++this.valueCount;
         let maxLogRate = this.getRate(curCount);
         if(!(maxLogRate in this.rateInstances)) {
@@ -57,13 +57,13 @@ export class Downsampler<T extends new(rate: number) => DownsampledInstance<any>
             let instance = obj.instance;
             let triggered = (curCount % rate) === 0;
             if(triggered) {
-                instance.AddValue(val);
+                await instance.AddValue(val);
             } else {
                 // Optional, so in theory we could optimize this loop to only iterate over the rateInstances for this value from the get go.
                 //  But... I don't think I will every make that optimization, as how many values will I really have? 2^32? That's 4GB. 2^42 ? That's 4TB,
                 //  and even 2^42 only loops 42 times.
                 if(instance.DroppedValue) {
-                    instance.DroppedValue(val);
+                    await instance.DroppedValue(val);
                 }
             }
         }

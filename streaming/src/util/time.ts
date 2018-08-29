@@ -1,9 +1,11 @@
-import { accessSync } from "fs";
 import { SetTimeoutAsync } from "pchannel";
 
 export function clock() {
-    var time = process.hrtime();
-    return time[0]*1000 + time[1] / 1000 / 1000;
+    if(NODE) {
+        var time = process.hrtime();
+        return time[0]*1000 + time[1] / 1000 / 1000;
+    }
+    return Date.now();
 }
 
 export class TimeServer implements ITimeServer {

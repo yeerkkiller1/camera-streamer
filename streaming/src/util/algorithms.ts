@@ -17,9 +17,11 @@ export function findAtOrAfter<T>(list: T[], value: number, map: (t: T) => number
 }
 
 export function findAt<T>(list: T[], value: number, map: (t: T) => number): T|undefined {
+    return list[findAtIndex(list, value, map)];
+}
+export function findAtIndex<T>(list: T[], value: number, map: (t: T) => number): number {
     let index = binarySearchMap(list, value, map);
-    if(index < 0) return undefined;
-    return list[index];
+    return index;
 }
 
 export function findAtOrAfterIndex<T>(list: T[], value: number, map: (t: T) => number): number {
@@ -105,7 +107,7 @@ export function binarySearch<T>(list: T[], value: T, comparer: (lhs: T, rhs: T) 
     return ~minIndex;
 }
 
-export function insertIntoListMap<T>(list: T[], value: T, map: (t: T) => number, duplicates: "throw"|"ignore"|"add" = "throw"): number {
+export function insertIntoListMap<T>(list: T[], value: T, map: (t: T) => number, duplicates: "throw"|"ignore"|"add"|"warn" = "throw"): number {
     return insertIntoList(list, value, (a, b) => map(a) - map(b), duplicates);
 }
 
@@ -113,10 +115,14 @@ export function insertIntoListMapped<T, M>(list: T[], value: T, map: (t: T) => M
     return insertIntoList(list, value, (a, b) => comparer(map(a), map(b)), duplicates);
 }
 
-export function insertIntoList<T>(list: T[], value: T, comparer: (lhs: T, rhs: T) => number, duplicates: "throw"|"ignore"|"add" = "throw"): number {
+export function insertIntoList<T>(list: T[], value: T, comparer: (lhs: T, rhs: T) => number, duplicates: "throw"|"ignore"|"add"|"warn" = "throw"): number {
     let index = binarySearch(list, value, comparer);
     if(index >= 0) {
         if(duplicates === "throw") throw new Error(`Duplicate value in list ${value}.`);
+        if(duplicates === "warn") {
+            console.warn(`Duplicate in list`);
+            return index;
+        }
         if(duplicates === "ignore") return index;
     } else {
         index = ~index;
@@ -125,6 +131,9 @@ export function insertIntoList<T>(list: T[], value: T, comparer: (lhs: T, rhs: T
     return index;
 }
 
+export function removeFromListMap<T>(list: T[], value: number, map: (t: T) => number, throwOnNotExists = false) {
+    return removeFromListMapped(list, value, map, (a, b) => a - b, throwOnNotExists);
+}
 export function removeFromListMapped<T, M>(list: T[], value: M, map: (t: T) => M, comparer: (lhs: M, rhs: M) => number, throwOnNotExists = false) {
     let index = binarySearchMapped(list, value, map, comparer);
     if(index >= 0) {

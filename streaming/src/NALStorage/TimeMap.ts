@@ -2,9 +2,7 @@
 let newEpoch = +new Date(2016, 0, 1);
 export function RealTimeToVideoTime(realTime: number, rate: number) {
     let timescale = 1 / rate;
-    // * 1000 to prevent decimal places from appearing during the subtraction, and because realTimes should only
-    //  have millisecond accuracy anyway
-    return Math.round(realTime * 1000 - newEpoch * 1000) / 1000 * timescale;
+    return (realTime - newEpoch) * timescale;
 }
 export function VideoTimeToRealTime(videoTime: number, rate: number) {
     let timescale = 1 / rate;
@@ -21,14 +19,19 @@ export function VideoDurationToRealDuration(videoDuration: number, rate: number)
 }
 
 export function GetTimescaleSeconds(rate: number): number {
-    // 3 digits of ms precision (as timescale is in seconds)
-    let max = Math.pow(2, 32) - 1;
-    let value = Math.floor(1000 * rate * 1000);
+    let max = Math.pow(2, 31);
+    // Timescale has 1000 units per video second, which should be adequate for our uses (at maximum pack that is 1000fps
+    //  video time, but as complete packing require adjustment of frame times to not alias it is probably more like 300-500,
+    //  which is definitely as much as we will capture and store in any rate).
+    //let value = 1000 * rate;
+
+    // We need a large timescale to prevent errors from building up in sample_durations
+    let value = 1000 * 1000;
     return Math.min(max, value);
 }
 
 export function RoundRecordTime(time: number): number {
-    return Math.floor(time * 1000) / 1000;
+    return Math.floor(time);
 }
 
 export function GetMinGapSize(rate: number): number {

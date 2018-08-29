@@ -31,7 +31,7 @@ export class PChannelMultiListen<T> implements PChanSend<T> {
             try {
                 callback(value);    
             } catch(e) {
-                console.error(`Error on calling callback. Assuming requested no longer wants data, and are removing it from callback list. Error ${String(e)}`);
+                console.error(`Error on calling callback. Assuming requested no longer wants data, and are removing it from callback list. Error ${e.stack}`);
                 this.removeCallback(callback);
             }
         }

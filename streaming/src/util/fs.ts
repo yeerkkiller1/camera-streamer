@@ -1,5 +1,13 @@
-import { appendFile, writeFile, readFile, open, read, close, exists, stat } from "fs";
+import { appendFile, writeFile, readFile, open, read, close, exists, stat, write, unlink } from "fs";
 import * as fs from "fs";
+
+export function unlinkFilePromise(filePath: string) {
+    return new Promise<void>((resolve, reject) => {
+        unlink(filePath, err => {
+            err ? reject(err) : resolve();
+        });
+    });
+}
 
 export function appendFilePromise(filePath: string, text: string|Buffer) {
     return new Promise<void>((resolve, reject) => {
@@ -9,7 +17,7 @@ export function appendFilePromise(filePath: string, text: string|Buffer) {
     });
 }
 
-export function writeFilePromise(filePath: string, text: string) {
+export function writeFilePromise(filePath: string, text: string|Buffer) {
     return new Promise<void>((resolve, reject) => {
         writeFile(filePath, text, err => {
             err ? reject(err) : resolve();
@@ -49,6 +57,13 @@ export function openReadPromise(filePath: string) {
         });
     });
 }
+export function openWritePromise(filePath: string) {
+    return new Promise<FileDescriptor>((resolve, reject) => {
+        open(filePath, "w+", (err, fd) => {
+            err ? reject(err) : resolve(fd);
+        });
+    });
+}
 
 export function closeDescPromise(fileDesc: FileDescriptor) {
     return new Promise<void>((resolve, reject) => {
@@ -66,6 +81,17 @@ export function readDescPromise(fileDesc: FileDescriptor, start: number, size: n
                 console.error(`Read tried to read ${size}, but instead read ${bytes}`);
             }
             err ? reject(err) : resolve(buffer);
+        });
+    });
+}
+
+export function writeDescPromise(fileDesc: FileDescriptor, buffer: Buffer) {
+    return new Promise<void>((resolve, reject) => {
+        write(fileDesc, buffer, 0, buffer.length, (err, bytes, buffer) => {
+            if(bytes !== buffer.length) {
+                console.error(`Write tried to write ${buffer.length}, but instead wrote ${bytes}`);
+            }
+            err ? reject(err) : resolve();
         });
     });
 }

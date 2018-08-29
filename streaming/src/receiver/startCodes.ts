@@ -38,7 +38,7 @@ export const splitByStartCodes: (startCodeData: PChanReceive<Buffer>) => PChanRe
 
                 if(zerosFromLast > 0) {
                     //console.log(`Zeros from last ${zerosFromLast}`);
-                    input = Buffer.concat([new Buffer(Range(0, zerosFromLast).map(() => 0)), input]);
+                    input = Buffer.concat([Buffer.from(Range(0, zerosFromLast).map(() => 0)), input]);
                 }
 
                 function addCurrent(start: number, end: number) {
@@ -82,7 +82,7 @@ export const splitByStartCodes: (startCodeData: PChanReceive<Buffer>) => PChanRe
             }
 
             if(zerosFromLast > 0) {
-                curBuffers.push(new Buffer(Range(0, zerosFromLast).map(() => 0)));
+                curBuffers.push(Buffer.from(Range(0, zerosFromLast).map(() => 0)));
             }
 
             emitCurrentBuffers();

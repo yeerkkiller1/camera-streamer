@@ -41,7 +41,7 @@ function mergeOntoRange(base: NALRange, additional: NALRange, countFrames: boole
         if(additional.firstTime > base.lastTime) return;
 
         if(additional.firstTime < base.lastTime && countFrames) {
-            throw new Error(`Overlaping ranges while counting frames. This should not happen.`);
+            console.error(`Overlapping ranges while counting frames. This should not happen.`);
         }
 
         if(countFrames) {
@@ -55,7 +55,7 @@ function mergeOntoRange(base: NALRange, additional: NALRange, countFrames: boole
         if(additional.lastTime < base.firstTime) return;
 
         if(additional.lastTime > base.lastTime && countFrames) {
-            throw new Error(`Overlaping ranges while counting frames. This should not happen.`);
+            console.error(`Overlapping ranges while counting frames. This should not happen.`);
         }
 
         if(countFrames) {
@@ -87,22 +87,23 @@ export function reduceRanges(newRanges: NALRange[], ranges: NALRange[], countFra
         let prevSegment = UnionUndefined(segments[index]);
         let nextSegment = UnionUndefined(segments[index + 1]);
 
-        let changed = false;
+        if(
+            prevSegment && prevSegment.firstTime <= segment.firstTime && prevSegment.lastTime >= segment.lastTime
+            || nextSegment && nextSegment.firstTime <= segment.firstTime && nextSegment.lastTime >= segment.lastTime
+        ) {
+            // Ignore cases when the entire range is already accounted for.
+            return;
+        }
     
         // prevSegment.firstTime <= segment.firstTime
-        if(prevSegment) {
-            if(prevSegment.lastTime >= segment.firstTime) {
-                if(segment.firstTime < prevSegment.firstTime || segment.lastTime > prevSegment.lastTime) {
-                    mergeOntoRange(prevSegment, segment, countFrames);
-                    segment = prevSegment;
+        if(prevSegment && prevSegment.lastTime >= segment.firstTime) {
+            if(segment.firstTime < prevSegment.firstTime || segment.lastTime > prevSegment.lastTime) {
+                mergeOntoRange(prevSegment, segment, countFrames);
+                segment = prevSegment;
 
-                    segments.splice(index, 1);
-                    index--;
-                    changed = true;
-                }
+                segments.splice(index, 1);
+                index--;
             }
-        } else {
-            changed = true;
         }
     
         // nextSegment.firstTime > segment.firstTime
@@ -113,22 +114,17 @@ export function reduceRanges(newRanges: NALRange[], ranges: NALRange[], countFra
                     segment = nextSegment;
 
                     segments.splice(index + 1, 1);
-                    changed = true;
                 }
             }
-        } else {
-            changed = true;
         }
     
-        if(changed) {
-            try {
-                insertIntoListMap(segments, segment, x => x.firstTime);
-            } catch(e) {
-                debugger;
-            }
-
-            changedRanges.push(originalSegment);
+        try {
+            insertIntoListMap(segments, segment, x => x.firstTime);
+        } catch(e) {
+            debugger;
         }
+
+        changedRanges.push(originalSegment);
     }
 
     for(let rangeObj of newRanges) {

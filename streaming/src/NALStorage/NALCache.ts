@@ -12,7 +12,7 @@ export class NALCache implements NALStorage {
     public ReadNALs(times: number[]): Promise<NALHolderMin[]> {
         throw new Error("Method not implemented.");
     }
-    public SubscribeToNALTimes(callback: (nalTime: NALTime) => void): () => void {
+    public SubscribeToNALTimes(callback: (nalTime: NALInfoTime) => void): () => void {
         throw new Error("Method not implemented.");
     }
 }

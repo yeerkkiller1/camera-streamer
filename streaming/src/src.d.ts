@@ -4,6 +4,10 @@ type UnwrapCtor<T> = T extends Ctor<infer A> ? A : never;
 type FirstArg<T> = T extends (a: infer A, ...args: any[]) => any ? A : never;
 type Ctor<T = any> = new(...args: any[]) => T;
 
+// https://stackoverflow.com/questions/50011616/typescript-change-function-type-so-that-it-returns-new-value
+type ArgumentTypes<T> = T extends (... args: infer U ) => infer R ? U: never;
+type ReplaceReturnType<T, TNewReturn, ThisContext = any> = (this: ThisContext, ...a: ArgumentTypes<T>) => TNewReturn;
+
 interface ITimeServer {
     /** Should return Date.now(), or equivalent. Not clock. Definitely not clock. */
     getTime(): Promise<number>
@@ -37,22 +41,16 @@ declare const enum NALType {
     NALType_interframe = 3,
 }
 
-
-type NALMinInfo = {
+type NALInfoTime = {
     rate: number;
-
-    // If type is pps or sps the time has no meaning.
     time: number;
     type: NALType;
     width: number;
     height: number;
 
-    /** sps and pps are small. Together they are maybe 40 bytes? So sending them inline with every nal is fine.
-     *      They are basically always the same though, so the client should dedupe them (to reduce memory usage).
-     */
-    sps: Buffer;
-    pps: Buffer;
+    addSeqNum: number;
 };
+
 
 type NALExtraInfo = {
     recordInfo: (
@@ -77,17 +75,11 @@ type NALExtraInfo = {
     };
 };
 
-type NALTime = {
-    rate: number;
-    time: number;
-    type: NALType;
-};
-
 // We want this to be optimized for storing in memory, as it would be nice if we could store
 //  every time of every nal for a very large history. Even at 4 numbers (32 bytes), and assuming a
 //  size of 100KB per NAL, we would use up 100MB for all the index info on 62.5GB of NALs. Which
 //  means we really cannot store all index info in memory.
-type NALIndexInfo = NALTime & {
+type NALIndexInfo = NALInfoTime & {
     // On disk we store all the NALMinInfo for every frame.
     // Start of bytes.
     pos: number;
@@ -95,12 +87,16 @@ type NALIndexInfo = NALTime & {
     len: number;
 };
 
-type NALHolderBase = {
+type NALHolderMin = NALInfoTime & {
     /** Raw NAL unit, no start code, no length prefix. */
     nal: Buffer;
+    /** sps and pps are small. Together they are maybe 40 bytes? So sending them inline with every nal is fine.
+     *      They are basically always the same though, so the client should dedupe them (to reduce memory usage).
+     */
+    sps: Buffer;
+    pps: Buffer;
 };
 
-type NALHolderMin = NALHolderBase & NALMinInfo;
 type NALHolder = NALHolderMin & NALExtraInfo;
 
 
@@ -108,6 +104,10 @@ interface IReceiver extends
 //Bidirect<IReceiver, ISender>,
 ITimeServer {
     acceptNAL_VOID(info: NALHolder): void;
+    /** Get's the next seq number that the server is aware of. This should only be called when a camera is initializing, and then the camera
+     *      should increment sequence numbers for every subsequent number.
+    */
+    GetNextAddSeqNum(): Promise<number>;
 
     cameraPing(sourceId: string): Promise<void>;
 }
@@ -125,11 +125,14 @@ type NALRange = { firstTime: number; lastTime: number; frameCount: number; };
 type MP4Video = {
     rate: number;
 
-    /** All video ends right before the next keyframe, unless this is undefined, then the video may end early. */
-    nextKeyFrameTime?: number;
+    width: number;
+    height: number;
+
+    /** All video ends right before the next keyframe. */
+    nextKeyFrameTime: number;
 
     mp4Video: Buffer;
-    frameTimes: NALTime[];
+    frameTimes: NALInfoTime[];
 };
 
 
@@ -143,7 +146,7 @@ interface IHost extends
 ITimeServer {
     //subscribeToWebcamFrameInfo(): Promise<void>;
 
-    getRates(): Promise<number[]>;
+    GetRates(): Promise<number[]>;
 
     /** If we have data at a frame level there will be ranges of zero length.
      *      The data will be sorted by time.
@@ -162,6 +165,7 @@ ITimeServer {
      *                                  This is assumed to be the first time of a video, and so a key frame. If it isn't this frame may be returned.
      * @param rate Rate of the video. The video plays at a multiple of this speed by default.
      * @param startTimeExclusive If true startTime now becomes exclusive, and the video is returned starting at the first key frame AFTER startTime.
+     * @param onlyTimes If true only downloads the times for each video (so the video inside each MP4Video will be empty, and width and height will be 0).
      */
     GetVideo(
         startTime: number,
@@ -169,6 +173,7 @@ ITimeServer {
         nextReceivedFrameTime: number|undefined,
         rate: number,
         startTimeExclusive: boolean,
+        onlyTimes?: boolean,
     ): Promise<MP4Video | "VIDEO_EXCEEDS_NEXT_TIME" | "VIDEO_EXCEEDS_LIVE_VIDEO" | "CANCELLED">;
 
     CancelVideo(): Promise<void>;

@@ -1,6 +1,26 @@
 
 import { max } from "./math";
 import { isArray } from "./type";
+import { clock } from "./time";
+
+export async function profile<T>(name: string, fnc: () => Promise<T>): Promise<T> {
+    let time = clock();
+    try {
+        return await fnc();
+    } finally {
+        time = clock() - time;
+        console.log(`${name} took ${time.toFixed(1)}ms`);
+    }
+}
+export function profileSync<T>(name: string, fnc: () => T): T {
+    let time = clock();
+    try {
+        return fnc();
+    } finally {
+        time = clock() - time;
+        console.log(`${name} took ${time.toFixed(1)}ms`);
+    }
+}
 
 export function isEmpty<T>(obj: {[key: string]: T}): boolean {
     for(var key in obj) {

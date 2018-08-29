@@ -1,6 +1,6 @@
 import * as wsClass from "ws-class";
 
-import { PChan, pchan, TransformChannel, TransformChannelAsync, Deferred, g } from "pchannel";
+import { PChan, pchan, TransformChannel, TransformChannelAsync, Deferred, g, SetTimeoutAsync } from "pchannel";
 
 import { mkdir, writeFile, writeFileSync, readFileSync } from "fs";
 
@@ -10,12 +10,21 @@ import { randomUID } from "./util/rand";
 // For polyfills
 import "./util/math";
 import { NALManager, createNALManager } from "./NALStorage/NALManager";
-import { keyBy, mapObjectValues } from "./util/misc";
-import { binarySearchMap, findAtOrBefore, findAtOrBeforeOrAfter } from "./util/algorithms";
+import { keyBy, mapObjectValues, profile } from "./util/misc";
+import { binarySearchMap, findAtOrBefore, findAtOrBeforeOrAfter, findAt, findAfterIndex, findAtIndex, sort } from "./util/algorithms";
 import { sum } from "./util/math";
-import { GetRangeFPSEstimate } from "./NALStorage/TimeMap";
+import { GetRangeFPSEstimate, RoundRecordTime } from "./NALStorage/TimeMap";
 import { GetMP4NALs, ParseNalInfo } from "mp4-typescript";
 import { Downsampler, DownsampledInstance } from "./NALStorage/Downsampler";
+import { createServer } from "http";
+import { readFilePromise } from "./util/fs";
+import { CreateTempFolderPath } from "temp-folder";
+import { exec } from "child_process";
+import { parseParams } from "./util/url";
+import { SizedCache } from "./Video/SizedCache";
+import { boot } from "./NALStorage/LocalNALRate";
+
+boot();
 
 //makeProcessSingle("receiver");
 
@@ -91,7 +100,39 @@ async function getFinalStorageFolder() {
     return finalStorageFolder;
 }
 
-let nalManagerPromise = createNALManager();
+//let info = GetInfo(process.pid);
+/*
+(async () => {
+    console.log("before");
+    await info;
+    console.log("after");
+})();
+//*/
+/*
+(async () => {
+    let ps = new shell({ debugMsg: false });
+    ps.addCommand(`get-process -Id ${process.pid} | Select-Object -Property Name,Id,PriorityClass,FileVersion,HandleCount,WorkingSet,PagedMemorySize,PrivateMemorySize,VirtualMemorySize,TotalProcessorTime,SI,Handles,VM,WS,PM,NPM,Path,Company,CPU,ProductVersion,Description,Product,__NounName,BasePriority,ExitCode,HasExited,ExitTime,Handle,MachineName,MainWindowHandle,MainWindowTitle,MaxWorkingSet,MinWorkingSet,NonpagedSystemMemorySize,NonpagedSystemMemorySize64,PagedMemorySize64,PagedSystemMemorySize,PagedSystemMemorySize64,PeakPagedMemorySize,PeakPagedMemorySize64,PeakWorkingSet,PeakWorkingSet64,PeakVirtualMemorySize,PeakVirtualMemorySize64,PriorityBoostEnabled,PrivateMemorySize64,PrivilegedProcessorTime,ProcessName,ProcessorAffinity,Responding,SessionId,StartTime,SynchronizingObject,UserProcessorTime,VirtualMemorySize64,EnableRaisingEvents,StandardInput,StandardOutput,StandardError,WorkingSet64,Site,Container | ConvertTo-Json`);
+    //ps.addCommand(`sleep(10)`);
+    console.log("before");
+    
+    (async () => {
+        //let indexContents = await readFilePromise(`C:/Users/quent/Dropbox/camera/streaming/dist/1x.index`);
+
+        console.log("start blocking loop");
+        let x = 1;
+        for(let i = 0; i < 1000 * 1000 * 1000 * 4; i++) {
+            x = x * 31 + 5;
+        }
+        console.log("end blocking loop");
+    })();
+    await ps.invoke();
+    console.log("after");
+})();
+//*/
+
+let nalManagerPromise: Promise<NALManager>;
+nalManagerPromise = createNALManager();
+
 
 /*
 (async () => {
@@ -307,8 +348,12 @@ class Receiver extends TimeServer implements IReceiver, IHost {
         await (await this.cameraClient.Promise()).setStreamFormat(fps, iFrameRate, bitRateMBPS, format, curFormatId, RateMultiplier, rateCounts);
     }
 
-    public async getRates(): Promise<number[]> {
+    public async GetRates(): Promise<number[]> {
         return (await nalManagerPromise).GetRates();
+    }
+
+    public async GetNextAddSeqNum(): Promise<number> {
+        return (await nalManagerPromise).GetNextAddSeqNum();
     }
 
     syncRateUnsubs: {
@@ -351,9 +396,10 @@ class Receiver extends TimeServer implements IReceiver, IHost {
     public async GetVideo(
         startTime: number,
         minFrames: number,
-        nextReceivedFrameTime: number|undefined,
+        nextReceivedFrameTime: number|undefined|"live",
         rate: number,
         startTimeExclusive: boolean,
+        onlyTimes?: boolean,
     ): Promise<MP4Video | "VIDEO_EXCEEDS_NEXT_TIME" | "VIDEO_EXCEEDS_LIVE_VIDEO" | "CANCELLED"> {
         let client = this.client;
         let cancelToken = new Deferred<void>();
@@ -372,7 +418,7 @@ class Receiver extends TimeServer implements IReceiver, IHost {
         try {
             let manager = await nalManagerPromise;
 
-            return await manager.GetVideo(startTime, minFrames, nextReceivedFrameTime, startTimeExclusive, rate, cancelToken);
+            return await manager.GetVideo(startTime, minFrames, nextReceivedFrameTime, startTimeExclusive, rate, onlyTimes, cancelToken);
         } finally {
             onCallComplete.Resolve(undefined);
             {
@@ -425,6 +471,140 @@ class Receiver extends TimeServer implements IReceiver, IHost {
 
 var receiver = new Receiver();
 wsClass.HostServer(7060, receiver);
+
+//updateNals();
+
+
+// Image preview stuff. Browsers are amazing at showing jpeg images from urls, so let's just do that.
+//  It will save so many memory management and loading considerations, so it is really worth the slight extra initial work.
+
+// TODO: Use the same port as the websocket server, because that is just better, and will make everything easier.
+//  But... fragmenting SSL over multiple ports from the beginning would be nice, as it would make management of services a million times easier
+//      (because it would require no management framework, and allow new services to popup without any additional configuration).
+
+// http://localhost:7061/frame?rate=16384&time=1533874693325
+
+/*
+(async () => {
+    console.log("k");
+    (async () => {
+        let time = clock();
+        let x = 1;
+        for(let i = 0; i < 1000 * 1000 * 1000 * 10; i++) {
+            x = x * 31 + 5;
+        }
+        time = clock() - time;
+        console.log(`Took ${time.toFixed(1)}ms`);
+    })();
+    let info = await GetInfo(process.pid);
+    console.log("j");
+    //let x = await CreateTempFolderPath();
+})();
+//*/
+
+//*
+let server = createServer(async (request, response) => {
+    let { url } = request;
+
+    url = url || "";
+
+    let urlParams = parseParams(url.slice(url.indexOf("?") + 1));  
+    let rate = +urlParams.rate;
+    let time = +urlParams.time;
+
+    let nalManager = await nalManagerPromise;
+    let video = await nalManager.GetVideo(time, 1, undefined, false, rate, false, new Deferred<void>());
+    if(typeof video === "string") {
+        response.statusCode = 404;
+        response.end(`Cannot find time ${time}, ${video}`);
+        return;
+    }
+
+    
+    let timeIndex = findAtIndex(video.frameTimes, time, x => x.time);
+    if(timeIndex < 0) {
+        response.statusCode = 404;
+        response.end(`Cannot find time ${time}, found times ${video.frameTimes.map(x => x.time).join(", ")}`);
+        return;
+    }
+    
+    let frames = await getFrames(video as any);
+    let frame = frames[timeIndex];
+
+    response.setHeader("content-type", "image/jpeg");
+    response.end(frame);
+});
+server.listen(7061, (err: any) => {
+    if(err) {
+        console.error(`Could not start server on 7061, ${err}`);
+        return;
+    }
+
+    console.log(`Listening on port 7061`);
+});
+//*/
+
+
+function execPromise(command: string) {
+    return new Promise<string>((resolve, reject) => {
+        exec(command, (err, stdout, stderr) => {
+            if(err) {
+                reject(err);
+                return;
+            }
+            if(stderr) {
+                reject(stderr);
+                return;
+            }
+            resolve(stdout);
+        });
+    });
+}
+
+let cache = new SizedCache<{time: number; rate: number}, Buffer>(
+    1024 * 1024 * 128,
+    (key, value) => value.length,
+    obj => JSON.stringify(obj)
+);
+
+async function getFrames(video: MP4Video): Promise<Buffer[]> {
+    let times = video.frameTimes.map(x => x.time);
+    let cachedValues = times.map(x => cache.Get({ time: x, rate: video.rate }));
+    if(!cachedValues.some(x => !x)) {
+        return cachedValues.map(x => x ? x.v : null as any);
+}
+
+    let frames = await getFramesInternal(video);
+    for(let i = 0; i < frames.length; i++) {
+        cache.Add({
+            time: times[i],
+            rate: video.rate
+        }, frames[i]);
+    }
+
+    return frames;
+}
+
+async function getFramesInternal(video: MP4Video): Promise<Buffer[]> {
+    let folder = await CreateTempFolderPath();
+    
+    let videoPath = `${folder}${randomUID("video")}.mp4`;
+    await writeFilePromise(videoPath, video.mp4Video);
+    
+    let imagePath = `${folder}${randomUID("image")}_%d.jpeg`;
+    // Screw it, I'll just implicitly depend on ffmpeg
+    let command = `ffmpeg -i ${videoPath} ${imagePath} -loglevel panic`;
+    //console.log(command);
+    await execPromise(command);
+
+    let frames: Buffer[] = [];
+    for(let i = 0; i < video.frameTimes.length; i++) {
+        let frame = await readFilePromise(imagePath.replace(/%d/g, (i + 1).toString()));
+        frames.push(frame);
+    }
+
+    return frames;
+}
 
 
 

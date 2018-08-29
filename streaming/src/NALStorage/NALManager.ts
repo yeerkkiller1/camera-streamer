@@ -1,23 +1,17 @@
 import { TransformChannel, PChan, TransformChannelAsync, SetTimeoutAsync, Deferred } from "pchannel";
 import { writeFile, appendFile, readFile } from "fs";
 import { createFSArray } from "./FSArray";
-import { insertIntoListMapped, sort, binarySearchMapped, binarySearchMap, insertIntoListMap, findAfterIndex, findAtOrBeforeOrAfterIndex } from "../util/algorithms";
+import { insertIntoListMapped, sort, binarySearchMapped, binarySearchMap, insertIntoListMap, findAfterIndex, findAtOrBeforeOrAfterIndex, findAt, findAtIndex } from "../util/algorithms";
 import { appendFilePromise, readFilePromise, openReadPromise, readDescPromise } from "../util/fs";
 import { keyBy, mapObjectValues } from "../util/misc";
 import { Downsampler, DownsampledInstance } from "./Downsampler";
-import { LocalNALRate, NALStorage } from "./LocalNALRate";
+import { LocalNALRate, NALStorage, readNalLoop } from "./LocalNALRate";
 import { MuxVideo } from "mp4-typescript";
-import { group } from "../util/math";
-import { RealTimeToVideoTime, GetTimescaleSeconds, GetMinGapSize } from "./TimeMap";
+import { group, min } from "../util/math";
+import { RealTimeToVideoTime, GetTimescaleSeconds, GetMinGapSize, RealDurationToVideoDuration } from "./TimeMap";
 import { clock } from "../util/time";
 import { reduceRanges } from "./rangeMapReduce";
 import { PChannelMultiListen } from "../receiver/PChannelMultiListen";
-
-// TODO:
-//  S3 simulation
-//  Deleting old data.
-//  Real S3
-
 
 
 function bufferFromString(text: string): Buffer {
@@ -50,7 +44,9 @@ class NALRangeSummary {
         if(!lastTime || diff >= GetMinGapSize(this.rate) || diff <= 0) {
             lastTime = time;
         }
-        this.rangesListener.SendValue(reduceRanges([{ firstTime: lastTime, lastTime: time, frameCount: 1 }], this.ranges, true));
+        let newRange = { firstTime: lastTime, lastTime: time, frameCount: 1 };
+        //console.log("rate", this.rate, "newRange", newRange, "ranges", this.ranges);
+        this.rangesListener.SendValue(reduceRanges([newRange], this.ranges, true));
         this.lastTime = time;
     }
     public AddRange(range: NALRange): void {
@@ -93,26 +89,27 @@ export class NALManager {
             return;
         }
         let rates = ratesBuffer.toString().split("\n").slice(0, -1).map(x => +x);
+        sort(rates, x => x);
+        rates.reverse();
 
-        let rateObjs = rates.map(rate => {
+        let localRates: { [rate: number]: LocalNALRate } = {};
+        for(let rate of rates) {
             let local = new LocalNALRate(rate);
+            localRates[rate] = local;
             local.SubscribeToNALTimes(time => {
-                this.getSummary(rate).AddLiveNAL(time.time);
+                this.onNewTime(rate, time);
             });
-
-            return local;
-        });
-
-        for(let rateObj of rateObjs) {
-            this.localStorages[rateObj.Rate] = rateObj;
+            this.localStorages[rate] = local;
+            await local.Init();
         }
 
-        await Promise.all(rateObjs.map(x => x.Init()));
+        rates.reverse();
 
-        for(let rateObj of rateObjs) {
-            let summaryObj = this.getSummary(rateObj.Rate);
-            let times = rateObj.GetNALTimes();
-            let ranges = group(times.map(x => x.time), GetMinGapSize(rateObj.Rate));
+
+        for(let rate of rates) {
+            let summaryObj = this.getSummary(rate);
+            let times = localRates[rate].GetNALTimes();
+            let ranges = group(times.map(x => x.time), GetMinGapSize(rate));
             
             for(let range of ranges) {
                 summaryObj.AddRange({ firstTime: range[0], lastTime: range.last(), frameCount: range.length });
@@ -120,23 +117,44 @@ export class NALManager {
         }
     }
 
-    public AddNAL(info: NALHolderMin) {
+    public async AddNAL(info: NALHolderMin): Promise<void> {
         let rate = info.rate;
         if(!this.localStorages[rate]) {
             this.localStorages[rate] = new LocalNALRate(rate, true);
             this.localStorages[rate].SubscribeToNALTimes(time => {
-                this.getSummary(rate).AddLiveNAL(time.time);
+                this.onNewTime(rate, time);
+                try {
+                    
+                } catch(e) {
+                    if(!String(e).includes("Overlapping ranges while counting frames")) {
+                        throw e;
+                    } else {
+                        console.error(e);
+                    }
+                }
             });
         }
         let local = this.localStorages[rate];
 
-        local.AddNAL(info);
+        await local.AddNAL(info);
     }
 
     public GetRates(): number[] {
         let rates = Object.keys(this.localStorages).map(x => +x);
         rates.sort((a, b) => a - b);
         return rates;
+    }
+
+    public async GetNextAddSeqNum(): Promise<number> {
+        let rate = min(Object.keys(this.localStorages).map(x => +x));
+        if(rate === undefined) {
+            return 0;
+        }
+        let nalTimes = this.localStorages[rate].GetNALTimes();
+        if(nalTimes.length === 0) {
+            return 0;
+        }
+        return nalTimes[0].addSeqNum + 1;
     }
 
     public GetNALRanges(rate: number): NALRange[] {
@@ -150,7 +168,6 @@ export class NALManager {
         });
     }
 
-    
     // - Starts the stream at the first keyframe before the requested startTime, unless there are no keyframes before it,
     //      then it starts it on the first keyframe after.
 
@@ -201,19 +218,29 @@ export class NALManager {
         };
     }
     
+
+    private onNewTime(rate: number, time: NALInfoTime) {
+        this.getSummary(rate).AddLiveNAL(time.time);
+    }
+
     public async GetVideo(
         startTime: number,
         minFrames: number,
-        nextReceivedFrameTime: number|undefined,
+        /** If live then we have no end (except determined by minFrames), and will block until we exceed the minFrames limit. */
+        nextReceivedFrameTime: number|undefined|"live",
         startTimeExclusive: boolean,
-
         rate: number,
-
-        cancelToken: Deferred<void>
+        onlyTimes: boolean|undefined,
+        cancelToken: Deferred<void>,
     ): Promise<MP4Video | "VIDEO_EXCEEDS_LIVE_VIDEO" | "VIDEO_EXCEEDS_NEXT_TIME" | "CANCELLED"> {
         let sendCount = 0;
         let sendVideoTime = 0;
         let profileTime = clock();
+
+        let live = nextReceivedFrameTime === "live";
+        if(nextReceivedFrameTime === "live") {
+            nextReceivedFrameTime = undefined;
+        }
 
 
         let nalStorage = this.localStorages[rate];
@@ -222,6 +249,17 @@ export class NALManager {
         if(nalInfos.length === 0) {
             console.log(`No video for rate ${rate}`);
             return "VIDEO_EXCEEDS_LIVE_VIDEO";
+        }
+
+        function getNextKeyFrameIndex(index: number): number {
+            index++;
+            while(index < nalInfos.length) {
+                if(nalInfos[index].type === NALType.NALType_keyframe) {
+                    break;
+                }
+                index++;
+            }
+            return index;
         }
 
         let firstNalIndex: number;
@@ -233,85 +271,121 @@ export class NALManager {
                 index = findAtOrBeforeOrAfterIndex(nalInfos, startTime, x => x.time);
             }
             
+            // Go to the last key frame
             if(!startTimeExclusive) {
                 while(index >= 0 && nalInfos[index].type !== NALType.NALType_keyframe) {
                     index--;
                 }
             }
             
+            // If there isn't a key frame before our index, look after
             if(index < 0 || index < nalInfos.length && nalInfos[index].type !== NALType.NALType_keyframe) {
-                index++;
-                while(index < nalInfos.length && nalInfos[index].type !== NALType.NALType_keyframe) {
-                    index++;
-                }
-            }
-
-            if(index >= nalInfos.length) {
-                console.log(`Request is for live data not capped with keyframe`);
-                return "VIDEO_EXCEEDS_LIVE_VIDEO";
+                index = getNextKeyFrameIndex(index);
             }
             firstNalIndex = index;
         }
 
+        // End before the next keyframe
+        let nextKeyFrameIndex = getNextKeyFrameIndex(firstNalIndex + minFrames);
+        if(nextReceivedFrameTime) {
+            let nextNalIndex = findAtIndex(nalInfos, nextReceivedFrameTime, x => x.time);
+            let nextNal = nalInfos[nextNalIndex];
+            if(!nextNal) {
+                console.error(`Cannot find nal for ${nextReceivedFrameTime}. That shouldn't be possible... So we are ignoring it.`);
+            } if(nextNal.type !== NALType.NALType_keyframe) {
+                console.error(`Nal at next time is not a keyframe. Time: ${nextReceivedFrameTime}. That shouldn't be possible... So we are ignoring it.`);
+            } else {
+                if(nextKeyFrameIndex > nextReceivedFrameTime) {
+                    nextKeyFrameIndex = nextReceivedFrameTime;
+                }
+            }
+        }
+
+        if(firstNalIndex >= nextKeyFrameIndex) {
+            return "VIDEO_EXCEEDS_NEXT_TIME";
+        }
+
+        if(nextKeyFrameIndex >= nalInfos.length) {
+            if(!live) {
+                return "VIDEO_EXCEEDS_NEXT_TIME";
+            } else {
+                //todonext
+                // Wait for live data
+                //  If firstNalIndex >= nalInfos.length we need to wait until the nalInfos is a keyframe, then set firstNalIndex to that
+                //  Wait until we receive minFrames of data after firstNalIndex, ending just before a keyframe.
+
+                // We probably just want a waitUntilNextFrame thing?
+            }
+        }
+        let lastNalIndex = nextKeyFrameIndex - 1;
+        let nextKeyFrameTime = nalInfos[nextKeyFrameIndex].time;
+
+        /*
         if(nextReceivedFrameTime && nalInfos[firstNalIndex].time >= nextReceivedFrameTime) {
             console.log(`Request is after client given nextReceivedFrameTime (${nextReceivedFrameTime})`);
             return "VIDEO_EXCEEDS_NEXT_TIME";
         }
-
-        let lastNalIndex: number;
-        let nextKeyFrameTime: number|undefined;
-        {
-            let index = firstNalIndex;
-            while(
-                index < nalInfos.length
-            ) {
-                if(index + 1 < nalInfos.length && nalInfos[index + 1].type === NALType.NALType_keyframe) {
-                    if(nextReceivedFrameTime && nalInfos[index + 1].time >= nextReceivedFrameTime
-                    || (index + 1 - firstNalIndex) >= (minFrames)) {
-                        nextKeyFrameTime = nalInfos[index + 1].time;
-                        break;
-                    }
-                }
-
-                index++;
-            }
-            if(index === nalInfos.length) {
-                index--;
-            }
-            lastNalIndex = index;
+        */
+        
+        let nalInfosChoosen = nalInfos.slice(firstNalIndex, lastNalIndex);
+        let times = nalInfosChoosen.map(x => x.time);
+        
+        if(times.length === 0) {
+            return "VIDEO_EXCEEDS_NEXT_TIME";
         }
+        let nalsBuffer: NALHolderMin[];
+        let videoBuffer: Buffer;
+        
+        if(onlyTimes) {
+            nalsBuffer = nalInfosChoosen.map(time => ({
+                nal: Buffer.alloc(0),
+                sps: Buffer.alloc(0),
+                pps: Buffer.alloc(0),
+                width: 0,
+                height: 0,
+                ...time
+            }));
+            videoBuffer = Buffer.alloc(0);
+        } else {
+            nalsBuffer = await nalStorage.ReadNALs(times);
+            if(cancelToken.Value()) return "CANCELLED";
 
-        let times = nalInfos.slice(firstNalIndex, lastNalIndex + 1).map(x => x.time);
-        let nalsBuffer = await nalStorage.ReadNALs(times);
+            let nalsTimeCorrected = nalsBuffer.map(x => ({ ...x, time: RealTimeToVideoTime(x.time, rate) }));
+            let videoObj = await this.muxVideo(nalsTimeCorrected, rate);
+            //console.log(`Encoding ${nalsBuffer.map((x, i) => `${x.time} to ${nalsTimeCorrected[i].time}`)}`);
 
-        if(cancelToken.Value()) return "CANCELLED";
-
-        let nalsTimeCorrected = nalsBuffer.map(x => ({ ...x, time: RealTimeToVideoTime(x.time, rate) }));
-        let videoObj = await this.muxVideo(nalsTimeCorrected, rate);
-        console.log(`Encoding ${nalsBuffer.map((x, i) => `${x.time} to ${nalsTimeCorrected[i].time}`)}`);
-
-        if(cancelToken.Value()) return "CANCELLED";
+            if(cancelToken.Value()) return "CANCELLED";
+            videoBuffer = videoObj.video;
+        }
 
         sendCount++;
         sendVideoTime += (nalsBuffer.last().time - nalsBuffer[0].time) * ((nalsBuffer.length) / (nalsBuffer.length - 1));
+
         let video: MP4Video = {
             rate,
-            mp4Video: videoObj.video,
+
+            width: nalsBuffer[0].width,
+            height: nalsBuffer[0].height,
+
+            mp4Video: videoBuffer,
             nextKeyFrameTime,
             frameTimes: nalsBuffer.map(x => ({
                 rate: x.rate,
                 time: x.time,
                 type: x.type,
+                width: x.width,
+                height: x.height,
+                addSeqNum: x.addSeqNum,
             }))
         };
 
         profileTime = clock() - profileTime;
-        let efficiencyFrac = profileTime / sendVideoTime;
-        console.log(`GetVideo${startTimeExclusive ? " (start exclusive)" : ""} (index ${firstNalIndex} (${nalInfos[firstNalIndex].type}) to ${lastNalIndex} (${nalInfos[lastNalIndex].type})) took ${profileTime.toFixed(2)}ms for ${sendCount} videos. ${(profileTime / sendCount).toFixed(1)}ms per video. Percent encoding time of video time ${(efficiencyFrac * 100).toFixed(1)}%.`);
+        let efficiencyFrac = profileTime / RealDurationToVideoDuration(sendVideoTime, rate);
+        if(!onlyTimes) {
+            console.log(`GetVideo${startTimeExclusive ? " (exclusive)" : ""} (index ${firstNalIndex} (${nalInfos[firstNalIndex].type}) to ${lastNalIndex} (exclusive) (${nalInfos[lastNalIndex - 1].type})) took ${profileTime.toFixed(2)}ms for ${sendCount} videos. ${(profileTime / sendCount).toFixed(1)}ms/video. Encoding time ${(efficiencyFrac * 100).toFixed(1)}%.`);
+        }
 
         return video;
     }
 }
-
-
 

@@ -16,32 +16,15 @@ import { createSimulatedFrame } from "./util/jpeg";
 import { randomUID } from "./util/rand";
 import { DownsampledInstance, Downsampler } from "./NALStorage/Downsampler";
 import { RoundRecordTime } from "./NALStorage/TimeMap";
-import { Fragment } from "../node_modules/@types/react";
+import { Fragment } from "react";
+import { setInputValue, getInputValue } from "./util/Input";
+import { Server } from "http";
+import { UnionUndefined } from "./util/misc";
 
 // Make sure we kill any previous instances
 console.log("pid", process.pid);
 makeProcessSingle("sender");
 
-
-function pipeChannel<T>(inputChan: PChanReceive<T>, output: PChanSend<T>): void {
-    (async () => {
-        try {
-            while(true) {
-                let input = await inputChan.GetPromise();
-                output.SendValue(input);
-            }
-        } catch(e) {
-            if(!output.IsClosedError(e)) {
-                output.SendError(e);
-            }
-            console.log(`Closing pipe because ${String(e)}`);
-        }
-
-        if(!output.IsClosed()) {
-            output.Close();
-        }
-    })();
-}
 
 // https://unix.stackexchange.com/questions/113893/how-do-i-find-out-which-process-is-using-my-v4l2-webcam
 // Kill anyone using /dev/video0
@@ -64,7 +47,7 @@ try {
 
 const sourceId = randomUID("camera");
 
-type Frame = {frame: Buffer; frameTime: number, frameTimes: number[]};
+type Frame = {frame: Buffer; frameTime: number, frameTimes: number[], addSeqNum: number};
 function createEncodeLoop(
     rawJpegFramePipe: PChanReceive<Frame>,
     receiver: IReceiver,
@@ -76,13 +59,12 @@ function createEncodeLoop(
     rate: number,
     encoderDestruct: Deferred<void>
 ) {
-    let outputJpegFrameTimes: number[][] = [];
+    let outputJpegFrames: Frame[] = [];
 
-    // Downsample to the requested FPS.
     let jpegFramePipe = TransformChannelAsync<Frame, Buffer>(async ({inputChan, outputChan}) => {
         while(true) {
             let frameObj = await inputChan.GetPromise();
-            outputJpegFrameTimes.push(frameObj.frameTimes);
+            outputJpegFrames.push(frameObj);
             outputChan.SendValue(frameObj.frame);
         }
     })(rawJpegFramePipe);
@@ -135,10 +117,13 @@ function createEncodeLoop(
                         throw new Error(`ParseNalHeaderByte and ParseNalInfo give different types. ParseNalHeaderByte gave slice, ParseNalInfo gave ${nalDetailedInfo.type}`);
                     }
 
-                    let frameRecordTimes = outputJpegFrameTimes.shift();
-                    if(frameRecordTimes === undefined) {
-                        console.error("Frames timings messed up, received more frames than frames pushed");
-                    } else if(outputJpegFrameTimes.length > 100) {
+                    let frame = outputJpegFrames.shift();
+                    if(!frame) {
+                        throw new Error("Frames timings messed up, received more frames than frames pushed");
+                    }
+
+                    let frameRecordTimes = frame.frameTimes;
+                    if(outputJpegFrames.length > 100) {
                         // TODO: This likely means our encoder can't keep up. Reduce the fps!
                         console.error("Frames timings messed up, pushed way more frames than frames received");
                     }
@@ -180,7 +165,8 @@ function createEncodeLoop(
                         height: senderConfig.format.height,
                         sps: currentSps,
                         pps: currentPps,
-                        rate
+                        rate,
+                        addSeqNum: frame.addSeqNum
                     });
                 } else if(type === "sps" || type === "pps") {
                     if(type === "sps") {
@@ -210,7 +196,8 @@ function createEncodeLoop(
 }
 
 class StreamLoop {
-    constructor(
+    constructor(){}
+    public async Init(
         receiver: IReceiver,
         fps: number,
         format: v4l2camera.Format,
@@ -286,6 +273,9 @@ class StreamLoop {
             }
         }
 
+        // Well... 
+        let nextAddSeqNum = await receiver.GetNextAddSeqNum();
+
         let downsampler = new Downsampler(downsampleRate, JpegEncoder, ratePrevCounts[1]);
 
         let curFrameTimes: number[] = [];
@@ -301,8 +291,6 @@ class StreamLoop {
                         return;
                     }
                     // Code to test frame delay and timing accuracy: http://output.jsbin.com/yewodox/4
-                    let c = clock();
-                    let now = Date.now();
                     let rawFrameTime = getTimeSynced();
                     let frameTime = RoundRecordTime(rawFrameTime);
 
@@ -330,6 +318,7 @@ class StreamLoop {
                             frame,
                             frameTime,
                             frameTimes,
+                            addSeqNum: nextAddSeqNum++
                         });
                     } catch(e) {
                         console.log(`Error in capture`, e);
@@ -384,7 +373,7 @@ class StreamLoop {
         });
     }
 
-    private destructDeferreds: Deferred<void>[];
+    private destructDeferreds!: Deferred<void>[];
 
     private latestDestructingId = 0;
 
@@ -412,6 +401,8 @@ class StreamLoop {
     }
 }
 
+const streamFormat = "streamFormatConst";
+
 class Sender implements ISender {
     server!: IReceiver;
 
@@ -435,7 +426,8 @@ class Sender implements ISender {
         downsampleRate: number,
         ratePrevCounts: { [rate: number]: number }
     ): Promise<void> {
-        let server = this.server;
+        setInputValue(streamFormat, Array.from(arguments));
+
         if(this.streamLoop) {
             let isMostRecent = await this.streamLoop.Destruct();
             if(!isMostRecent) return;
@@ -444,7 +436,8 @@ class Sender implements ISender {
         // The previous streamLoop has been destructed (if it existed), and there is only one returned call from Destruct,
         //  that is the freshest call, and that is us. I assume all promise accepts will be called in order, at once. That way
         //  after Destruct finishes this.streamLoop is synchronously replaced with a new instance, which can then further be destructed.
-        this.streamLoop = new StreamLoop(this.server, fps, format, iFrameRate, bitRateMBPS, formatId, downsampleRate, ratePrevCounts);
+        this.streamLoop = new StreamLoop();
+        await this.streamLoop.Init(this.server, fps, format, iFrameRate, bitRateMBPS, formatId, downsampleRate, ratePrevCounts);
 
         console.log(`Finished set format`);
     }
@@ -453,7 +446,6 @@ class Sender implements ISender {
         return camera.formats;
     }
 }
-
 
 //*
 let sender = new Sender();
@@ -474,6 +466,10 @@ console.log("Calling ping");
 server.cameraPing(sourceId);
 //*/
 
+let streamFormatArguments = UnionUndefined(getInputValue(streamFormat) as ArgumentTypes<Sender["setStreamFormat"]>);
+if(streamFormatArguments) {
+    sender.setStreamFormat(...streamFormatArguments);
+}
 
 
 

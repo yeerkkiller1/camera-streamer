@@ -10,9 +10,9 @@ import { setTimeServer, getTimeSynced } from "../util/time";
 import "../util/math";
 import { binarySearchMapped, binarySearchMap, insertIntoListMap, findAtOrBefore, findAfter, findAtOrBeforeIndex, findClosest, findClosestIndex, findAtOrBeforeOrAfter, findAtOrBeforeOrAfterIndex, findAt, findAtOrAfter } from "../util/algorithms";
 import { formatDuration } from "../util/format";
-import { RangeSummarizer } from "../NALStorage/RangeSummarizer";
-import { VideoHolder, IVideoHolder } from "./VideoHolder";
-import { VideoHolderFake } from "./VideoHolderFake";
+import { RangeSummarizer } from "../Video/RangeSummarizer";
+import { VideoHolder, IVideoHolder } from "../Video/VideoHolder";
+import { VideoHolderFake } from "../Video/VideoHolderFake";
 import { PollLoop } from "./PollLoop";
 import { RealTimeToVideoTime, VideoDurationToRealDuration, RealDurationToVideoDuration, GetMinGapSize, GetRangeFPSEstimate, GetVideoFPSEstimate } from "../NALStorage/TimeMap";
 import { reduceRanges } from "../NALStorage/rangeMapReduce";
@@ -20,6 +20,9 @@ import { UnionUndefined, mapObjectValues } from "../util/misc";
 
 import "./PlayerPage.less";
 import { getInitialCheckboxValue, Checkbox, getIntialInputNumberValue, setInputValue } from "../util/Input";
+import { GetVideoFrames } from "../Video/getVideoFrame";
+import { createCancelPending } from "../algs/cancel";
+import { VideoDownloader } from "../Video/VideoDownloader";
 
 let VideoHolderClass = VideoHolder;
 
@@ -34,7 +37,7 @@ type NALRanges = {
      * Should not have duplicates
      * Should not be mutable, except for deletions, which only occur in the oldest frames
      */
-    frameTimes: NALTime[];
+    frameTimes: NALInfoTime[];
 
     /** Segments ranges may be created which overlap existing frameTimes. This happens when
      *      previously local data gets put into a segment and written to S3.
@@ -52,20 +55,10 @@ interface IProps { }
 
 interface RangeSummaryObj {
     serverRanges: NALRange[];
-    receivedRanges: NALRange[];
-    //requestedRanges: NALRange[];
-    videoFrames: NALTime[];
-    videos: MP4Video[];
 }
 interface IState {
     rate: number;
-    //todonext
-    // Expose this in an input, and then find some nice key frames to try to find in a video, and search from them at high FPS,
-    //  then write the frame grid type thing to find them even more easily.
-    // - Selected ranges (maybe playing with auto looping?)
-    //  - very interesting stuff happening at 2018 Aug 10 06:46:00 am (the dingy hits another boat?)
-    //  - shutter settings? or whatever changes at around 2018 Aug 10 10:20:20 am
-    //  - Finding the extra frame of video switching would be useful.
+
     targetFPS?: number;
 
     // Calculated as we play the video to reach targetFPS
@@ -91,6 +84,32 @@ interface IState {
 const rateConst = "rateConst";
 const targetPlayTimeConst = "targetPlayTime";
 
+
+// todonext
+//  - Implement live streaming
+//      - Then make the browser stable
+//  - Camera auto-reconnecting
+//      - Store a LIMITED number of frames when disconnected from the server, letting us
+//          recover from a disconnection (while making sure the live stream can also start immediately),
+//          but not run out of memory when we are disconnected from the server.
+//      - (make the camera stable)
+//  - Make the server stable
+
+//todonext
+// - Simulate S3 data
+// - Store data in S3
+// - Add security
+// - Put on digital ocean and fix and CPU/MEM/HDD usage issues
+
+//todonext
+//  - Selected ranges (maybe playing with auto looping?)
+//  - very interesting stuff happening at 2018 Aug 10 06:46:00 am (the dingy hits another boat?)
+//  - shutter settings? or whatever changes at around 2018 Aug 10 10:20:20 am
+//  - Finding the extra frame of video switching would be useful.
+//  - Should we put the track bar at the bottom or top? And if the bottom, should we move it there now?
+//  - In preview grid or preview bar make each frame a timelapsed repeating video
+
+
 //todonext
 // - Increased FPS at higher rates (which lowers the rate?)
 //      - Maybe let us set a minimum FPS? It would be nice if we could estimate FPS and show that somehow (on the timeline?)
@@ -107,11 +126,11 @@ const targetPlayTimeConst = "targetPlayTime";
 export class PlayerPage extends React.Component<IProps, IState> implements IBrowserReceiver {
     state: IState = {
         rates: [],
-        rate: getIntialInputNumberValue(rateConst, 0),
+        rate: getIntialInputNumberValue(rateConst, 1),
         //targetFPS: 60,
 
         // Calculated
-        playRate: 1,
+        playRate: 0.25,
 
 
         currentPlayTime: 0,
@@ -188,17 +207,10 @@ export class PlayerPage extends React.Component<IProps, IState> implements IBrow
 
     componentWillMount() {
         console.log(`componentWillMount`);
-        //todonext
-        //  - Simulate connection lag, so we can start to figure out dynamic fps
-        //  - Simulate connection closing, and add reconnection logic
-        //  - Also turn off the pi, and make it so it relaunches the camera
-        //  - And turn off the server, and make sure that relaunches
-        //  - ws-class is not handling closes properly, and still calling functions on closed zombie classes, so... we should fix that.
-        //  - Cancelling an encoder that is really far behind isn't working. I should kill the process if it doesn't die fast enough.
     }
 
     async syncVideoInfo() {
-        let rates = await this.server.getRates();
+        let rates = await this.server.GetRates();
         this.setState({ rates });
 
         this.setRate(this.state.rate, true);
@@ -207,7 +219,7 @@ export class PlayerPage extends React.Component<IProps, IState> implements IBrow
     private getSummaryObj(rate: number): RangeSummaryObj {
         let summary = this.state.rateSummaries[rate];
         if(!summary) {
-            summary = this.state.rateSummaries[rate] = { receivedRanges: [], serverRanges: [], videoFrames: [], videos: [] };
+            summary = this.state.rateSummaries[rate] = { serverRanges: [] };
         }
         return summary;
     }
@@ -226,14 +238,12 @@ export class PlayerPage extends React.Component<IProps, IState> implements IBrow
         //  in very rare cases. So if we force it to a nice time it means the video will occassionally jump,
         //  but never stay in a bad state.
         {
-            let summary = this.getSummaryObj(oldRate);
-            let { videoFrames } = summary;
-            if(videoFrames) {
-                let timeObj = findClosest(videoFrames, seekTime, x => x.time);
-                if(timeObj) {
-                    // Actually, it looks like rounding is to the closest frame? So just use the exact time.
-                    seekTime = timeObj.time;
-                }
+            let { VideoFrames } = this.downloader.GetInfo(oldRate);
+            
+            let timeObj = findClosest(VideoFrames, seekTime, x => x.time);
+            if(timeObj) {
+                // Actually, it looks like rounding is to the closest frame? So just use the exact time.
+                seekTime = timeObj.time;
             }
         }
 
@@ -249,8 +259,16 @@ export class PlayerPage extends React.Component<IProps, IState> implements IBrow
         }
 
         this.state.rate = rate;
-        this.setState({ rate: rate });
-        this.streamVideo(seekTime, false);
+        (async () => {
+            this.setState({ rate: rate });
+            try {
+                this.streamVideo(seekTime, false);
+            } catch(e) {
+                if(!this.streamVideo.isCancelError(e)) {
+                    console.error(e);
+                }
+            }
+        })();
     }
 
     loadedVideoHolder(videoHolder: IVideoHolder|null, rate: number) {
@@ -275,35 +293,8 @@ export class PlayerPage extends React.Component<IProps, IState> implements IBrow
         reduceRanges(ranges, summaryObj.serverRanges, false, minGapSize);
         this.setState({ rateSummaries: this.state.rateSummaries });
     }
-    private addReceivedRanges(rate: number, ranges: NALRange[]) {
-        ranges = JSON.parse(JSON.stringify(ranges));
-        let summaryObj = this.getSummaryObj(rate);
-        let minGapSize = GetMinGapSize(rate);
-        reduceRanges(ranges, summaryObj.receivedRanges, false, minGapSize);
-        this.setState({ rateSummaries: this.state.rateSummaries });
-    }
 
-    private addVideo(video: MP4Video) {
-        let rate = video.rate;
-        let frames = video.frameTimes;
 
-        let summaryObj = this.getSummaryObj(rate);
-        let videoFrames = summaryObj.videoFrames;
-        // TODO: Make a bulk insert helper function
-        for(let frame of frames) {
-            let index = binarySearchMap(videoFrames, frame.time, x => x.time);
-            if(index >= 0) {
-                console.warn(`Duplicate frame received. At time ${frame.time}`);
-                continue;
-            }
-            videoFrames.splice(~index, 0, frame);
-        }
-
-        let videos = summaryObj.videos;
-        insertIntoListMap(videos, video, x => x.frameTimes[0].time);
-
-        this.setState({ rateSummaries: this.state.rateSummaries });
-    }
 
     async startCamera() {
         let formats = await this.server.getFormats();
@@ -328,12 +319,67 @@ export class PlayerPage extends React.Component<IProps, IState> implements IBrow
     //  and infinitely preferrable to a few GB in memory. And then when we store data on disk, add
     //  disk deletion code, so we don't fill up the disk (or our allocated space at least).
     
-    curPlayToken: object = {};
-    async streamVideo(startTime: number, startPlaying = false) {
-        this.setState({ targetPlayTime: startTime, currentPlayTime: startTime });
+    /*
+    if(video) {
+        nextTime = video.nextKeyFrameTime;
+    }
 
-        let ourPlayToken = {};
-        this.curPlayToken = ourPlayToken;
+    let times = video.frameTimes;
+    this.addReceivedRanges(rate, [{ firstTime: times[0].time, lastTime: nextTime || times.last().time, frameCount: times.length }]);
+
+    let videoHolder = UnionUndefined(this.videoCache[rate]);
+    if(videoHolder) {
+        this.addVideo(video);
+        videoHolder.AddVideo(video);
+    }
+
+    fps = GetVideoFPSEstimate(video);
+    */
+
+    downloader = new VideoDownloader(
+        video => {
+            let videoHolder = UnionUndefined(this.videoCache[video.rate]);
+            if(videoHolder) {
+                videoHolder.AddVideo(video);
+
+                /*
+                let url = URL.createObjectURL(new Blob([video.mp4Video], { type: "video/mp4" }))
+                let a = document.createElement("a");
+                a.href = url;
+                a.download = "what.mp4";
+                a.innerText = "video";
+                a.click();
+                //*/
+
+                //document.body.appendChild(a);
+            }
+            let { targetFPS } = this.state;
+
+            if(targetFPS) {
+                let fps = GetVideoFPSEstimate(video);
+                let playRate = targetFPS / fps / this.state.rate;
+                if(playRate < 1 / 16) {
+                    playRate = 1 / 16;
+                }
+                if(playRate > 16) {
+                    playRate = 16;
+                }
+                this.setState({ playRate });
+            }
+        },
+        () => {
+            this.forceUpdate();
+        }
+    );
+
+    streamVideo = createCancelPending(
+        () => this.server.CancelVideo(),
+        (doAsyncCall, isCancelError) =>
+    async (startTime: number, startPlaying = false) => {
+        //if(true as boolean) return;
+        console.log(`streamVideo ${startTime}`);
+
+        this.setState({ targetPlayTime: startTime, currentPlayTime: startTime });
 
         {
             let videoHolder = this.videoCache[this.state.rate];
@@ -353,16 +399,22 @@ export class PlayerPage extends React.Component<IProps, IState> implements IBrow
         if(!isCurrentTimeClose(initialStartTime)) {
             // For some reason seeking doesn't always work on fresh data. So just poll and keep trying to seek.
             setTimeout(async () => {
-                while(this.curPlayToken === ourPlayToken) {
-                    if(isCurrentTimeClose(initialStartTime)) {
-                        // When we are within 1 second of play time of the target time, stop seeking. Otherwise wait, and try seeking again
-                        break;
+                try {
+                    while(true) {
+                        if(isCurrentTimeClose(initialStartTime)) {
+                            // When we are within 1 second of play time of the target time, stop seeking. Otherwise wait, and try seeking again
+                            break;
+                        }
+                        await doAsyncCall(SetTimeoutAsync, 100);
+                        
+                        let videoHolder = this.videoCache[this.state.rate];
+                        if(!videoHolder) break;
+                        videoHolder.SeekToTime(initialStartTime);
                     }
-                    await SetTimeoutAsync(100);
-                    
-                    let videoHolder = this.videoCache[this.state.rate];
-                    if(!videoHolder) break;
-                    videoHolder.SeekToTime(initialStartTime);
+                } catch(e) {
+                    if(!isCancelError(e)) {
+                        console.error(e);
+                    }
                 }
             });
         }
@@ -372,31 +424,40 @@ export class PlayerPage extends React.Component<IProps, IState> implements IBrow
         let minFrames = 10;
         let minPlayBuffer = 5000;
 
-        while(this.curPlayToken === ourPlayToken) {
-            let timeObj = await this.downloadVideo(this.state.rate, startTime, minFrames);
-            // No more video available, so stop. (Probably hit the live data, and we don't have live video playing support right now)
-            if(timeObj === "FINISHED") return;
-            
-            let { nextTime, fps } = timeObj;
-            let { targetFPS } = this.state;
-            if(targetFPS && fps) {
-                let playRate = targetFPS / fps / this.state.rate;
-                if(playRate < 1 / 16) {
-                    playRate = 1 / 16;
-                }
-                if(playRate > 16) {
-                    playRate = 16;
-                }
-                this.setState({ playRate });
+        while(true) {
+            let { serverRanges } = this.getSummaryObj(this.state.rate);
+            let serverRangeIndex = findAtOrBeforeOrAfterIndex(serverRanges, startTime, x => x.firstTime);
+            let serverRange = serverRanges[serverRangeIndex];
+            if(serverRange && startTime >= serverRange.lastTime && serverRangeIndex === serverRanges.length - 1) {
+                console.log("Reached end of video, stopping download loop");
+                break;
             }
 
-            while(this.curPlayToken === ourPlayToken) {
-                let delay = RealDurationToVideoDuration(nextTime - this.state.currentPlayTime, this.state.rate) / this.state.playRate - minPlayBuffer;
+            let timeObj = await doAsyncCall(this.downloader.DownloadVideo, this.state.rate, startTime, minFrames);
+            // No more video available, so stop. (Probably hit the live data, and we don't have live video playing support right now)
+            if(timeObj === "FINISHED") return;
+            // Reached the end of the video
+            if(timeObj.nextTime === undefined) {
+                console.log(`Reached end of video, and live functionality is not coded yet.`);
+                return;
+            }
+            
+            let nextTime = startTime;
+            while(true) {
+                let realTimeBuffer = 0;
+
+                let curRange = findAtOrBefore(this.downloader.GetInfo(this.state.rate).ReceivedRanges, this.state.currentPlayTime, x => x.firstTime);
+                if(curRange && curRange.lastTime >= this.state.currentPlayTime) {
+                    realTimeBuffer = curRange.lastTime - this.state.currentPlayTime;
+                    nextTime = curRange.lastTime;
+                }
+
+                let delay = RealDurationToVideoDuration(realTimeBuffer, this.state.rate) / this.state.playRate - minPlayBuffer;
                 if(delay > 0) {
                     delay = Math.max(1000, delay);
                     delay = Math.min(1000, delay);
                     console.log(`Waiting ${delay}ms for video position to progress more.`);
-                    await SetTimeoutAsync(delay);
+                    await doAsyncCall(SetTimeoutAsync, delay);
                 } else {
                     break;
                 }
@@ -404,102 +465,12 @@ export class PlayerPage extends React.Component<IProps, IState> implements IBrow
 
             startTime = nextTime;
         }
+    });
+
+    playLive() {
+
     }
 
-
-    inDownload = false;
-    curDownloadToken: object = {};
-    async downloadVideo(rate: number, startTime: number, minFrames: number): Promise<{ nextTime: number; fps: number|undefined; }|"FINISHED"> {
-        if(this.inDownload) {
-            this.curDownloadToken = {};
-            await this.server.CancelVideo();
-        }
-
-        this.inDownload = true;
-        try {
-            let nextReceiverRange: NALRange|undefined;
-            let startTimeExclusive = false;
-
-            let summaryObj = this.state.rateSummaries[rate];
-            if(summaryObj) {
-                {
-                    let range = findAtOrBefore(summaryObj.receivedRanges, startTime, x => x.firstTime);
-                    if(range && range.lastTime >= startTime) {
-                        startTime = range.lastTime;
-                    }
-                }
-                {
-                    let range = findAfter(summaryObj.receivedRanges, startTime, x => x.firstTime);
-                    if(range) {
-                        nextReceiverRange = range;
-                    }
-                }
-                {
-                    let range = findAtOrBefore(summaryObj.receivedRanges, startTime, x => x.firstTime);
-                    if(range && range.lastTime > startTime) {
-                        startTimeExclusive = true;
-                    }
-                }
-            }
-
-            // We always have to make a request, as we don't know what rate we will end up using
-            console.log(`Requesting video starting at ${startTime}`);
-
-            let fps: number|undefined;
-
-            let downloadToken = {};
-            this.curDownloadToken = downloadToken;
-            let video = await this.server.GetVideo(
-                startTime,
-                minFrames,
-                nextReceiverRange && nextReceiverRange.firstTime,
-                rate,
-                startTimeExclusive
-            );
-
-            
-
-            if(video === "CANCELLED" || video === "VIDEO_EXCEEDS_LIVE_VIDEO") {
-                console.log(`Video returned ${video}`);
-                return "FINISHED";
-            }
-
-            if(this.curDownloadToken !== downloadToken) return "FINISHED";
-
-            let nextTime: number|undefined;
-            if(video === "VIDEO_EXCEEDS_NEXT_TIME") {
-                if(!nextReceiverRange) {
-                    throw new Error(`Impossible, the nextRangeLookup must have mutated, as the server says it used the next time and found there was no video before that time.`);
-                }
-
-                this.addReceivedRanges(rate, [{ firstTime: startTime, lastTime: nextReceiverRange.firstTime, frameCount: nextReceiverRange.frameCount }]);
-            } else {
-                if(video) {
-                    nextTime = video.nextKeyFrameTime;
-                }
-
-                let times = video.frameTimes;
-                this.addReceivedRanges(rate, [{ firstTime: times[0].time, lastTime: nextTime || times.last().time, frameCount: times.length }]);
-
-                let videoHolder = UnionUndefined(this.videoCache[rate]);
-                if(videoHolder) {
-                    this.addVideo(video);
-                    videoHolder.AddVideo(video);
-                }
-
-                fps = GetVideoFPSEstimate(video);
-            }
-
-            if(nextTime) {
-                return { nextTime, fps };
-            } else {
-                return "FINISHED";
-            }
-
-        } finally {
-            this.inDownload = false;
-        }
-    }
     
 
     renderPlayInfo(): JSX.Element|null {
@@ -532,7 +503,7 @@ export class PlayerPage extends React.Component<IProps, IState> implements IBrow
             if(currentPlayTime !== this.state.currentPlayTime) {
                 this.setState({ currentPlayTime });
             }
-            if(Math.abs(currentPlayTime - this.state.targetPlayTime) < 5000) {
+            if(Math.abs(currentPlayTime - this.state.targetPlayTime) < VideoDurationToRealDuration(5000, this.state.rate)) {
                 if(currentPlayTime !== this.state.targetPlayTime) {
                     this.setState({ targetPlayTime: currentPlayTime });
                 }
@@ -549,11 +520,15 @@ export class PlayerPage extends React.Component<IProps, IState> implements IBrow
         let curRate = rate;
         videoCache[rate] = videoCache[rate] || null;
 
-        let curVideo: MP4Video|undefined;
-        let speedObj = rateSummaries[rate];
-        if(speedObj) {
-            curVideo = findAtOrBefore(speedObj.videos, currentPlayTime, x => x.frameTimes[0].time);
+        let curVideo = findAtOrBefore(this.downloader.GetInfo(rate).Videos, currentPlayTime, x => x.frameTimes[0].time);
+
+        /*
+        if(curVideo) {
+            GetVideoFrame(curVideo, curVideo.frameTimes[0].time).then(x => {
+                console.log(x);
+            });
         }
+        */
 
         return (
             <div className="PlayerPage">
@@ -584,18 +559,14 @@ export class PlayerPage extends React.Component<IProps, IState> implements IBrow
                         return (
                             <div key={rate} data-rate={rate} className={`PlayerPage-video ${(rate === curRate) && "PlayerPage-video--visible"}`}>
                                 {(() => {
-                                    let { videoFrames } = this.getSummaryObj(rate);
-                                    if(!videoFrames) return null;
-                                    let times = videoFrames;
-                                    let index = findClosestIndex(times, currentPlayTime, x => x.time)
-                                    let timeObj = times[index];
+                                    let { VideoFrames } = this.downloader.GetInfo(rate)
+                                    let index = findClosestIndex(VideoFrames, currentPlayTime, x => x.time)
+                                    let timeObj = VideoFrames[index];
                                     
                                     if(timeObj) {
                                         return (
                                             <div>
-                                                <div>
-                                                    Play time: {currentPlayTime}, frame time: {timeObj.time}, {times.length} frames, index {index}, {times[0].time} to {times.last().time}
-                                                </div>
+                                                Play time: {currentPlayTime}, frame time: {timeObj.time}, {VideoFrames.length} frames, index {index}, {VideoFrames[0].time} to {VideoFrames.last().time}
                                             </div>
                                         );
                                     }
@@ -603,12 +574,15 @@ export class PlayerPage extends React.Component<IProps, IState> implements IBrow
 
                                 {(() => {
                                     let rangesObj = rateSummaries[rate];
+                                    let videoInfo = this.downloader.GetInfo(rate);
                                     return rangesObj && (
                                         <RangeSummarizer
+                                            loadedVideos={videoInfo.Videos}
+                                            server={this.server}
                                             debugVideo={false}
-                                            receivedRanges={rangesObj.receivedRanges}
+                                            receivedRanges={videoInfo.ReceivedRanges}
                                             serverRanges={rangesObj.serverRanges}
-                                            receivedFrames={rangesObj.videoFrames}
+                                            receivedFrames={videoInfo.VideoFrames}
                                             currentPlayTime={this.state.currentPlayTime}
                                             targetPlayTime={this.state.targetPlayTime}
                                             onTimeClick={time => this.streamVideo(time)}
@@ -616,17 +590,39 @@ export class PlayerPage extends React.Component<IProps, IState> implements IBrow
                                     );
                                 })()}
 
-                                <VideoHolderClass
+                                <div>
+                                    <button onClick={() => this.playLive()}>Play Live</button>
+                                </div>
+                                {<VideoHolderClass
                                     playRate={this.state.playRate}
                                     rate={rate}
                                     videoProps={this.videoProps}
                                     ref={x => this.loadedVideoHolder(x, rate)}
-                                />
+                                />}
                             </div>
                         );
                     })
                 }
                 </div>
+
+                <button onClick={async () => {
+                    let currentVideo = findClosest(
+                        this.downloader.GetInfo(this.state.rate).Videos,
+                        this.state.targetPlayTime,
+                        x => x.frameTimes[~~(x.frameTimes.length / 2)].time
+                    );
+
+                    if(currentVideo) {
+                        let url = URL.createObjectURL(new Blob([currentVideo.mp4Video], { type: "video/mp4" }))
+                        let a = document.createElement("a");
+                        a.href = url;
+                        a.download = "video.mp4";
+                        a.innerText = "video";
+                        a.click();
+                    }
+                }}>
+                    Download Video
+                </button>
 
                 <button onClick={() => this.startCamera()}>Start Camera</button>
 

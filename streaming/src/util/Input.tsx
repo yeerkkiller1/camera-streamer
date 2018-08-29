@@ -1,15 +1,24 @@
 import * as React from "react";
-
 const localStoragePrefix = "Input_STORAGE_";
+
+let storage: Storage;
+if(NODE) {
+    let { LocalStorage } = require("node-localstorage");
+    let storagePath = "./localStorage.tmp";
+    storage = new LocalStorage(storagePath);
+}
+if(!NODE) {
+    storage = localStorage;
+}
 
 let values: {
     [key: string]: {}|undefined
 } = {};
-function getValue(key: string): {}|undefined {
+export function getInputValue(key: string): {}|undefined {
     if(!(key in values)) {
         let value: {}|undefined = undefined;
         try {
-            let str = localStorage.getItem(localStoragePrefix + key);
+            let str = storage.getItem(localStoragePrefix + key);
             if(str !== null) {
                 value = JSON.parse(str);
             }
@@ -22,19 +31,19 @@ function getValue(key: string): {}|undefined {
 
 export function setInputValue(globalKey: string, value: {}): void {
     values[globalKey] = value;
-    localStorage.setItem(localStoragePrefix + globalKey, JSON.stringify(value));
+    storage.setItem(localStoragePrefix + globalKey, JSON.stringify(value));
 }
 
 export function getInitialCheckboxValue(globalKey: string): boolean {
-    return getValue(globalKey) && true || false;
+    return getInputValue(globalKey) && true || false;
 }
 
 export function getIntialInputNumberValue(globalKey: string, initialValue: number): number {
-    let number = getValue(globalKey) as any;
+    let number = getInputValue(globalKey) as any;
     if(number === undefined || isNaN(+number)) {
         values[globalKey] = initialValue;
     }
-    return getValue(globalKey) as any;
+    return getInputValue(globalKey) as any;
 }
 
 
@@ -63,7 +72,7 @@ export class Checkbox extends React.Component<ICheckboxProps, ICheckboxState> {
     }
 
     value(): boolean {
-        return getValue(this.props.globalKey) && true || false;
+        return getInputValue(this.props.globalKey) && true || false;
     }
 
     public render() {
@@ -91,7 +100,7 @@ export class InputNumber extends React.Component<IInputNumberProps, IInputNumber
     state: IInputNumberState = { };
 
     value(): number {
-        let num = getValue(this.props.globalKey);
+        let num = getInputValue(this.props.globalKey);
         return num === undefined || isNaN(num as any) ? undefined : num as any;
     }
 
