@@ -15,7 +15,7 @@ import { createChunkData } from "../LocalNALRate";
 //  REMEMBER! You can't split P frames from their I frames. We need to keep them together, or else it won't play!
 
 
-export class StorageManager implements NALStorageManager {
+export class NALStorageManagerImpl implements NALStorageManager {
     private nextAddSeqNum = new Deferred<number>();
     private rates = new Deferred<number[]>();
 
@@ -258,7 +258,7 @@ class StorageCombined implements NALStorage {
         this.changedRangesListener.SendValue(changedRanges);
         this.lastTime = time;
     }
-    public async GetRanges(): NALRange[] {
+    public GetRanges(): NALRange[] {
         return this.ranges;
     }
     public GetNextAddSeqNum(): number {
@@ -275,9 +275,13 @@ class StorageCombined implements NALStorage {
     public SubscribeToRanges(
         rangesChanged: (changedRanges: NALRange[]) => void,
         rangesDeleted: (deleteTime: number) => void
-    ): void {
-        this.changedRangesListener.Subscribe(rangesChanged);
-        this.deleteRangesListener.Subscribe(rangesDeleted);
+    ): () => void {
+        let unsub = this.changedRangesListener.Subscribe(rangesChanged);
+        let unsub2 = this.deleteRangesListener.Subscribe(rangesDeleted);
+        return () => {
+            unsub();
+            unsub2();
+        };
     }
     private onChunkDeleted(deleteTime: number) {
         deleteRanges(this.ranges, deleteTime);

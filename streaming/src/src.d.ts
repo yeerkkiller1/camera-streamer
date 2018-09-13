@@ -23,8 +23,7 @@ interface ISender extends Controller<ISender> {
         bitRateMBPS: number,
         format: v4l2camera.Format,
         formatId: string,
-        downsampleRate: number,
-        ratePrevCounts: { [rate: number]: number }
+        downsampleRate: number
     ): Promise<void>;
     getStreamFormats(): Promise<v4l2camera.Format[]>;
 }
@@ -139,6 +138,7 @@ type MP4Video = {
 
 interface IBrowserReceiver extends Controller<IBrowserReceiver> {
     acceptNewTimeRanges_VOID(rate: number, ranges: NALRange[]): void;
+    onDeleteTime(rate: number, deleteTime: number): void;
 }
 
 interface IHost extends

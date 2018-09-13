@@ -9,7 +9,6 @@ import { randomUID } from "./util/rand";
 
 // For polyfills
 import "./util/math";
-import { NALManager, createNALManager } from "./NALStorage/NALManager";
 import { keyBy, mapObjectValues, profile } from "./util/misc";
 import { binarySearchMap, findAtOrBefore, findAtOrBeforeOrAfter, findAt, findAfterIndex, findAtIndex, sort } from "./util/algorithms";
 import { sum } from "./util/math";
@@ -22,9 +21,8 @@ import { CreateTempFolderPath } from "temp-folder";
 import { exec } from "child_process";
 import { parseParams } from "./util/url";
 import { SizedCache } from "./Video/SizedCache";
-import { boot } from "./NALStorage/LocalNALRate";
-
-boot();
+import { NALStorageManagerImpl } from "./NALStorage/RemoteStorage/StorageCombined";
+import { LocalRemoteStorage } from "./NALStorage/LocalNALRate";
 
 //makeProcessSingle("receiver");
 
@@ -130,8 +128,13 @@ async function getFinalStorageFolder() {
 })();
 //*/
 
-let nalManagerPromise: Promise<NALManager>;
-nalManagerPromise = createNALManager();
+let nalManager = new NALStorageManagerImpl(
+    [rate => new LocalRemoteStorage(rate)],
+    10,
+    1024 * 50,
+    10,
+    4
+);
 
 
 /*
@@ -342,18 +345,15 @@ class Receiver extends TimeServer implements IReceiver, IHost {
         format: v4l2camera.Format
     ): Promise<void> {
         let curFormatId = randomUID("format");
-        let manager = await nalManagerPromise;
-        let rates = manager.GetRates();
-        let rateCounts = mapObjectValues(keyBy(rates.map(x => ({rate: x, count: sum(manager.GetNALRanges(x).map(x => x.frameCount))})), x => String(x.rate)), x => x.count);
-        await (await this.cameraClient.Promise()).setStreamFormat(fps, iFrameRate, bitRateMBPS, format, curFormatId, RateMultiplier, rateCounts);
+        await (await this.cameraClient.Promise()).setStreamFormat(fps, iFrameRate, bitRateMBPS, format, curFormatId, RateMultiplier);
     }
 
     public async GetRates(): Promise<number[]> {
-        return (await nalManagerPromise).GetRates();
+        return nalManager.GetRates();
     }
 
     public async GetNextAddSeqNum(): Promise<number> {
-        return (await nalManagerPromise).GetNextAddSeqNum();
+        return nalManager.GetNextAddSeqNum();
     }
 
     syncRateUnsubs: {
@@ -363,7 +363,7 @@ class Receiver extends TimeServer implements IReceiver, IHost {
     }[] = [];
     public async syncTimeRanges(rate: number): Promise<NALRange[]> {
         let client = this.client;
-        let nalManager = await nalManagerPromise;
+        let manager = await nalManager.GetStorage(rate);
 
         for(let i = this.syncRateUnsubs.length - 1; i >= 0; i--) {
             let unsubObj = this.syncRateUnsubs[i];
@@ -373,19 +373,23 @@ class Receiver extends TimeServer implements IReceiver, IHost {
             }
         }
 
-        let unsub = nalManager.SubscribeToNALRanges(rate, ranges => {
+        let unsub = manager.SubscribeToRanges(ranges => {
             client.acceptNewTimeRanges_VOID(
                 rate,
                 ranges
             );
+        },
+        deleteTime => {
+            client.onDeleteTime(rate, deleteTime);
         });
+
         this.syncRateUnsubs.push({
             client,
             rate,
             unsub
         });
 
-        return nalManager.GetNALRanges(rate);
+        return manager.GetRanges();
     }
 
     private pendingGetVideoCalls: {
@@ -417,9 +421,9 @@ class Receiver extends TimeServer implements IReceiver, IHost {
         let obj = this.pendingGetVideoCalls[index];
         obj.cancelTokens.push(cancelToken);
         try {
-            let manager = await nalManagerPromise;
+            let manager = await nalManager.GetStorage(rate);
 
-            return await manager.GetVideo(startTime, minFrames, nextReceivedFrameTime, startTimeExclusive, rate, onlyTimes, forPreview, cancelToken);
+            return await manager.GetVideo(startTime, minFrames, nextReceivedFrameTime, startTimeExclusive, onlyTimes, forPreview, cancelToken);
         } finally {
             onCallComplete.Resolve(undefined);
             {
@@ -464,9 +468,7 @@ class Receiver extends TimeServer implements IReceiver, IHost {
     }
 
     public acceptNAL_VOID(info: NALHolder): void {
-        nalManagerPromise.then((manager) => {
-            manager.AddNAL(info);
-        });
+        nalManager.AddNAL(info);
     }
 }
 
@@ -533,13 +535,12 @@ let server = createServer(async (request, response) => {
     if(cachedFrame) {
         frame = cachedFrame.v;
     } else {
-        let nalManager = await nalManagerPromise;
-        let video = await nalManager.GetVideo(
+        let manager = await nalManager.GetStorage(rate);
+        let video = await manager.GetVideo(
             time,
             1,
             undefined,
             false,
-            rate,
             false,
             true,
             new Deferred<void>()

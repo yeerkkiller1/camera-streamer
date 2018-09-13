@@ -14,7 +14,7 @@ import { RangeSummarizer } from "../Video/RangeSummarizer";
 import { VideoHolder, IVideoHolder } from "../Video/VideoHolder";
 import { PollLoop } from "./PollLoop";
 import { RealTimeToVideoTime, VideoDurationToRealDuration, RealDurationToVideoDuration, GetMinGapSize, GetRangeFPSEstimate, GetVideoFPSEstimate } from "../NALStorage/TimeMap";
-import { reduceRanges } from "../NALStorage/rangeMapReduce";
+import { reduceRanges, deleteRanges } from "../NALStorage/rangeMapReduce";
 import { UnionUndefined, mapObjectValues } from "../util/misc";
 
 import "./PlayerPage.less";
@@ -281,6 +281,12 @@ export class PlayerPage extends React.Component<IProps, IState> implements IBrow
 
     acceptNewTimeRanges_VOID(rate: number, ranges: NALRange[]): void {
         this.addServerRanges(rate, ranges);
+    }
+
+    onDeleteTime(rate: number, deleteTime: number): void {
+        let summaryObj = this.getSummaryObj(rate);
+        deleteRanges(summaryObj.serverRanges, deleteTime);
+        this.setState({ rateSummaries: this.state.rateSummaries });
     }
 
     private addServerRanges(rate: number, ranges: NALRange[]) {

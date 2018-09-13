@@ -83,7 +83,7 @@ interface NALStorage {
     SubscribeToRanges(
         rangesChanged: (changedRanges: NALRange[]) => void,
         rangesDeleted: (deleteTime: number) => void,
-    ): void;
+    ): () => void;
 
     GetNextAddSeqNum(): number;
 

@@ -5,7 +5,6 @@ import { TransformChannel, Deferred } from "pchannel";
 import { PChannelMultiListen } from "../receiver/PChannelMultiListen";
 import { RoundRecordTime, GetMinGapSize } from "./TimeMap";
 import { max, group, sum } from "../util/math";
-import { NALManager, createNALManager } from "./NALManager";
 import { Downsampler, DownsampledInstance } from "./Downsampler";
 import { MuxVideo } from "mp4-typescript";
 import { readNalLoop, readNal, writeNALToDisk, readNALsBulkFromDisk, loadIndexFromDisk, finalizeNALsOnDisk, deleteNALs, writeNALsBulkToDisk, readNALs } from "./NALBuffers";
