@@ -32,6 +32,10 @@ export class PollLoop extends React.Component<IProps, IState> {
         this.closed = true;
         clearTimeout(this.timeout);
     }
+    resetCall() {
+        this.currentCallbackPromise = undefined;
+        this.doCall();
+    }
 
     componentWillMount() {
         //this.doCall();
@@ -41,6 +45,14 @@ export class PollLoop extends React.Component<IProps, IState> {
     }
     componentWillUnmount() {
         this.close();
+    }
+
+    
+    componentDidUpdate(prevProps: IProps) {
+        let delayFraction = this.props.delay / prevProps.delay;
+        if(delayFraction < 0.5) {
+            this.resetCall();
+        }
     }
 
     render() {

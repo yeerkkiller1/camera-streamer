@@ -400,6 +400,7 @@ class Receiver extends TimeServer implements IReceiver, IHost {
         rate: number,
         startTimeExclusive: boolean,
         onlyTimes?: boolean,
+        forPreview?: boolean
     ): Promise<MP4Video | "VIDEO_EXCEEDS_NEXT_TIME" | "VIDEO_EXCEEDS_LIVE_VIDEO" | "CANCELLED"> {
         let client = this.client;
         let cancelToken = new Deferred<void>();
@@ -418,7 +419,7 @@ class Receiver extends TimeServer implements IReceiver, IHost {
         try {
             let manager = await nalManagerPromise;
 
-            return await manager.GetVideo(startTime, minFrames, nextReceivedFrameTime, startTimeExclusive, rate, onlyTimes, cancelToken);
+            return await manager.GetVideo(startTime, minFrames, nextReceivedFrameTime, startTimeExclusive, rate, onlyTimes, forPreview, cancelToken);
         } finally {
             onCallComplete.Resolve(undefined);
             {
@@ -503,33 +504,63 @@ wsClass.HostServer(7060, receiver);
 //*/
 
 //*
+
+let frameCache = new SizedCache<{time: number; rate: number}, Buffer>(
+    1024 * 1024 * 128,
+    (key, value) => value.length,
+    obj => JSON.stringify(obj)
+);
+
 let server = createServer(async (request, response) => {
     let { url } = request;
 
     url = url || "";
 
+    if(url.endsWith("favicon.ico")) {
+        response.statusCode = 404;
+        response.end("No favicon.");
+        return;
+    }
+
     let urlParams = parseParams(url.slice(url.indexOf("?") + 1));  
     let rate = +urlParams.rate;
     let time = +urlParams.time;
 
-    let nalManager = await nalManagerPromise;
-    let video = await nalManager.GetVideo(time, 1, undefined, false, rate, false, new Deferred<void>());
-    if(typeof video === "string") {
-        response.statusCode = 404;
-        response.end(`Cannot find time ${time}, ${video}`);
-        return;
-    }
+    let frame: Buffer;
+    
+    // TODO: Blocking cache, so we don't have pending requests that satisify the same thing.
+    let cachedFrame = frameCache.Get({time, rate});
+    if(cachedFrame) {
+        frame = cachedFrame.v;
+    } else {
+        let nalManager = await nalManagerPromise;
+        let video = await nalManager.GetVideo(
+            time,
+            1,
+            undefined,
+            false,
+            rate,
+            false,
+            true,
+            new Deferred<void>()
+        );
 
-    
-    let timeIndex = findAtIndex(video.frameTimes, time, x => x.time);
-    if(timeIndex < 0) {
-        response.statusCode = 404;
-        response.end(`Cannot find time ${time}, found times ${video.frameTimes.map(x => x.time).join(", ")}`);
-        return;
+        if(typeof video === "string") {
+            response.statusCode = 404;
+            response.end(`Cannot find time ${time}, ${video}`);
+            return;
+        }
+        
+        let timeIndex = findAtIndex(video.frameTimes, time, x => x.time);
+        if(timeIndex < 0) {
+            response.statusCode = 404;
+            response.end(`Cannot find time ${time}, found times ${video.frameTimes.map(x => x.time).join(", ")}`);
+            return;
+        }
+        
+        let frames = await getFrames(video as any);
+        frame = frames[timeIndex];
     }
-    
-    let frames = await getFrames(video as any);
-    let frame = frames[timeIndex];
 
     response.setHeader("content-type", "image/jpeg");
     response.end(frame);
@@ -561,22 +592,16 @@ function execPromise(command: string) {
     });
 }
 
-let cache = new SizedCache<{time: number; rate: number}, Buffer>(
-    1024 * 1024 * 128,
-    (key, value) => value.length,
-    obj => JSON.stringify(obj)
-);
-
 async function getFrames(video: MP4Video): Promise<Buffer[]> {
     let times = video.frameTimes.map(x => x.time);
-    let cachedValues = times.map(x => cache.Get({ time: x, rate: video.rate }));
+    let cachedValues = times.map(x => frameCache.Get({ time: x, rate: video.rate }));
     if(!cachedValues.some(x => !x)) {
         return cachedValues.map(x => x ? x.v : null as any);
-}
+    }
 
     let frames = await getFramesInternal(video);
     for(let i = 0; i < frames.length; i++) {
-        cache.Add({
+        frameCache.Add({
             time: times[i],
             rate: video.rate
         }, frames[i]);

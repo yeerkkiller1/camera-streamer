@@ -3,6 +3,7 @@ import { PChan, TransformChannel } from "pchannel";
 import { IVideoHolder } from "./VideoHolder";
 
 
+/*
 interface IProps {
     videoProps: React.VideoHTMLAttributes<HTMLVideoElement>;
     rate: number;
@@ -48,3 +49,5 @@ export class VideoHolderFake extends React.Component<IProps, IState> implements 
         );
     }
 }
+*/
+

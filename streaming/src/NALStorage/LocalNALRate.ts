@@ -1,459 +1,463 @@
-import { appendFilePromise, readFilePromise, openReadPromise, readDescPromise, existsFilePromise, statFilePromise, closeDescPromise, writeFilePromise, openWritePromise, writeDescPromise, unlinkFilePromise } from "../util/fs";
-import { keyBy, profile } from "../util/misc";
-import { sort, insertIntoListMap, findAtIndex } from "../util/algorithms";
-import { TransformChannel } from "pchannel";
+import { appendFilePromise, readFilePromise, openReadPromise, readDescPromise, existsFilePromise, statFilePromise, closeDescPromise, writeFilePromise, openWritePromise, writeDescPromise, unlinkFilePromise, readdirPromise } from "../util/fs";
+import { keyBy, profile, randomUID, UnionUndefined, isEmpty } from "../util/misc";
+import { sort, insertIntoListMap, findAtIndex, findAt } from "../util/algorithms";
+import { TransformChannel, Deferred } from "pchannel";
 import { PChannelMultiListen } from "../receiver/PChannelMultiListen";
-import { RoundRecordTime } from "./TimeMap";
-import { max } from "../util/math";
+import { RoundRecordTime, GetMinGapSize } from "./TimeMap";
+import { max, group, sum } from "../util/math";
 import { NALManager, createNALManager } from "./NALManager";
 import { Downsampler, DownsampledInstance } from "./Downsampler";
 import { MuxVideo } from "mp4-typescript";
-
-let path = "./dist/";
-
-/** Used for both pure local data, and for after we load data from S3 (and then have to store it on disk, because
- *      the raspberry pi 3 only has 1GB of memory, and each chunk will easily be 100MB). */
-export interface NALStorage {
-    AddNAL(val: NALHolderMin): Promise<void>|void;
-
-    GetNALTimes(): NALIndexInfo[];
-    
-    ReadNALs(times: number[]): Promise<NALHolderMin[]>;
-    SubscribeToNALTimes(callback: (nalTime: NALInfoTime) => void): () => void;
-}
-
-export async function boot() {
-    if(true as boolean) return;
-    let rate = new LocalNALRate(1);
-    await rate.Init();
-
-    let times = rate.GetNALTimes();
-    let nals = await rate.ReadNALs(times.slice(0, 2).map(x => x.time));
-
-    let video = await MuxVideo({
-        sps: nals[0].sps,
-        pps: nals[0].pps,
-        width: nals[0].width,
-        height: nals[0].height,
-        baseMediaDecodeTimeInSeconds: 0,
-        frames: nals.map(x => ({
-            frameDurationInSeconds: 1,
-            nal: x.nal
-        }))
-    });
+import { readNalLoop, readNal, writeNALToDisk, readNALsBulkFromDisk, loadIndexFromDisk, finalizeNALsOnDisk, deleteNALs, writeNALsBulkToDisk, readNALs } from "./NALBuffers";
+import { reduceRanges } from "./rangeMapReduce";
 
 
-    /*
-    try {
-        let ratesBuffer = await readFilePromise(LocalNALRate.RatePath);
-        let rates = ratesBuffer.toString().split("\n").slice(0, -1).map(x => +x);
-        sort(rates, x => x);
+type ChunkMetadataExtended = ChunkMetadata & {
+    pendingReads: {
+        [readId: string]: Deferred<void>
+    }
+};
 
-        for(let rate of rates) {
-            try { await unlinkFilePromise(path + `${rate}x.nal`); } catch(e) {}
-            try { await unlinkFilePromise(path + `${rate}x.index`); } catch(e) {}
-        }
+type ChunkObj = {
+    // Same instance as in chunksList
+    metadata: ChunkMetadataExtended;
+    index: (NALIndexInfo & { finishedWrite: boolean } | Deferred<void>)[];
+    fileBasePath: string;
+    writeLoop: ((code: () => Promise<void>) => void)|"exporting";
+};
+export class LocalRemoteStorage implements RemoteStorageLocal {
+    private chunksList: ChunkMetadataExtended[] = [];
+    private chunks: {
+        [chunkUID: string]: ChunkObj
+    } = {};
+    private nextStorageSystem: RemoteStorage|undefined;
+    private path: string = "./dist/";
+    private onChunkDeleted!: (deleteTime: number) => void;
+    private chunkThresholdBytes: number|undefined;
+    private maxBytes: number|undefined;
 
-        await unlinkFilePromise(LocalNALRate.RatePath);
-    } catch(e) { }
+    constructor(
+        private rate: number
+    ) {}
 
-    
+    public async Init(
+        nextStorageSystem: RemoteStorage|undefined,
+        onChunkDeleted: (deleteTime: number) => void,
+        chunkThresholdBytes: number,
+        maxBytes: number
+    ): Promise<void> {
+        // We need to read all of the data from the file system (well not the nals I guess, but at least the index files)
+        //  and then add the chunk metadatas.
 
-    let nalManager = await createNALManager();
+        this.nextStorageSystem = nextStorageSystem;
+        this.onChunkDeleted = onChunkDeleted;
 
-    class NALAdder implements DownsampledInstance<NALHolderMin> {
-        constructor(public Rate: number) { }
-        public async AddValue(nal: NALHolderMin): Promise<void> {
-            await nalManager.AddNAL({...nal, rate: this.Rate});
+        this.chunkThresholdBytes = chunkThresholdBytes;
+        this.maxBytes = maxBytes;
+        
+        let fileNames = await readdirPromise(this.path);
+        let nalFileNames = fileNames.filter(x => x.endsWith(".nal"));
+
+        for(let nalFileName of nalFileNames) {
+            let indexFileName = nalFileName.slice(0, -".nal".length) + ".index";
+            
+            let nalFilePath = this.path + nalFileName;
+            let indexFilePath = this.path + indexFileName;
+
+            let nalInfosObj = await loadIndexFromDisk(nalFilePath, indexFilePath);
+            if(!nalInfosObj) {
+                console.error(`Could not read index or nals. Ignoring file. ${nalFileName}`);
+                continue;
+            }
+
+            let nalInfos = nalInfosObj.index;
+
+            let chunkUID = this.createChunkUID(nalInfos[0]);
+            if(nalFilePath !== this.path + chunkUID + ".nal") {
+                console.error(`NAL contents did not match file name. Ignoring file. ${nalFileName}`);
+                continue;
+            }
+
+            let minGapSize = GetMinGapSize(nalInfos[0].rate);
+            let chunkMetadata: ChunkMetadataExtended = {
+                ChunkUID: chunkUID,
+                Ranges: group(nalInfos.map(x => x.time), minGapSize).map(x => ({ firstTime: x[0], lastTime: x.last(), frameCount: x.length })),
+                IsLive: nalInfosObj.isLive,
+                IsMoved: false,
+                Size: nalInfos.last().pos + nalInfos.last().len,
+                pendingReads: {},
+                LastAddSeqNum: nalInfos.last().addSeqNum
+            };
+
+            let index: (NALIndexInfo & { finishedWrite: boolean })[] = [];
+            for(let indexInfo of nalInfos) {
+                index.push({ ...indexInfo, finishedWrite: true });
+            }
+
+            this.chunks[chunkUID] = {
+                metadata: chunkMetadata,
+                index: index,
+                fileBasePath: this.path + chunkUID,
+                writeLoop: this.createWriteLoop(),
+            };
         }
     }
 
-    let downsampler = new Downsampler(4, NALAdder, 0);
-    let nextAddSeqNum = 0;
 
-    try {
-        await readNalLoop(path + "base.nal", async nal => {
-            nal.addSeqNum = nextAddSeqNum++;
-            await downsampler.AddValue(nal);
+    private createWriteLoop() {
+        let writeLoopBase = TransformChannel<() => Promise<void>, void>(input => input());
+        return async (code: () => Promise<void>) => {
+            try {
+                await writeLoopBase(code);
+            } catch(e) {
+                console.log(code);
+                console.error(`Error in write loop. ${e.stack}`);
+            }
+        };
+    }
+    private createChunkUID(startNAL: NALInfoTime) {
+        return `chunk_${startNAL.rate}_${startNAL.addSeqNum}`;
+    }
+    private addChunk(nal: NALInfoTime): string {
+        let { chunks, chunksList } = this;
+
+        let chunkUID = this.createChunkUID(nal);
+        let chunkMetadata: ChunkMetadataExtended = {
+            ChunkUID: chunkUID,
+            Ranges: [{ firstTime: nal.time, lastTime: nal.time, frameCount: 0 }],
+            Size: 0,
+            IsLive: true,
+            IsMoved: false,
+            pendingReads: {},
+            LastAddSeqNum: nal.addSeqNum
+        };
+        insertIntoListMap(chunksList, chunkMetadata, x => x.Ranges[0].firstTime);
+
+        chunks[chunkUID] = {
+            metadata: chunkMetadata,
+            index: [new Deferred<void>()],
+            fileBasePath: this.path + chunkUID,
+            writeLoop: this.createWriteLoop()
+        };
+
+        return chunkUID;
+    }
+
+    public AddSingleNAL(nalHolder: NALHolderMin): void {
+        let { chunks, chunksList, chunkThresholdBytes, maxBytes } = this;
+
+        if(chunkThresholdBytes === undefined || maxBytes === undefined) {
+            throw new Error(`Cannot write to RemoteStorage as Init has not been called! ${this.DebugName()}`);
+        }
+
+        // Get the live chunk
+        let liveChunkUID: string|undefined;
+        if(chunksList.length > 0) {
+            let chunkUID = chunksList.last().ChunkUID;
+            let list = chunks[chunkUID].index;
+            if(list.length > 0 && "then" in list.last()) {
+                liveChunkUID = chunkUID;
+            }
+        }
+
+
+        // Create it if it doesn't exist
+        if(liveChunkUID === undefined) {
+            liveChunkUID = this.addChunk(nalHolder);
+        }
+
+        
+        let nalDeferred = chunks[liveChunkUID].index.last();
+        if(!nalDeferred || !("Promise" in nalDeferred)) {
+            throw new Error(`Live chunk is corrupted. Last element in index isn't promise, and yet size exceeds threshold. Last value was ${nalDeferred}`);
+        }
+
+        let chunkObj = chunks[liveChunkUID];
+
+        if(chunkObj.writeLoop === "exporting") {
+            throw new Error(`Chunk is being moved to another storage and is still being written to? This should not be possible. Chunk metadata says live status is ${chunkObj.metadata.IsLive}`);
+        }
+
+        // See if this chunk should be finished.
+        if(chunkObj.metadata.Size > chunkThresholdBytes && nalHolder.type === NALType.NALType_keyframe) {
+            // Yep, exceeds size and next nal is keyframe, make it not live, and create new chunk.
+            chunkObj.metadata.IsLive = false;
+            chunkObj.writeLoop(() => finalizeNALsOnDisk(chunkObj.fileBasePath));
+            chunkObj.index.pop();
+            liveChunkUID = this.addChunk(nalHolder);
+            nalDeferred.Resolve();
+
+            nalDeferred = chunks[liveChunkUID].index.last();
+            if(!nalDeferred || !("Promise" in nalDeferred)) {
+                throw new Error(`Live chunk is corrupted. Last element in index isn't promise, and yet size exceeds threshold. Last value was ${nalDeferred}`);
+            }
+        }
+
+        // Add nal to chunk, and queue it to be added to FS
+        chunkObj = chunks[liveChunkUID];
+
+        if(chunkObj.writeLoop === "exporting") {
+            throw new Error(`Chunk is being moved to another storage and is still being written to? This should not be possible. Chunk metadata says live status is ${chunkObj.metadata.IsLive}`);
+        }
+
+        let minGap = GetMinGapSize(this.rate);
+        let lastRange = chunkObj.metadata.Ranges.last();
+        if(!lastRange) {
+            throw new Error(`Corrupted chunk object, no ranges?`);
+        }
+
+        // Check for time going backwards
+        if(nalHolder.time <= lastRange.lastTime) {
+            throw new Error(`Time did not increase between two NALs. Time must always move forward, and no two NALs may have the same time.`);
+        }
+
+        // Check for gap size
+        let gap = nalHolder.time - lastRange.lastTime;
+        if(gap >= minGap) {
+            lastRange.lastTime = nalHolder.time;
+            lastRange = {
+                firstTime: nalHolder.time,
+                lastTime: nalHolder.time,
+                frameCount: 0
+            };
+            chunkObj.metadata.Ranges.push(lastRange);
+        }
+
+        let last = chunkObj.index.pop();
+        if(last !== nalDeferred) {
+            throw new Error(`Chunk object is messed up, last value should be deferred`);
+        }
+
+        // Update chunk
+        lastRange.frameCount++;
+
+        let pos = chunkObj.index.length > 0 ? (chunkObj.index.last() as NALIndexInfo).pos : 0;
+        let { nal, pps, sps, ... nalInfo } = nalHolder;
+        let indexObj: NALIndexInfo & { finishedWrite: boolean } = {
+            ... nalInfo,
+            pos: pos,
+            len: 0,
+            finishedWrite: false,
+        };
+
+        let writeObj = writeNALToDisk(chunkObj.fileBasePath, nalHolder, pos);
+        indexObj.len = writeObj.len;
+        chunkObj.metadata.Size += writeObj.len;
+        chunkObj.metadata.LastAddSeqNum = nalInfo.addSeqNum;
+        
+        chunkObj.index.push(indexObj);
+        chunkObj.index.push(new Deferred<void>());
+        nalDeferred.Resolve();
+
+        // Queue write to disk
+        chunkObj.writeLoop(async () => {
+            await writeObj.fnc();
+            indexObj.finishedWrite = true;
         });
-    } catch(e) {
-        if(e !== stop) {
-            throw e;
+
+        (() => {
+            if(this.GetCurrentBytes() < maxBytes) {
+                return;
+            }
+            let candidate = this.chunksList[0];
+            if(candidate === undefined) {
+                console.error(`GetCurrentBytes is broken. We exceed max bytes, but have no chunks. ${this.DebugName()}`);
+                return;
+            }
+            if(candidate.IsLive) {
+                console.error(`We have too many bytes, but the oldest chunk is not finished, so we cannot store export this storage. ${this.DebugName()}`);
+                return;
+            }
+            let candidateChecked = candidate;
+
+            let { nextStorageSystem } = this;
+            if(nextStorageSystem === undefined) {
+                let chunkUID = candidateChecked.ChunkUID;
+                console.error(`Completely deleting chunk ${chunkUID}, ${this.DebugName()}`);
+                this.removeChunk(chunkUID).catch(e => {
+                    console.error(`Error when deleting chunk ${chunkUID}, ${e.stack}`);
+                    this.onChunkDeleted(candidate.Ranges.last().lastTime);
+                });
+                return;
+            }
+            let nextStorageSystemChecked = nextStorageSystem;
+            
+            this.ExportChunk(candidate.ChunkUID, async chunk => {
+                await nextStorageSystemChecked.AddChunk(chunk);
+            });
+        })();
+    }
+
+    public ExportChunk(chunkUID: string, exportFnc: (chunk: Chunk) => Promise<void>): void {
+        let { chunks } = this;
+
+        if(!(chunkUID in chunks)) {
+            throw new Error(`Chunk cannot be found. Chunk ${chunkUID}`);
         }
+
+        let chunkObj = chunks[chunkUID];
+        if(chunkObj.writeLoop === "exporting") {
+            throw new Error(`Cannot export chunk as it is currently being exporting. ${chunkUID}`);
+        }
+        if(chunkObj.metadata.IsLive) {
+            throw new Error(`Cannot export chunk as it is still live. ${chunkUID}`);
+        }
+
+        chunkObj.writeLoop(async () => {
+            let index: NALIndexInfo[] = [];
+            for(let info of chunkObj.index) {
+                if("Promise" in info) {
+                    throw new Error(`Chunk still has promise in index. ${chunkUID}`);
+                }
+                index.push(info);
+            }
+            let nalData = await readNALsBulkFromDisk(chunkObj.fileBasePath);
+            let chunkBuffer = createChunkData(index, nalData);
+
+            let { pendingReads, ...chunkMetadata } = chunkObj.metadata;
+            let chunk: Chunk = {
+                ... chunkMetadata,
+                Data: chunkBuffer,
+            };
+
+            await exportFnc(chunk);
+            await this.removeChunk(chunkUID);
+        });
+        chunkObj.writeLoop = "exporting";
     }
+    private async removeChunk(chunkUID: string): Promise<void> {
+        let { chunks, chunksList } = this;
+
+        let chunkObj = chunks[chunkUID];
+
+        chunkObj.metadata.IsMoved = true;
+
+        let waitCount = 0;
+        while(!isEmpty(chunkObj.metadata.pendingReads)) {
+            await Promise.all(Object.values(chunkObj.metadata.pendingReads));
+            waitCount++;
+            if(waitCount > 100) {
+                throw new Error(`Could not remove chunk, after too many waits for pending reads to finish.`);
+            }
+        }
+
+        delete chunks[chunkUID];
+
+        let chunksListIndex = findAtIndex(chunksList, chunkObj.metadata.Ranges[0].firstTime, x => x.Ranges[0].firstTime);
+        if(chunksListIndex < 0) {
+            console.error(`Cannot find chunk in chunksList`);
+        } else {
+            chunksList.splice(chunksListIndex, 1);
+        }
+        await deleteNALs(chunkObj.fileBasePath);
+    }
+
+    public async AddChunk(chunk: Chunk): Promise<void> {
+        if(chunk.ChunkUID in this.chunks) {
+            throw new Error(`Chunk already added. ${chunk.ChunkUID}`);
+        }
+
+        let { Data, ...chunkMetadataBase } = chunk;
+        let chunkMetadata: ChunkMetadataExtended = { ... chunkMetadataBase, pendingReads: {} };
+        insertIntoListMap(this.chunksList, chunkMetadata, x => x.Ranges[0].firstTime);
+
+        let chunkData = parseChunkData(Data);
+
+        // Wait until we write to disk before we add it to memory, as all in memory reads
+        //  read from disk presently (if they didn't then we could make writing non-blocking).
+        await writeNALsBulkToDisk(chunk.ChunkUID, chunkData.nalsBulk, chunkData.index);
+
+        let index: (NALIndexInfo & { finishedWrite: boolean })[] = [];
+        for(let indexInfo of chunkData.index) {
+            index.push({ ...indexInfo, finishedWrite: true });
+        }
+
+        let chunkUID = chunk.ChunkUID;
+        this.chunks[chunkUID] = {
+            metadata: chunkMetadata,
+            index: index,
+            fileBasePath: this.path + chunkUID,
+            writeLoop: this.createWriteLoop(),
+        };
+    }
+
+
+    public async ReadNALs(
+        cancelId: string,
+        chunkUID: string,
+        accessFnc: (
+            index: (NALInfoTime | { Promise(): Promise<void> })[]
+        ) => Promise<NALInfoTime[]>
+    ): Promise<NALHolderMin[] | "CANCELLED"> {
+        let chunkObj = this.chunks[chunkUID];
+        if(chunkObj.metadata.IsMoved) {
+            throw new Error(`Cannot Read from chunk as it has been moved. Do not attempt to start new reads on moved chunks. ${chunkUID}`);
+        }
+
+        let onRead = new Deferred<void>();
+        let { pendingReads } = chunkObj.metadata;
+        if(cancelId in pendingReads) {
+            throw new Error(`cancelId already used on other ReadNALs. ${cancelId}`);
+        }
+        pendingReads[cancelId] = onRead;
+
+        let times = await accessFnc(chunkObj.index);
+        if(times.length === 0) {
+            return [];
+        }
+
+        return readNALs(chunkObj.fileBasePath, times as NALIndexInfo[], onRead.Promise())
+    }
+    public CancelReadNALs(cancelId: string, chunkUID: string): void {
+        this.chunks[chunkUID].metadata.pendingReads[cancelId].Resolve();
+    }
+
+    public GetChunkMetadatas(): ChunkMetadata[] {
+        return this.chunksList;
+    }
+
+
+    public GetCurrentBytes(): number {
+        return sum(this.GetChunkMetadatas().map(x => x.Size));
+    }
+    
+
+    /** Requires bytesPerSecond, secondsPerChunk, and maxCost, so we can take into account extra glacier minimum storage restrictions. */
+    public MaxGB(bytesPerSecond: number, secondsPerChunk: number, maxCost: number): number {
+        let chunkSize = bytesPerSecond * secondsPerChunk;
+        return chunkSize * 3;
+    }
+
+    /** Assumes 1 request. If you are planning on making more than 1 request, call this once, and then multiply it by the number of requests.
+     *      (this should probably be called with the chunk size).
     */
-    console.log("done boot");
+    public CostPerGBDownload(bytes: number): number {
+        return 0;
+    }
+
+    public DebugName(): string {
+        return `disk_rate_${this.rate}`;
+    }
 }
 
-function writeNal(nalInfo: NALHolderMin): Buffer {
-    let buffer = Buffer.alloc(
-        // rate
-        8 +
-        // time
-        8 +
-        // type
-        8 +
-        // width
-        8 +
-        // height
-        8 +
-        // sps length
-        8 +
-        // pps length
-        8 +
-        // nal length
-        8 +
-        // addSeqNum
-        8 +
-        nalInfo.sps.length +
-        nalInfo.pps.length + 
-        nalInfo.nal.length
-    );
-    let pos = 0;
-    buffer.writeDoubleLE(nalInfo.rate, pos); pos += 8;
-    buffer.writeDoubleLE(nalInfo.time, pos); pos += 8;
-    buffer.writeDoubleLE(nalInfo.type, pos); pos += 8;
-    buffer.writeDoubleLE(nalInfo.width, pos); pos += 8;
-    buffer.writeDoubleLE(nalInfo.height, pos); pos += 8;
-
-    buffer.writeDoubleLE(nalInfo.sps.length, pos); pos += 8;
-    buffer.writeDoubleLE(nalInfo.pps.length, pos); pos += 8;
-    buffer.writeDoubleLE(nalInfo.nal.length, pos); pos += 8;
-
-    buffer.writeDoubleLE(nalInfo.addSeqNum || 0, pos); pos += 8;
-
-    nalInfo.sps.copy(buffer, pos); pos += nalInfo.sps.length;
-    nalInfo.pps.copy(buffer, pos); pos += nalInfo.pps.length;
-    nalInfo.nal.copy(buffer, pos); pos += nalInfo.nal.length;
-
-    if(pos !== buffer.length) {
-        throw new Error(`Length calculation is wrong. Calculated length ${buffer.length}, but used length ${pos}`);
-    }
-
-    return buffer;
+export function createChunkData(index: NALIndexInfo[], nalData: Buffer): Buffer {
+    let indexData = Buffer.from(JSON.stringify(index));
+    let indexLengthBytes = Buffer.alloc(4);
+    indexLengthBytes.writeUInt32BE(indexData.length, 0);
+    return Buffer.from([ indexLengthBytes, indexData, nalData ]);
 }
 
-function hasCompleteNal(nalFullBuffer: Buffer, pos: number): boolean {
-    let minBytes = 8 * 9;
-    if(nalFullBuffer.length < pos + minBytes) {
-        return false;
-    }
-
-    let spsLength = nalFullBuffer.readDoubleLE(pos + 5 * 8);
-    let ppsLength = nalFullBuffer.readDoubleLE(pos + 6 * 8);
-    let nalLength = nalFullBuffer.readDoubleLE(pos + 7 * 8);
-
-    return nalFullBuffer.length >= pos + minBytes + spsLength + ppsLength + nalLength;
-}
-function readNal(nalFullBuffer: Buffer, warnOnIncomplete = true, pos = 0): NALHolderMin & {len: number} {
-    let startPos = pos;
-    let rate = nalFullBuffer.readDoubleLE(pos); pos += 8;
-    if(rate === 0) {
-        throw new Error(`Read invalid NAL. Rate was 0, from buffer ${Array.from(nalFullBuffer)}`);
-    }
-
-    let time = nalFullBuffer.readDoubleLE(pos); pos += 8;
-    time = RoundRecordTime(time);
-    let type = nalFullBuffer.readDoubleLE(pos); pos += 8;
-    let width = nalFullBuffer.readDoubleLE(pos); pos += 8;
-    let height = nalFullBuffer.readDoubleLE(pos); pos += 8;
-
-    if(Math.round(width) !== width) {
-        throw new Error(`Width is not an integer. Data is likely corrupted. Start pos ${startPos}`);
-    }
-
-    let spsLength = nalFullBuffer.readDoubleLE(pos); pos += 8;
-    let ppsLength = nalFullBuffer.readDoubleLE(pos); pos += 8;
-    let nalLength = nalFullBuffer.readDoubleLE(pos); pos += 8;
-
-    let addSeqNum = nalFullBuffer.readDoubleLE(pos); pos += 8;
-
-    let sps = nalFullBuffer.slice(pos, pos + spsLength); pos += spsLength;
-    let pps = nalFullBuffer.slice(pos, pos + ppsLength); pos += ppsLength;
-
-    let nal = nalFullBuffer.slice(pos, pos + nalLength); pos += nalLength;
-
-    if(pos > nalFullBuffer.length) {
-        throw new Error(`Did not find enough bytes to read nal. This nal is corrupted. Required ${pos} bytes, but buffer had ${nalFullBuffer.length} bytes.`);
-    }
-    if(warnOnIncomplete && pos < nalFullBuffer.length) {
-        console.warn(`When reading nal from buffer we found nal, but we also found extra bytes. There should have been ${pos} bytes, but the buffer had ${nalFullBuffer.length} bytes.`);
-    }
+function parseChunkData(chunk: Buffer): {
+    nalsBulk: Buffer;
+    index: NALIndexInfo[];
+} {
+    let indexLength = chunk.readUInt32BE(0);
+    let indexData = chunk.slice(4, 4 + indexLength);
+    let NALData = chunk.slice(4 + indexLength);
+    let indexArr: NALIndexInfo[] = JSON.parse(indexData.toString());
 
     return {
-        rate,
-        time,
-        type,
-        width,
-        height,
-        sps,
-        pps,
-        nal,
-        addSeqNum,
-        len: pos - startPos
+        nalsBulk: NALData,
+        index: indexArr,
     };
-}
-
-export async function readNalLoop(nalFilePath: string, onNal: (nal: NALHolderMin & {len: number}) => Promise<void>|void): Promise<void> {
-    let remainingBuf: Buffer|undefined;
-    let nalStats = await statFilePromise(nalFilePath);
-    let fd = await openReadPromise(nalFilePath);
-    let absPos = 0;
-    try {
-        let nalPos = 0;
-        while(nalPos < nalStats.size) {
-            let curSize = Math.min(Math.pow(2, 30) - 1, nalStats.size - nalPos);
-            let buf = await readDescPromise(fd, nalPos, curSize);
-            if(remainingBuf) {
-                // Lol. So... if we don't copy remainingBuf, then Buffer.concat will reference the original buffer remainingBuf is from,
-                //  which will prevent it from being deallocated, which will prevent all memory from being deallocated, which
-                //  will cause us to run out of memory.
-                /*
-                let copyBuffer = Buffer.alloc(remainingBuf.length);
-                remainingBuf.copy(copyBuffer);
-                remainingBuf = copyBuffer;
-                */
-                buf = Buffer.concat([remainingBuf, buf]);
-                remainingBuf = undefined;
-            }
-            let pos = 0;
-            while(pos < buf.length && hasCompleteNal(buf, pos)) {
-                let nal = readNal(buf, false, pos);
-                await onNal(nal);
-                pos += nal.len;
-                absPos += nal.len;
-            }
-
-            if(pos < buf.length) {
-                remainingBuf = buf.slice(pos);
-                console.log(`Creating remainingBuf size ${remainingBuf.length}, pos ${absPos}`);
-            }
-
-            nalPos += curSize;
-        }
-
-        if(remainingBuf !== undefined) {
-            throw new Error(`Last nal is truncated or corrupted? For file: ${nalFilePath}, extra ${remainingBuf.length} bytes`);
-        }
-    } finally {
-        await closeDescPromise(fd);
-    }
-}
-
-// TODO: S3 storage
-//  REMEMBER! You can't split P frames from their I frames. We need to keep them together, or else it won't play!
-
-export class LocalNALRate implements NALStorage {
-    public static RatePath = path + "rates.txt";
-
-    private nalTimeChannel = new PChannelMultiListen<NALInfoTime>();
-
-    constructor(public Rate: number, private firstInit = false) {
-        if(firstInit) {
-            console.log(`Created LocalNALRate ${this.Rate}`);
-            appendFilePromise(LocalNALRate.RatePath, `${this.Rate}\n`);
-        } else {
-            console.log(`Loading LocalNALRate ${this.Rate}`);
-        }
-    }
-    
-    private nalFilePath = path + `${this.Rate}x.nal`;
-    private indexFilePath = path + `${this.Rate}x.index`;
-
-    private curByteLocation = 0;
-
-    // Sorted by time
-    private nalInfos: NALIndexInfo[] = [];
-    private nalInfoLookup: { [time: number]: NALIndexInfo } = {};
-
-    public async Init() {
-        await profile(`Init ${this.Rate}`, async () => {
-            if(!(await existsFilePromise(this.nalFilePath))) {
-                if(await existsFilePromise(this.indexFilePath)) {
-                    console.warn(`Found index file but no nal file. Index: ${this.indexFilePath}, nal: ${this.nalFilePath}`);
-                }
-                return;
-            }
-
-            let nalStats = await statFilePromise(this.nalFilePath);
-            this.curByteLocation = nalStats.size;
-
-            try {
-                await (async () => {
-                    let index: NALIndexInfo[] = [];
-                    let indexContents!: Buffer;
-
-                    //await profile(`read contents ${this.Rate}`, async () => {
-                        indexContents = await readFilePromise(this.indexFilePath);
-                    //});
-                    //await profile(`parse file ${this.Rate}`, async () => {
-                        let contents = indexContents.toString().replace(/\n/g, ",").slice(0, -1);
-                        index = JSON.parse("[" + contents + "]");
-                        for(let nal of index) {
-                            if(!("width" in nal)) {
-                                throw new Error(`Outdated NAL format`);
-                            }
-                            if(!("addSeqNum" in nal)) {
-                                throw new Error(`Outdated NAL format`);
-                            }
-                            nal.time = RoundRecordTime(nal.time);
-                        }
-                    //});
-                    // Reading the entire nal file defeats the purpose of even having the index file, so
-                    //  we'll do soft corruption detection.
-                    // So only check the last nal.
-                    
-                    let lastNal = index.last();
-                    let predictedEnd = lastNal.pos + lastNal.len;
-                    if(predictedEnd !== nalStats.size) {
-                        throw new Error(`Index and nal file don't specify the same size. The index thinks the nal file is ${predictedEnd} long, but the nal file is really ${nalStats.size}`);
-                    }
-
-                    let fd = await openReadPromise(this.nalFilePath);
-                    try {
-                        let nalBuffer = await readDescPromise(fd, lastNal.pos, lastNal.len);
-                        let nal = readNal(nalBuffer);
-                        
-                        if(lastNal.time !== nal.time) {
-                            throw new Error(`Last index nal and last real nal have different times. Index ${lastNal.time}, nal ${nal.time}`);
-                        }
-                        if(lastNal.type !== nal.type) {
-                            throw new Error(`Last index nal and last real nal have different types. Index ${lastNal.type}, nal ${nal.type}`);
-                        }
-                    } finally {
-                        await closeDescPromise(fd);
-                    }
-
-                    //await profile(`sort ${this.Rate}`, async () => {
-                        this.nalInfos = index;
-                        sort(this.nalInfos, x => x.time);
-                    //});
-                    this.nalInfoLookup = keyBy(this.nalInfos, x => String(x.time));
-                })();
-                //console.log(`Loaded LocalNALRate ${this.Rate}`);
-                return;
-            } catch(e) {
-                console.error(`Failed to read index file for rate ${this.Rate} even though the nal file exists. We are going to try to generate the index from the nal file. The Error was ${e.toString()}`);
-            }
-
-            // TODO: Eh... if the nal file is corrupted we should rename the nal file. And ignore the error. But... we don't want
-            //  too many nal files, so maybe always rename to the same file, so it overwrites it?
-
-            // TODO: Oh... we need to handle files > 2GB, which is almost certain to be the case here.
-
-            this.nalInfos = [];
-            let absPos = 0;
-            await readNalLoop(this.nalFilePath, nal => {
-                this.nalInfos.push({
-                    rate: this.Rate,
-                    pos: absPos,
-                    len: nal.len,
-                    time: nal.time,
-                    type: nal.type,
-                    width: nal.width,
-                    height: nal.height,
-                    addSeqNum: nal.addSeqNum,
-                });
-                absPos += nal.len;
-            });
-            
-            sort(this.nalInfos, x => x.time);
-            this.nalInfoLookup = keyBy(this.nalInfos, x => String(x.time));
-
-            try {
-                await unlinkFilePromise(this.indexFilePath);
-            } catch(e) { }
-
-            let i = 0;
-            let chunkSize = 10000;
-            while(i < this.nalInfos.length) {
-                let size = Math.min(chunkSize, this.nalInfos.length - i);
-                let nals = this.nalInfos.slice(i, i + size);
-
-                let nalInfosText = nals.map(x => JSON.stringify(x) + "\n").join("");
-                await appendFilePromise(this.indexFilePath, nalInfosText);
-                console.log(`Wrote part at ${i}, length ${size}`);
-
-                i += size;
-            }
-            console.log(`Rewrote index file ${this.Rate}`);
-        });
-    }
-
-    private writeLoop = TransformChannel<{nalFullBuffer: Buffer, indexObj: NALIndexInfo}, void>(async input => {
-        await Promise.all([
-            appendFilePromise(this.nalFilePath, input.nalFullBuffer),
-            appendFilePromise(this.indexFilePath, JSON.stringify(input.indexObj) + "\n")
-        ]);
-    });
-    public async AddNAL(nalInfo: NALHolderMin): Promise<void> {
-
-        // We need to store all of NALMinInfo on disk here, because the index file is optional
-        let nalFullBuffer = writeNal(nalInfo);
-
-        let indexObj: NALIndexInfo = {
-            rate: nalInfo.rate,
-            pos: this.curByteLocation,
-            len: nalFullBuffer.length,
-            time: nalInfo.time,
-            type: nalInfo.type,
-            width: nalInfo.width,
-            height: nalInfo.height,
-            addSeqNum: nalInfo.addSeqNum
-        };
-        (indexObj as any).toString = function() {
-            return JSON.stringify(this);
-        };
-        // TODO: We need to store some nal buffers in memory, because right now we add stuff to index before
-        //  we confirm the disk write. And I don't want to block on the disk write, so...
-        //console.log(`Adding ${indexObj.time} to ${this.Rate}`);
-        insertIntoListMap(this.nalInfos, indexObj, x => x.time);
-        this.nalInfoLookup[indexObj.time] = indexObj;
-
-        this.curByteLocation += nalFullBuffer.length;
-
-        //this.writeLoop({ nalFullBuffer, indexObj });
-        await appendFilePromise(this.nalFilePath, nalFullBuffer),
-        await appendFilePromise(this.indexFilePath, JSON.stringify(indexObj) + "\n")
-
-        this.nalTimeChannel.SendValue({
-            time: nalInfo.time,
-            type: nalInfo.type,
-            rate: nalInfo.rate,
-            width: nalInfo.width,
-            height: nalInfo.height,
-            addSeqNum: nalInfo.addSeqNum,
-        });
-    }
-
-    public GetNALTimes(): NALIndexInfo[] {
-        return this.nalInfos;
-    }
-    public async ReadNALs(times: number[]): Promise<NALHolderMin[]> {
-        // On the raspberry pi 3 it looks like read speed will be around 5MB/s?, so this will be a bottleneck,
-        //  but we should have sufficient read speed to handle up to 83KB/frame at 60fps, which SHOULD be enough.
-        //  https://www.jeffgeerling.com/blog/2018/raspberry-pi-microsd-card-performance-comparison-2018
-
-        // TODO: Combine continugous writes, which should make this faster?
-
-        let nals: NALHolderMin[];
-
-        let fd = await openReadPromise(this.nalFilePath);
-        try {
-            nals = await Promise.all(times.map(async x => {
-                let obj = this.nalInfoLookup[x];
-                let data = await readDescPromise(fd, obj.pos, obj.len);
-                let nal = readNal(data);
-                return nal;
-            }));
-        } finally {
-            await closeDescPromise(fd);
-        }
-
-        return nals;
-    }
-
-    public SubscribeToNALTimes(callback: (nalTimes: NALInfoTime) => void): () => void {
-        return this.nalTimeChannel.Subscribe(callback);
-    }
 }

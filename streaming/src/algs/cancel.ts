@@ -31,7 +31,9 @@ export function createCancelPending<F extends (...args: any[]) => Promise<any>=a
     return Object.assign(
         callId,
         {
-            isCancelError: (error: any) => error === cancelError
+            isCancelError: (error: any) => error === cancelError,
+            isInCall: () => inCall,
+            cancel
         }
     );
 
@@ -76,6 +78,9 @@ export function createCancelPending<F extends (...args: any[]) => Promise<any>=a
         nextCallToken = ourCallToken;
         curCallToken = ourCallToken;
         ourCallCancel = currentCallCancel = new Deferred<void>();
+        // Ignore exceptions. We only throw cancellation exceptions, and if they lose the Promise.race they are printed in the console,
+        //  unless we catch them here.
+        currentCallCancel.Promise().catch(() => {});
 
         //console.log("starting", { ourFncId, ourCallToken, curCallToken });
 

@@ -29,12 +29,20 @@ export function findAtOrAfterIndex<T>(list: T[], value: number, map: (t: T) => n
     if(index < 0) {
         index = ~index;
     }
+    // Eh... idk
+    if(index < 0) {
+        index = 0;
+    }
     return index;
 }
 export function findAtOrBeforeIndex<T>(list: T[], value: number, map: (t: T) => number): number {
     let index = binarySearchMap(list, value, map);
     if(index < 0) {
         index = ~index - 1;
+    }
+    // Eh... idk
+    if(index < 0) {
+        index = 0;
     }
     return index;
 }
@@ -150,6 +158,7 @@ export function removeFromList<T>(list: T[], value: T, comparer: (lhs: T, rhs: T
     }
 }
 
-export function sort<T>(arr: T[], sortKey: (obj: T) => number) {
+export function sort<T>(arr: T[], sortKey: (obj: T) => number): T[] {
     arr.sort((a, b) => sortKey(a) - sortKey(b));
+    return arr;
 }

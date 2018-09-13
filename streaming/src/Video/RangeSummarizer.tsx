@@ -89,7 +89,7 @@ interface IProps {
     // TODO: Allow ranges to be mutated, by changing endTimes of the last range,
     //  OR by adding new ranges. Removing ranges will never be allowed.
     // ranges are sorted be time
-    receivedRanges: NALRange[]
+    receivedRanges: NALRange[];
     serverRanges: NALRange[];
     receivedFrames: NALInfoTime[];
 
@@ -101,6 +101,9 @@ interface IProps {
     loadedVideos: MP4Video[];
 
     onTimeClick: (time: number) => void;
+    getServerRanges: (rate: number) => Promise<NALRange[]>;
+
+    isLiveStreaming: boolean;
 }
 
 interface Viewport {
@@ -151,8 +154,11 @@ export class RangeSummarizer extends React.Component<IProps, IState> {
                 let { targetPlayTime } = nextProps;
                 let { viewport } = nextState;
                 let size = viewport.endTime - viewport.startTime;
-                viewport.startTime = targetPlayTime - size / 2;
-                viewport.endTime = targetPlayTime + size / 2;
+
+                let center = nextProps.isLiveStreaming ? 0.8 : 0.5;
+
+                viewport.startTime = targetPlayTime - size * center;
+                viewport.endTime = targetPlayTime + size * (1 - center);
 
                 this.setState({ viewport });
             }
@@ -582,12 +588,13 @@ export class RangeSummarizer extends React.Component<IProps, IState> {
                 </div>
                 */}
 
-                {/*<PreviewVideo
+                {
+                <PreviewVideo
                     viewport={cloneDeep(viewport)}
-                    viewportFPSEstimate={viewportFPSEstimate}
-                    videoDimensionsEstimate={videoDimensionsEstimate}
                     setViewport={viewport => this.setState({viewport})}
-                />*/}
+                    getServerRanges={this.props.getServerRanges}
+                />
+                }
 
                 {this.renderRuler()}
                 {/*this.renderExcludedRanges(beforeRanges, -1)*/}

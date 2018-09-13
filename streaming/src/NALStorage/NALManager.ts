@@ -5,7 +5,7 @@ import { insertIntoListMapped, sort, binarySearchMapped, binarySearchMap, insert
 import { appendFilePromise, readFilePromise, openReadPromise, readDescPromise } from "../util/fs";
 import { keyBy, mapObjectValues } from "../util/misc";
 import { Downsampler, DownsampledInstance } from "./Downsampler";
-import { LocalNALRate, NALStorage, readNalLoop } from "./LocalNALRate";
+import { LocalNALRate } from "./LocalNALRate";
 import { MuxVideo } from "mp4-typescript";
 import { group, min } from "../util/math";
 import { RealTimeToVideoTime, GetTimescaleSeconds, GetMinGapSize, RealDurationToVideoDuration } from "./TimeMap";
@@ -14,68 +14,23 @@ import { reduceRanges } from "./rangeMapReduce";
 import { PChannelMultiListen } from "../receiver/PChannelMultiListen";
 
 
-function bufferFromString(text: string): Buffer {
-    let buf = Buffer.alloc(text.length);
-    for(let i = 0; i < text.length; i++) {
-        let char = text.charCodeAt(i);
-        buf[i] = char;
-    }
-    return buf;
-}
-
 export async function createNALManager(): Promise<NALManager> {
     let manager = new NALManager();
     await manager.Init();
     return manager;
 }
 
-class NALRangeSummary {
-    private ranges: NALRange[] = [];
-    private lastTime?: number;
-
-    /** Changed changes should be emit into this */
-    private rangesListener = new PChannelMultiListen<NALRange[]>();
-
-    constructor(private rate: number) { }
-
-    public AddLiveNAL(time: number): void {
-        let { lastTime } = this;
-        let diff = lastTime ? time - lastTime : 0;
-        if(!lastTime || diff >= GetMinGapSize(this.rate) || diff <= 0) {
-            lastTime = time;
-        }
-        let newRange = { firstTime: lastTime, lastTime: time, frameCount: 1 };
-        //console.log("rate", this.rate, "newRange", newRange, "ranges", this.ranges);
-        this.rangesListener.SendValue(reduceRanges([newRange], this.ranges, true));
-        this.lastTime = time;
-    }
-    public AddRange(range: NALRange): void {
-        this.rangesListener.SendValue(reduceRanges([range], this.ranges, true));
-        this.lastTime = Math.max(this.lastTime || 0, range.lastTime);
-    }
-    
-    public GetRanges(): NALRange[] {
-        return this.ranges;
-    }
-    public SubscribeToRanges(
-        rangesChanged: (changedRanges: NALRange[]) => void,
-        rangesDeleted: (deleteTime: number) => void,
-    ) {
-        return this.rangesListener.Subscribe(rangesChanged);
-    }
-}
 
 export class NALManager {
     private localStorages: {
-        [rate: number]: NALStorage
-    } = {};
-    private summaries: {
-        [rate: number]: NALRangeSummary
+        [rate: number]: LocalNALRate
     } = {};
 
-    private getSummary(rate: number) {
-        this.summaries[rate] = this.summaries[rate] || new NALRangeSummary(rate);
-        return this.summaries[rate];
+    private getStorage(rate: number) {
+        if(!this.localStorages[rate]) {
+            this.localStorages[rate] = new LocalNALRate(rate, true);
+        }
+        return this.localStorages[rate];
     }
 
 
@@ -90,53 +45,18 @@ export class NALManager {
         }
         let rates = ratesBuffer.toString().split("\n").slice(0, -1).map(x => +x);
         sort(rates, x => x);
-        rates.reverse();
-
-        let localRates: { [rate: number]: LocalNALRate } = {};
         for(let rate of rates) {
-            let local = new LocalNALRate(rate);
-            localRates[rate] = local;
-            local.SubscribeToNALTimes(time => {
-                this.onNewTime(rate, time);
-            });
-            this.localStorages[rate] = local;
+            let local = this.getStorage(rate);
             await local.Init();
-        }
-
-        rates.reverse();
-
-
-        for(let rate of rates) {
-            let summaryObj = this.getSummary(rate);
-            let times = localRates[rate].GetNALTimes();
-            let ranges = group(times.map(x => x.time), GetMinGapSize(rate));
-            
-            for(let range of ranges) {
-                summaryObj.AddRange({ firstTime: range[0], lastTime: range.last(), frameCount: range.length });
-            }
         }
     }
 
+    private onNewNal: Deferred<void> = new Deferred();
     public async AddNAL(info: NALHolderMin): Promise<void> {
-        let rate = info.rate;
-        if(!this.localStorages[rate]) {
-            this.localStorages[rate] = new LocalNALRate(rate, true);
-            this.localStorages[rate].SubscribeToNALTimes(time => {
-                this.onNewTime(rate, time);
-                try {
-                    
-                } catch(e) {
-                    if(!String(e).includes("Overlapping ranges while counting frames")) {
-                        throw e;
-                    } else {
-                        console.error(e);
-                    }
-                }
-            });
-        }
-        let local = this.localStorages[rate];
-
+        let local = this.getStorage(info.rate);
         await local.AddNAL(info);
+        this.onNewNal.Resolve();
+        this.onNewNal = new Deferred();
     }
 
     public GetRates(): number[] {
@@ -148,22 +68,24 @@ export class NALManager {
     public async GetNextAddSeqNum(): Promise<number> {
         let rate = min(Object.keys(this.localStorages).map(x => +x));
         if(rate === undefined) {
+            console.warn(`GetNextAddSeqNum called with no storages loaded. Returning 0 for now, but we should be blocking in this case.`);
             return 0;
         }
         let nalTimes = this.localStorages[rate].GetNALTimes();
         if(nalTimes.length === 0) {
+            console.warn(`GetNextAddSeqNum called with no rate 1 storage not loaded. Returning 0 for now, but we should be blocking in this case.`);
             return 0;
         }
-        return nalTimes[0].addSeqNum + 1;
+        return nalTimes.last().addSeqNum + 1;
     }
 
     public GetNALRanges(rate: number): NALRange[] {
-        return this.getSummary(rate).GetRanges();
+        return this.getStorage(rate).GetRanges();
     }
 
     // - When callback throws, we close the stream.
     public SubscribeToNALRanges(rate: number, callback: (ranges: NALRange[]) => void): () => void {
-        return this.getSummary(rate).SubscribeToRanges(callback, () => {
+        return this.getStorage(rate).SubscribeToRanges(callback, () => {
             throw new Error(`Not implemented`);
         });
     }
@@ -217,20 +139,22 @@ export class NALManager {
             frameInfos
         };
     }
-    
 
-    private onNewTime(rate: number, time: NALInfoTime) {
-        this.getSummary(rate).AddLiveNAL(time.time);
-    }
+
+    todonext
+    // Convert this to a naked function that takes a NALIndexInfo[], a function to get the underlying NALMinInfo, and
+    //  has an optional newNal channel that sends void, but triggers when NALIndexInfo has more data?
+    // BUT, there is definitely a bug in the live loop already. Maybe the channel should send NALIndexInfo?
+    //  Or we should at least do something to fix the bug.
 
     public async GetVideo(
         startTime: number,
         minFrames: number,
-        /** If live then we have no end (except determined by minFrames), and will block until we exceed the minFrames limit. */
         nextReceivedFrameTime: number|undefined|"live",
         startTimeExclusive: boolean,
         rate: number,
         onlyTimes: boolean|undefined,
+        forPreview: boolean|undefined,
         cancelToken: Deferred<void>,
     ): Promise<MP4Video | "VIDEO_EXCEEDS_LIVE_VIDEO" | "VIDEO_EXCEEDS_NEXT_TIME" | "CANCELLED"> {
         let sendCount = 0;
@@ -244,8 +168,12 @@ export class NALManager {
 
 
         let nalStorage = this.localStorages[rate];
+        if(!nalStorage) {
+            throw new Error(`No rate ${rate}, only have ${Object.keys(this.localStorages)}`);
+        }
 
-        let nalInfos = nalStorage.GetNALTimes();
+        let nalInfos: NALIndexInfo[] = nalStorage.GetNALTimes();
+
         if(nalInfos.length === 0) {
             console.log(`No video for rate ${rate}`);
             return "VIDEO_EXCEEDS_LIVE_VIDEO";
@@ -273,8 +201,13 @@ export class NALManager {
             
             // Go to the last key frame
             if(!startTimeExclusive) {
+                let startTimeIndex = index;
                 while(index >= 0 && nalInfos[index].type !== NALType.NALType_keyframe) {
                     index--;
+                }
+                if(index >= 0 && nalInfos[index].type === NALType.NALType_keyframe) {
+                    // Get more frames if we had to move back to find a keyframe.
+                    minFrames += startTimeIndex - index;
                 }
             }
             
@@ -295,30 +228,66 @@ export class NALManager {
             } if(nextNal.type !== NALType.NALType_keyframe) {
                 console.error(`Nal at next time is not a keyframe. Time: ${nextReceivedFrameTime}. That shouldn't be possible... So we are ignoring it.`);
             } else {
-                if(nextKeyFrameIndex > nextReceivedFrameTime) {
-                    nextKeyFrameIndex = nextReceivedFrameTime;
+                if(nextKeyFrameIndex > nextNalIndex) {
+                    nextKeyFrameIndex = nextNalIndex;
                 }
             }
         }
 
         if(firstNalIndex >= nextKeyFrameIndex) {
-            return "VIDEO_EXCEEDS_NEXT_TIME";
+            return "VIDEO_EXCEEDS_LIVE_VIDEO";
         }
 
-        if(nextKeyFrameIndex >= nalInfos.length) {
+        /*
+        if(forPreview && nextKeyFrameIndex >= nalInfos.length) {
+            nextKeyFrameIndex = firstNalIndex + 1;
+            while(nextKeyFrameIndex < nalInfos.length) {
+                if(nalInfos[nextKeyFrameIndex].type === NALType.NALType_keyframe) break;
+                nextKeyFrameIndex++;
+            }
+        }
+        */
+
+        if(!forPreview && nextKeyFrameIndex >= nalInfos.length) {
             if(!live) {
                 return "VIDEO_EXCEEDS_NEXT_TIME";
             } else {
-                //todonext
                 // Wait for live data
                 //  If firstNalIndex >= nalInfos.length we need to wait until the nalInfos is a keyframe, then set firstNalIndex to that
                 //  Wait until we receive minFrames of data after firstNalIndex, ending just before a keyframe.
+                console.log("Starting live loop");
+                while(true) {
+                    await this.onNewNal.Promise();
+                    if(firstNalIndex >= nalInfos.length) {
+                        firstNalIndex = nalInfos.length - 1;
+                    }
+                    let firstNal = nalInfos[firstNalIndex];
+                    if(firstNal.type !== NALType.NALType_keyframe) {
+                        console.log(`Waiting for firstNal index: ${firstNalIndex}, nals ${nalInfos.length}`);
+                        continue;
+                    }
 
-                // We probably just want a waitUntilNextFrame thing?
+                    nextKeyFrameIndex = firstNalIndex + minFrames;
+                    let nextNal = nalInfos[nextKeyFrameIndex];
+                    if(!nextNal) {
+                        continue;
+                    }
+                    // This is a bit unfortunate, as it causes AT LEAST 1 keyframe delay, even if we have an i frame interval of 1.
+                    //  It also means if the camera disconnects we won't write the last few frames out until the camera reconnects.
+                    while(nextNal && nextNal.type !== NALType.NALType_keyframe) {
+                        nextKeyFrameIndex++;
+                        nextNal = nalInfos[nextKeyFrameIndex];
+                    }
+                    if(nextNal) {
+                        console.log(`Waiting for ${nextKeyFrameIndex} to become valid. Have up to ${nalInfos.length}`);
+                        break;
+                    }
+                }
+                
             }
         }
         let lastNalIndex = nextKeyFrameIndex - 1;
-        let nextKeyFrameTime = nalInfos[nextKeyFrameIndex].time;
+        let nextKeyFrameTime = nextKeyFrameIndex < nalInfos.length ? nalInfos[nextKeyFrameIndex].time : undefined;
 
         /*
         if(nextReceivedFrameTime && nalInfos[firstNalIndex].time >= nextReceivedFrameTime) {
@@ -327,7 +296,7 @@ export class NALManager {
         }
         */
         
-        let nalInfosChoosen = nalInfos.slice(firstNalIndex, lastNalIndex);
+        let nalInfosChoosen = nalInfos.slice(firstNalIndex, lastNalIndex + 1);
         let times = nalInfosChoosen.map(x => x.time);
         
         if(times.length === 0) {
@@ -382,7 +351,9 @@ export class NALManager {
         profileTime = clock() - profileTime;
         let efficiencyFrac = profileTime / RealDurationToVideoDuration(sendVideoTime, rate);
         if(!onlyTimes) {
-            console.log(`GetVideo${startTimeExclusive ? " (exclusive)" : ""} (index ${firstNalIndex} (${nalInfos[firstNalIndex].type}) to ${lastNalIndex} (exclusive) (${nalInfos[lastNalIndex - 1].type})) took ${profileTime.toFixed(2)}ms for ${sendCount} videos. ${(profileTime / sendCount).toFixed(1)}ms/video. Encoding time ${(efficiencyFrac * 100).toFixed(1)}%.`);
+            console.log(`GetVideo rate ${rate}${startTimeExclusive ? " (exclusive)" : ""} (index ${firstNalIndex} (${nalInfos[firstNalIndex].type}) to ${lastNalIndex} (${lastNalIndex >= nalInfos.length ? "live" : nalInfos[lastNalIndex].type})) took ${profileTime.toFixed(2)}ms for ${sendCount} videos. ${(profileTime / sendCount).toFixed(1)}ms/video. Encoding time ${(efficiencyFrac * 100).toFixed(1)}%.`);
+        } else {
+            console.log(`(onlyTimes) GetVideo rate ${rate}${startTimeExclusive ? " (exclusive)" : ""} (index ${firstNalIndex} (${nalInfos[firstNalIndex].type}) to ${lastNalIndex} (${lastNalIndex >= nalInfos.length ? "live" : nalInfos[lastNalIndex].type})) took ${profileTime.toFixed(2)}ms for ${sendCount} videos. ${(profileTime / sendCount).toFixed(1)}ms/video. Encoding time ${(efficiencyFrac * 100).toFixed(1)}%.`);
         }
 
         return video;

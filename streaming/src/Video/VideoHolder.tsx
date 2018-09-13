@@ -13,9 +13,13 @@ interface IState {
 
 export interface IVideoHolder extends React.Component<IProps, IState> {
     AddVideo(mp4Video: MP4Video): Promise<void>;
+    RemoveVideo(mp4Video: MP4Video): Promise<void>;
     /** Time in ms, like all times. */
     SeekToTime(time: number): void;
     GetCurrentTime(): number;
+    Play(): Promise<void>;
+    Pause(): void;
+    IsPlaying(): boolean;
 }
 
 export class VideoHolder extends React.Component<IProps, IState> implements IVideoHolder {
@@ -37,7 +41,10 @@ export class VideoHolder extends React.Component<IProps, IState> implements IVid
     }
 
     // TODO: If we ever call remove, we need to combine it in this loop, as both set updating to true.
-    public AddVideo = TransformChannel<MP4Video, void>(async (input) => {
+    private vidBufferLoop = TransformChannel<{
+        type: "add"|"remove";
+        video: MP4Video;
+    }, void>(async (input) => {
         if(!this.videoElement || !this.vidBuffer || !this.updateEndQueue) {
             console.log(`Ignoring video because vidBuffer hasn't been initialized yet.`);
             return;
@@ -45,10 +52,33 @@ export class VideoHolder extends React.Component<IProps, IState> implements IVid
         if(this.vidBuffer.updating) {
             throw new Error(`appendQueue is broken, tried to add while vidBuffer is updating`);
         }
-        this.vidBuffer.appendBuffer(input.mp4Video);
+        let { video } = input;
+        if(input.type === "add") {
+            this.vidBuffer.appendBuffer(video.mp4Video);
+        } else if(input.type === "remove") {
+            // Eh... rounding is really going to be a problem here. Rounding will mean we may remove extra frames,
+            //  or not remove enough.
+            // TODO: We can't add and remove SourceBuffers (at least, the max limit of SourceBuffers is so low,
+            //  as you are not expected to have multiple), so we need to occasionally create a whole new MediaSource
+            //  to wipe out any unremoved frames (unless remove removes entire buffers? then we should move the times
+            //  in a bit to make sure we don't remove any extra buffers).
+            this.vidBuffer.remove(
+                RealTimeToVideoTime(video.frameTimes[0].time, video.rate),
+                RealTimeToVideoTime(video.frameTimes.last().time, video.rate)
+            );
+        } else {
+            throw new Error(`Invalid input type ${input.type}`);
+        }
 
         await this.updateEndQueue.GetPromise();
     });
+
+    public AddVideo(mp4Video: MP4Video): Promise<void> {
+        return this.vidBufferLoop({ type: "add", video: mp4Video });
+    }
+    public RemoveVideo(mp4Video: MP4Video): Promise<void> {
+        return this.vidBufferLoop({ type: "remove", video: mp4Video });
+    }
 
     public SeekToTime(time: number) {
         console.log(`Seek ${time}`);
@@ -62,7 +92,25 @@ export class VideoHolder extends React.Component<IProps, IState> implements IVid
         return this.videoElement && VideoTimeToRealTime(this.videoElement.currentTime * 1000, this.props.rate) || 0;
     }
 
-    public element: HTMLVideoElement|null|undefined;
+    public async Play(): Promise<void> {
+        if(this.element) {
+            await this.element.play();
+        }
+    }
+    public Pause(): void {
+        if(this.element) {
+            this.element.pause();
+        }
+    }
+
+    public IsPlaying(): boolean {
+        if(this.element) {
+            return !this.element.paused;
+        }
+        return false;
+    }
+
+    private element: HTMLVideoElement|null|undefined;
     private initVideo(vid: HTMLVideoElement|null) {
         this.element = vid;
         if(!vid) return;
@@ -71,7 +119,7 @@ export class VideoHolder extends React.Component<IProps, IState> implements IVid
         vid.playbackRate = this.props.playRate;
 
         console.log("New video element");
-        this.videoElement = vid;      
+        this.videoElement = vid;
 
         var push = new MediaSource();
         vid.src = URL.createObjectURL(push);
@@ -85,7 +133,7 @@ export class VideoHolder extends React.Component<IProps, IState> implements IVid
                     buf.removeEventListener("updatend", callback);
                     return;
                 }
-                queue.SendValue(undefined);
+                queue.SendValue();
             };
             this.vidBuffer.addEventListener("updateend", callback);
         });

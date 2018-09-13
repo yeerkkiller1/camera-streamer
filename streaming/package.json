@@ -19,7 +19,7 @@
     "mp4-typescript": "0.3.6",
     "node-localstorage": "^1.3.1",
     "p-info": "^0.2.1",
-    "pchannel": "^0.4.5",
+    "pchannel": "0.4.12",
     "prop-types": "^15.6.0",
     "react": "^16.2.0",
     "react-dom": "^16.2.0",
@@ -38,7 +38,7 @@
     "ws-class": "^0.5.9"
   },
   "resolutions": {
-    "ws-class/pchannel": "0.4.5"
+    "ws-class/pchannel": "0.4.6"
   },
   "optionalDependencies": {
     "v4l2camera": "git+https://github.com/yeerkkiller1/node-v4l2camera.git"

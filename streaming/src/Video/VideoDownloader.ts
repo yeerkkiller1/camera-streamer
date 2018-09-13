@@ -1,10 +1,11 @@
 import { createCancelPending } from "../algs/cancel";
 import { ConnectToServer } from "ws-class";
-import { findAtOrBefore, findAfter, insertIntoList, insertIntoListMap, insertIntoListMapped } from "../util/algorithms";
+import { findAtOrBefore, findAfter, insertIntoList, insertIntoListMap, insertIntoListMapped, removeFromListMap, findAtOrBeforeIndex, findAt, findAtIndex } from "../util/algorithms";
 import { UnionUndefined } from "../util/misc";
 import { GetVideoFPSEstimate, GetMinGapSize, GetRangeFPSEstimate } from "../NALStorage/TimeMap";
-import { reduceRanges } from "../NALStorage/rangeMapReduce";
+import { reduceRanges, removeRange } from "../NALStorage/rangeMapReduce";
 import { Deferred } from "pchannel";
+import { sum } from "../util/math";
 
 export class VideoDownloader {
     private data: {
@@ -12,14 +13,27 @@ export class VideoDownloader {
             ReceivedRanges: NALRange[];
             Videos: MP4Video[];
             VideoFrames: NALInfoTime[];
+
+            addTimes: { addTime: number; video: MP4Video; range: NALRange; }[];
+            addTimesSortedByFirstTime: { addTime: number; firstTime: number; }[];
+            // Only includes videos that have fixed times
+            fixedReceivedRanges: NALRange[];
         }
     } = {};
+    
+
 
     constructor(
         private onVideoReceived: (video: MP4Video) => void,
+        private onVideoRemoved: (video: MP4Video) => void,
         private onReceivedChanged: (rate: number, receivedRanges: NALRange[]) => void,
-        private onlyTimes?: boolean
-    ) { }
+        private onlyTimes?: boolean,
+        private forPreview?: boolean,
+        // TODO: If this isn't enough to fill up the play buffer, the play buffer will basically break.
+        private videoStorageSize = 1024 * 1024 * 256
+    ) {
+        (window as any)["videos"] = this.GetInfo(1).Videos;
+    }
 
     private server = ConnectToServer<IHost>({
         port: 7060,
@@ -33,45 +47,52 @@ export class VideoDownloader {
     public DownloadVideo = createCancelPending(
         () => this.server.CancelVideo(),
         (doAsyncCall, isCancelError) =>
-    async (rate: number, startTime: number, minFrames: number): Promise<{video?: MP4Video; nextTime: number|undefined}|"FINISHED"> => {
+    async (rate: number, startTime: number, minFrames: number, live = false): Promise<{video?: MP4Video; nextTime: number|undefined}|"FINISHED"> => {
 
         let nextReceiverRange: NALRange|undefined;
         let startTimeExclusive = false;
 
         let summaryObj = this.GetInfo(rate);
         {
-            let range = findAtOrBefore(summaryObj.ReceivedRanges, startTime, x => x.firstTime);
-            if(range && range.lastTime >= startTime) {
-                let fpsEstimate = GetRangeFPSEstimate(range);
-                if((range.lastTime - startTime) / fpsEstimate >= minFrames) {
-                    return { nextTime: range.lastTime };
+            // If we have a video at startTime return it, and it's end as the nextTime.
+            let videoIndex = findAtOrBeforeIndex(summaryObj.Videos, startTime, x => x.frameTimes[0].time);
+            let video = summaryObj.Videos[videoIndex];
+            // Only return it if it covers the requested time, and never return it if it has no nextKeyFrameTime (and so
+            //  us unfinished). This forces preview logic to keep requesting data, instead of getting stuck of incomplete data.
+            if(video && video.frameTimes.last().time >= startTime && video.nextKeyFrameTime) {
+                let nextTime: number|undefined;
+                let nextVideo = summaryObj.Videos[videoIndex + 1];
+                if(nextVideo) {
+                    nextTime = nextVideo.frameTimes[0].time;
+                } else {
+                    nextTime = video.nextKeyFrameTime;
                 }
-                startTime = range.lastTime;
+
+                return { video: video, nextTime };
             }
         }
         {
-            let range = findAfter(summaryObj.ReceivedRanges, startTime, x => x.firstTime);
+            let range = findAfter(summaryObj.fixedReceivedRanges, startTime, x => x.firstTime);
             if(range) {
                 nextReceiverRange = range;
             }
         }
         {
-            let range = findAtOrBefore(summaryObj.ReceivedRanges, startTime, x => x.firstTime);
+            let range = findAtOrBefore(summaryObj.fixedReceivedRanges, startTime, x => x.firstTime);
             if(range && range.lastTime > startTime) {
                 startTimeExclusive = true;
             }
         }
 
-        // We always have to make a request, as we don't know what rate we will end up using
-        console.log(`Requesting video starting at ${startTime}`);
 
         let video = await doAsyncCall(this.server.GetVideo,
             startTime,
             minFrames,
-            nextReceiverRange && nextReceiverRange.firstTime,
+            live ? "live" : nextReceiverRange && nextReceiverRange.firstTime,
             rate,
             startTimeExclusive,
-            this.onlyTimes
+            this.onlyTimes,
+            this.forPreview
         );
 
         if(video === "CANCELLED" || video === "VIDEO_EXCEEDS_LIVE_VIDEO") {
@@ -82,18 +103,8 @@ export class VideoDownloader {
         let nextTime: number|undefined;
         if(video === "VIDEO_EXCEEDS_NEXT_TIME") {
             if(!nextReceiverRange) {
-                throw new Error(`Impossible, the nextRangeLookup must have mutated, as the server says it used the next time and found there was no video before that time.`);
+                //throw new Error(`Impossible, the server has no data after time. startTime: ${startTime}`);
             }
-
-            /*
-            reduceRanges(
-                [{ firstTime: startTime, lastTime: nextReceiverRange.firstTime, frameCount: nextReceiverRange.frameCount }],
-                summaryObj.ReceivedRanges,
-                false,
-                GetMinGapSize(rate)
-            );
-            */
-            this.onReceivedChanged(rate, summaryObj.ReceivedRanges);
 
             return "FINISHED";
         }
@@ -103,17 +114,44 @@ export class VideoDownloader {
         }
 
         let times = video.frameTimes;
+        let range: NALRange = { firstTime: times[0].time, lastTime: nextTime || times.last().time, frameCount: 0 };
+
+        if(this.forPreview) {
+            let previousIndex = findAtIndex(summaryObj.addTimesSortedByFirstTime, range.firstTime, x => x.firstTime);
+            if(previousIndex >= 0) {
+                let addTime = summaryObj.addTimesSortedByFirstTime[previousIndex].addTime;
+                this.removeVideo(rate, addTime);
+            }
+        }
+
         reduceRanges(
-            [{ firstTime: times[0].time, lastTime: nextTime || times.last().time, frameCount: times.length }],
+            [range],
             summaryObj.ReceivedRanges,
             false,
             GetMinGapSize(rate)
         );
+        if(video.nextKeyFrameTime) {
+            reduceRanges(
+                [range],
+                summaryObj.fixedReceivedRanges,
+                false,
+                GetMinGapSize(rate)
+            );
+        }
 
         for(let frame of video.frameTimes) {
             insertIntoListMap(summaryObj.VideoFrames, frame, x => x.time, "warn");
         }
         insertIntoListMap(summaryObj.Videos, video, x => x.frameTimes[0].time, "warn");
+        this.addVideo(rate, Date.now(), video, range);
+
+        // If the video storage exceeds a certain amount, start evicting old videos.
+        let curBytes = sum(summaryObj.Videos.map(x => x.mp4Video.length));
+
+        while(curBytes > this.videoStorageSize && summaryObj.addTimes.length > 0) {
+            this.removeVideo(rate, summaryObj.addTimes[0].addTime);
+            curBytes = sum(summaryObj.Videos.map(x => x.mp4Video.length));
+        }
 
         this.onVideoReceived(video);
         this.onReceivedChanged(rate, summaryObj.ReceivedRanges);
@@ -121,10 +159,45 @@ export class VideoDownloader {
         return {video, nextTime};
     });
 
+    private addVideo(rate: number, addTime: number, video: MP4Video, range: NALRange): void {
+        let summaryObj = this.GetInfo(rate);
+
+        while(findAt(summaryObj.addTimes, addTime, x => x.addTime)) {
+            addTime += 0.01;
+        }
+        insertIntoListMap(summaryObj.addTimes, { addTime, video, range }, x => x.addTime);
+        insertIntoListMap(summaryObj.addTimesSortedByFirstTime, { addTime, firstTime: video.frameTimes[0].time }, x => x.firstTime);
+    }
+
+    private removeVideo(rate: number, addTime: number) {
+        let summaryObj = this.GetInfo(rate);
+        let videoAddObj = findAt(summaryObj.addTimes, addTime, x => x.addTime);
+        if(!videoAddObj) {
+            throw new Error(`No video added at time ${addTime}`);
+        }
+
+        removeFromListMap(summaryObj.addTimes, addTime, x => x.addTime);
+        removeFromListMap(summaryObj.addTimesSortedByFirstTime, videoAddObj.video.frameTimes[0].time, x => x.firstTime);
+
+        removeFromListMap(summaryObj.Videos, videoAddObj.video.frameTimes[0].time, x => x.frameTimes[0].time);
+
+        for(let frameTime of videoAddObj.video.frameTimes) {
+            removeFromListMap(summaryObj.VideoFrames, frameTime.time, x => x.time);
+        }
+
+        removeRange(videoAddObj.range, summaryObj.ReceivedRanges, false);
+
+        // TODO: Warn if removing a permanent video, this should really only be for temporary videos (with undefined nextTimes).
+        // fixed video should never need to be removed
+        //removeRange(videoAddObj.range, summaryObj.fixedReceivedRanges, false);
+
+        this.onVideoRemoved(videoAddObj.video);
+    }
+
     public GetInfo(rate: number) {
         let summaryObj = this.data[rate];
         if(!summaryObj) {
-            summaryObj = this.data[rate] = { ReceivedRanges: [], Videos: [], VideoFrames: [] };
+            summaryObj = this.data[rate] = { ReceivedRanges: [], fixedReceivedRanges: [], Videos: [], VideoFrames: [], addTimes: [], addTimesSortedByFirstTime: [] };
         }
         return summaryObj;
     }

@@ -12,44 +12,19 @@ import { binarySearchMapped, binarySearchMap, insertIntoListMap, findAtOrBefore,
 import { formatDuration } from "../util/format";
 import { RangeSummarizer } from "../Video/RangeSummarizer";
 import { VideoHolder, IVideoHolder } from "../Video/VideoHolder";
-import { VideoHolderFake } from "../Video/VideoHolderFake";
 import { PollLoop } from "./PollLoop";
 import { RealTimeToVideoTime, VideoDurationToRealDuration, RealDurationToVideoDuration, GetMinGapSize, GetRangeFPSEstimate, GetVideoFPSEstimate } from "../NALStorage/TimeMap";
 import { reduceRanges } from "../NALStorage/rangeMapReduce";
 import { UnionUndefined, mapObjectValues } from "../util/misc";
 
 import "./PlayerPage.less";
-import { getInitialCheckboxValue, Checkbox, getIntialInputNumberValue, setInputValue } from "../util/Input";
-import { GetVideoFrames } from "../Video/getVideoFrame";
+import { getInitialCheckboxValue, Checkbox, getIntialInputNumberValue, setInputValue, getInputValue } from "../util/Input";
+import { GetVideoFrames, GetVideoFramesInternal } from "../Video/getVideoFrame";
 import { createCancelPending } from "../algs/cancel";
 import { VideoDownloader } from "../Video/VideoDownloader";
 
 let VideoHolderClass = VideoHolder;
 
-
-type NALRanges = {
-    rate: number;
-
-    /** FrameTimes may be added which overlap a segment. This happens when a segment is downloaded from S3,
-     *      and we now have individual frame timings.
-     * 
-     * Sorted by time
-     * Should not have duplicates
-     * Should not be mutable, except for deletions, which only occur in the oldest frames
-     */
-    frameTimes: NALInfoTime[];
-
-    /** Segments ranges may be created which overlap existing frameTimes. This happens when
-     *      previously local data gets put into a segment and written to S3.
-     * 
-     * Sorted by startTime.
-     * Segments should not overlap each other, or ever be mutated except for deletions, which only occur in the oldest frames
-    */
-    segmentRanges: NALRange[];
-
-    /** If not undefined, everything at or before this time has been deleted from the server, and no writes will ever be allow before or at this time. */
-    deletionTime?: number;
-};
 
 interface IProps { }
 
@@ -63,6 +38,10 @@ interface IState {
 
     // Calculated as we play the video to reach targetFPS
     playRate: number;
+
+    // This is not observational, it is intent based. So when the users toggles live, it should stay live unless they seek
+    //  or pause. This lets us store this, and then continue playing live on refresh.
+    isLive: boolean;
 
     rates: number[];
 
@@ -82,12 +61,19 @@ interface IState {
 }
 
 const rateConst = "rateConst";
-const targetPlayTimeConst = "targetPlayTime";
-
+const targetPlayTimeConst = "targetPlayTimeConst";
+const isLiveConst = "isLiveConst";
 
 // todonext
 //  - Implement live streaming
-//      - Then make the browser stable
+//      X Then make the browser stable
+//      X Fix memory usage
+//      X make preview view stable and working with live streaming
+//      - sometimes live view gets way too far behind, even though we have code that should fix that? So... fix that code.
+//      - sometimes server throws an out of range error when encoding. Maybe there are cases when certain time offsets can exceed 32 bits?
+//      - sometimes "waiting for firstNal" infinitely (or at least for many times) loops
+//      X when playing live the view should probably "center" further towards the right, otherwise there will always be a gap on the right
+//          side of the viewport (which means less preview images will be shown than possible).
 //  - Camera auto-reconnecting
 //      - Store a LIMITED number of frames when disconnected from the server, letting us
 //          recover from a disconnection (while making sure the live stream can also start immediately),
@@ -96,8 +82,11 @@ const targetPlayTimeConst = "targetPlayTime";
 //  - Make the server stable
 
 //todonext
-// - Simulate S3 data
-// - Store data in S3
+//  S3
+//  - Rolling buffers of varying sizes for different rates
+//  - AND multiple sources of different access cost 
+//  - Large chunks of immutable data
+//  - Local index of what chunks exist, but indexes of video within chunks must also be stored remotely.
 // - Add security
 // - Put on digital ocean and fix and CPU/MEM/HDD usage issues
 
@@ -130,7 +119,8 @@ export class PlayerPage extends React.Component<IProps, IState> implements IBrow
         //targetFPS: 60,
 
         // Calculated
-        playRate: 0.25,
+        playRate: 1,
+        isLive: getInitialCheckboxValue(isLiveConst),
 
 
         currentPlayTime: 0,
@@ -167,9 +157,6 @@ export class PlayerPage extends React.Component<IProps, IState> implements IBrow
     };
 
     videoCache: { [speed: number]: IVideoHolder|undefined|null } = {};
-    
-    //vidBuffer: SourceBuffer|undefined;
-    //videoElement: HTMLVideoElement|null|undefined;
 
     server = ConnectToServer<IHost>({
         port: 7060,
@@ -188,6 +175,7 @@ export class PlayerPage extends React.Component<IProps, IState> implements IBrow
     componentWillUpdate(nextProps: IProps, nextState: IState) {
         setInputValue(rateConst, nextState.rate);
         setInputValue(targetPlayTimeConst, nextState.targetPlayTime);
+        setInputValue(isLiveConst, nextState.isLive);
     }
 
     unmountCallbacks: (() => void)[] = [];
@@ -203,10 +191,22 @@ export class PlayerPage extends React.Component<IProps, IState> implements IBrow
                 console.error(`Error in unmountCallbacks`);
             }
         }
+        this.streamVideo.cancel();
     }
 
     componentWillMount() {
         console.log(`componentWillMount`);
+    }
+
+    loadedVideoHolder(videoHolder: IVideoHolder|null, rate: number) {
+        if(!videoHolder) return;
+        if(this.videoCache[rate] === videoHolder) return;
+
+        console.log(`LoadedVideo ${videoHolder && (videoHolder as any).element}`);
+        this.videoCache[rate] = videoHolder;
+        if(rate === this.state.rate) {
+            videoHolder.SeekToTime(this.state.currentPlayTime);
+        }
     }
 
     async syncVideoInfo() {
@@ -252,17 +252,13 @@ export class PlayerPage extends React.Component<IProps, IState> implements IBrow
             videoHolder.SeekToTime(seekTime);
         }
 
-        // Starting syncing data on this rate
-        if(this.getSummaryObj(rate).serverRanges.length === 0) {
-            let ranges = await this.server.syncTimeRanges(rate);
-            this.addServerRanges(rate, ranges);
-        }
+        await this.getServerRanges(rate);
 
         this.state.rate = rate;
         (async () => {
             this.setState({ rate: rate });
             try {
-                this.streamVideo(seekTime, false);
+                this.streamVideo(seekTime, this.state.isLive, this.state.isLive);
             } catch(e) {
                 if(!this.streamVideo.isCancelError(e)) {
                     console.error(e);
@@ -271,16 +267,17 @@ export class PlayerPage extends React.Component<IProps, IState> implements IBrow
         })();
     }
 
-    loadedVideoHolder(videoHolder: IVideoHolder|null, rate: number) {
-        if(!videoHolder) return;
-        if(this.videoCache[rate] === videoHolder) return;
+    getServerRanges = async (rate: number): Promise<NALRange[]> => {
+        let serverRanges = this.getSummaryObj(rate).serverRanges;
 
-        console.log(`LoadedVideo ${videoHolder && (videoHolder as any).element}`);
-        this.videoCache[rate] = videoHolder;
-        if(rate === this.state.rate) {
-            videoHolder.SeekToTime(this.state.currentPlayTime);
+        // Starting syncing data on this rate
+        if(serverRanges.length === 0) {
+            let ranges = await this.server.syncTimeRanges(rate);
+            this.addServerRanges(rate, ranges);
         }
-    }
+
+        return serverRanges;
+    };
 
     acceptNewTimeRanges_VOID(rate: number, ranges: NALRange[]): void {
         this.addServerRanges(rate, ranges);
@@ -318,40 +315,13 @@ export class PlayerPage extends React.Component<IProps, IState> implements IBrow
     //  Also, consider saving video to the local disk, as a few GB on the local disk is probably okay,
     //  and infinitely preferrable to a few GB in memory. And then when we store data on disk, add
     //  disk deletion code, so we don't fill up the disk (or our allocated space at least).
-    
-    /*
-    if(video) {
-        nextTime = video.nextKeyFrameTime;
-    }
 
-    let times = video.frameTimes;
-    this.addReceivedRanges(rate, [{ firstTime: times[0].time, lastTime: nextTime || times.last().time, frameCount: times.length }]);
-
-    let videoHolder = UnionUndefined(this.videoCache[rate]);
-    if(videoHolder) {
-        this.addVideo(video);
-        videoHolder.AddVideo(video);
-    }
-
-    fps = GetVideoFPSEstimate(video);
-    */
 
     downloader = new VideoDownloader(
         video => {
             let videoHolder = UnionUndefined(this.videoCache[video.rate]);
             if(videoHolder) {
                 videoHolder.AddVideo(video);
-
-                /*
-                let url = URL.createObjectURL(new Blob([video.mp4Video], { type: "video/mp4" }))
-                let a = document.createElement("a");
-                a.href = url;
-                a.download = "what.mp4";
-                a.innerText = "video";
-                a.click();
-                //*/
-
-                //document.body.appendChild(a);
             }
             let { targetFPS } = this.state;
 
@@ -367,6 +337,12 @@ export class PlayerPage extends React.Component<IProps, IState> implements IBrow
                 this.setState({ playRate });
             }
         },
+        video => {
+            let videoHolder = UnionUndefined(this.videoCache[video.rate]);
+            if(videoHolder) {
+                videoHolder.RemoveVideo(video);
+            }
+        },
         () => {
             this.forceUpdate();
         }
@@ -375,7 +351,10 @@ export class PlayerPage extends React.Component<IProps, IState> implements IBrow
     streamVideo = createCancelPending(
         () => this.server.CancelVideo(),
         (doAsyncCall, isCancelError) =>
-    async (startTime: number, startPlaying = false) => {
+    async (startTime: number, startPlaying = false, live = false) => {
+
+        this.setState({ isLive: live });
+
         //if(true as boolean) return;
         console.log(`streamVideo ${startTime}`);
 
@@ -422,18 +401,19 @@ export class PlayerPage extends React.Component<IProps, IState> implements IBrow
         // TODO: Calculate this, as we need to balance it with muxing time. If the play rate is too high (or the CPU is too slow),
         //  then this needs to be higher, to reduce mux overhead as a percentage.
         let minFrames = 10;
-        let minPlayBuffer = 5000;
+        // TODO: Definitely calculate this based on i frame rate and current fps.
+        let minPlayBuffer = 3000;
 
         while(true) {
             let { serverRanges } = this.getSummaryObj(this.state.rate);
             let serverRangeIndex = findAtOrBeforeOrAfterIndex(serverRanges, startTime, x => x.firstTime);
             let serverRange = serverRanges[serverRangeIndex];
-            if(serverRange && startTime >= serverRange.lastTime && serverRangeIndex === serverRanges.length - 1) {
+            if(!live && serverRange && startTime >= serverRange.lastTime && serverRangeIndex === serverRanges.length - 1) {
                 console.log("Reached end of video, stopping download loop");
                 break;
             }
 
-            let timeObj = await doAsyncCall(this.downloader.DownloadVideo, this.state.rate, startTime, minFrames);
+            let timeObj = await doAsyncCall(this.downloader.DownloadVideo, this.state.rate, startTime, minFrames, live);
             // No more video available, so stop. (Probably hit the live data, and we don't have live video playing support right now)
             if(timeObj === "FINISHED") return;
             // Reached the end of the video
@@ -441,12 +421,22 @@ export class PlayerPage extends React.Component<IProps, IState> implements IBrow
                 console.log(`Reached end of video, and live functionality is not coded yet.`);
                 return;
             }
+
+            let holder = this.videoCache[this.state.rate];
+            if(startPlaying && holder && !holder.IsPlaying()) {
+                await holder.Play();
+            }
+
+            if(live && holder && this.state.currentPlayTime < startTime - minPlayBuffer * 1.5) {
+                this.setState({targetPlayTime: startTime});
+                holder.SeekToTime(startTime);
+            }
             
-            let nextTime = startTime;
+            let nextTime = timeObj.nextTime;
             while(true) {
                 let realTimeBuffer = 0;
 
-                let curRange = findAtOrBefore(this.downloader.GetInfo(this.state.rate).ReceivedRanges, this.state.currentPlayTime, x => x.firstTime);
+                let curRange = findAtOrBeforeOrAfter(this.downloader.GetInfo(this.state.rate).ReceivedRanges, this.state.currentPlayTime, x => x.firstTime);
                 if(curRange && curRange.lastTime >= this.state.currentPlayTime) {
                     realTimeBuffer = curRange.lastTime - this.state.currentPlayTime;
                     nextTime = curRange.lastTime;
@@ -458,7 +448,23 @@ export class PlayerPage extends React.Component<IProps, IState> implements IBrow
                     delay = Math.min(1000, delay);
                     console.log(`Waiting ${delay}ms for video position to progress more.`);
                     await doAsyncCall(SetTimeoutAsync, delay);
+                    // Actually... just delay once. Otherwise we might get in a bad state an infinitely loop (such as if the video stalls, even though it should have enough buffer).
+                    // TODO: Figure out what it is stalling, as even if we can jump beyond the stall, it should never be stalling in the first place!
+                    break;
                 } else {
+                    let lastTime = (await this.getServerRanges(1)).last().lastTime;
+
+                    // TODO: Our live stream could probably be even closer to real time if we were more aggressive with this, but it is a lot more
+                    //  complicated to determine the difference between a flucuating connection where we are temporarily ahead, and a stable
+                    //  connection where we are always a few hundred milliseconds ahead of where we could be playing.
+                    //  (the consequence of the way the code works now is that we could be 3-4 seconds behind for good, but the upside is that
+                    //  if our connection is unstable is will level out at a 3-4 second delay...)
+
+                    // If we are more than 1.5 * minPlayBuffer from the latest time, and we should be live, we have to move up the current time.
+                    if(live && this.state.currentPlayTime < lastTime - minPlayBuffer * 1.5) {
+                        console.log("Live feed has become delayed by too much, jumping to the present (this shouldn't occur often, and should only occur because of clock drift).");
+                        nextTime = lastTime;
+                    }
                     break;
                 }
             }
@@ -468,7 +474,23 @@ export class PlayerPage extends React.Component<IProps, IState> implements IBrow
     });
 
     playLive() {
+        let startTime = this.getSummaryObj(1).serverRanges.last().lastTime;
 
+        this.streamVideo(startTime, true, true);
+    }
+    play() {
+        let holder = this.videoCache[this.state.rate];
+        if(holder) {
+            holder.Play();
+        }
+    }
+    pause() {
+        let holder = this.videoCache[this.state.rate];
+        if(holder) {
+            holder.Pause();
+        }
+        this.streamVideo.cancel();
+        this.setState({ isLive: false });
     }
 
     
@@ -488,7 +510,7 @@ export class PlayerPage extends React.Component<IProps, IState> implements IBrow
 
         return (
             <div>
-                <div>Playing {formatDuration(lag)} AGO</div>
+                <div>Playing {formatDuration(lag)} AGO ({videoPlayTime})</div>
                 {selectedFormat && <div>
                     {selectedFormat.width} x {selectedFormat.height}
                 </div>}
@@ -511,11 +533,10 @@ export class PlayerPage extends React.Component<IProps, IState> implements IBrow
         }
     }
 
-
-    videoProps: IVideoHolder["props"]["videoProps"] = { controls: true };
+    videoProps: IVideoHolder["props"]["videoProps"] = { };
     render() {
         let { videoCache } = this;
-        let { rateSummaries, rate, currentPlayTime } = this.state;
+        let { rateSummaries, rate, currentPlayTime, isLive } = this.state;
 
         let curRate = rate;
         videoCache[rate] = videoCache[rate] || null;
@@ -545,6 +566,9 @@ export class PlayerPage extends React.Component<IProps, IState> implements IBrow
                 </div>}
                 {curVideo && <div>
                     Rate: {curVideo.frameTimes[0].rate}
+                </div>}
+                {curVideo && <div>
+                    {(GetVideoFPSEstimate(curVideo) * curVideo.mp4Video.length / curVideo.frameTimes.length / 1024 / 1024).toFixed(2)}MB/s
                 </div>}
                 
                 <div>
@@ -586,12 +610,17 @@ export class PlayerPage extends React.Component<IProps, IState> implements IBrow
                                             currentPlayTime={this.state.currentPlayTime}
                                             targetPlayTime={this.state.targetPlayTime}
                                             onTimeClick={time => this.streamVideo(time)}
+                                            getServerRanges={this.getServerRanges}
+                                            isLiveStreaming={this.state.isLive}
                                         />
                                     );
                                 })()}
 
                                 <div>
+                                    {isLive && "LIVE"}
                                     <button onClick={() => this.playLive()}>Play Live</button>
+                                    <button onClick={() => this.play()}>Play</button>
+                                    <button onClick={() => this.pause()}>Pause</button>
                                 </div>
                                 {<VideoHolderClass
                                     playRate={this.state.playRate}

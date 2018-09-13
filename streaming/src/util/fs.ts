@@ -95,3 +95,12 @@ export function writeDescPromise(fileDesc: FileDescriptor, buffer: Buffer) {
         });
     });
 }
+
+
+export function readdirPromise(path: string) {
+    return new Promise<string[]>((resolve, reject) => {
+        fs.readdir(path, (err, files) => {
+            err ? reject(err) : resolve(files);
+        });
+    });
+}

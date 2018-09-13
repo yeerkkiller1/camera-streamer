@@ -15,7 +15,7 @@ import { ParseNalHeaderByte, ParseNalInfo } from "mp4-typescript";
 import { createSimulatedFrame } from "./util/jpeg";
 import { randomUID } from "./util/rand";
 import { DownsampledInstance, Downsampler } from "./NALStorage/Downsampler";
-import { RoundRecordTime } from "./NALStorage/TimeMap";
+import { RoundRecordTime, GetRangeFPSEstimate } from "./NALStorage/TimeMap";
 import { Fragment } from "react";
 import { setInputValue, getInputValue } from "./util/Input";
 import { Server } from "http";
@@ -92,7 +92,7 @@ function createEncodeLoop(
             let currentSps: Buffer|undefined;
             let currentPps: Buffer|undefined;
 
-            let index = 0;
+            let lastNalRecordTime = Date.now();
 
             while(true) {
                 let nalUnit = await nalUnits.GetPromise();
@@ -150,11 +150,12 @@ function createEncodeLoop(
                     if(currentPps === undefined) {
                         throw new Error(`Received I frame without first receiving a PPS. How do we interpret this?`);
                     }
+
+                    let instantFps = 1000 / (frameRecordTime - lastNalRecordTime);
+                    lastNalRecordTime = frameRecordTime;
+
                     let delay = getTimeSynced() - frameRecordTime;
-                    // TODO: For some reason high rate video appears to be delayed by too much. It should be delayed by
-                    //  rate (before it gets any frames) plus maybe rate * key_frame_rate ? (for the first video to finish?).
-                    //  But rate 16 seems to take 64 frames to start, but I don't know why...
-                    console.log(`Send NAL slice, delayed ${delay}ms, rate ${rate}, index ${index++}, times ${JSON.stringify(frameRecordTimes)}`);
+                    console.log(`Send NAL slice ${instantFps.toFixed(1)}FPS, delayed ${delay}ms, rate ${rate}, addSeqNum ${frame.addSeqNum}, times ${JSON.stringify(frameRecordTimes)}`);
                     receiver.acceptNAL_VOID({
                         nal: nalUnit,
                         recordInfo: { type: "slice", frameRecordTimes, frameRecordTime },
@@ -204,8 +205,7 @@ class StreamLoop {
         iFrameRate: number,
         bitRateMBPS: number,
         formatId: string,
-        downsampleRate: number,
-        ratePrevCounts: { [rate: number]: number }
+        downsampleRate: number
     ) {
         if (format.formatName !== "MJPG") {
             throw new Error("Format must use MJPG");
@@ -273,10 +273,11 @@ class StreamLoop {
             }
         }
 
-        // Well... 
+        // This is unfortunate, and will probably cause problems with rapid camera resets or the camera connecting to the server
+        //  before the server fully finishes booting.
         let nextAddSeqNum = await receiver.GetNextAddSeqNum();
 
-        let downsampler = new Downsampler(downsampleRate, JpegEncoder, ratePrevCounts[1]);
+        let downsampler = new Downsampler(downsampleRate, JpegEncoder, nextAddSeqNum);
 
         let curFrameTimes: number[] = [];
         let frameDuration = 1000 / fps;
@@ -423,8 +424,7 @@ class Sender implements ISender {
         bitRateMBPS: number,
         format: v4l2camera.Format,
         formatId: string,
-        downsampleRate: number,
-        ratePrevCounts: { [rate: number]: number }
+        downsampleRate: number
     ): Promise<void> {
         setInputValue(streamFormat, Array.from(arguments));
 
@@ -437,7 +437,7 @@ class Sender implements ISender {
         //  that is the freshest call, and that is us. I assume all promise accepts will be called in order, at once. That way
         //  after Destruct finishes this.streamLoop is synchronously replaced with a new instance, which can then further be destructed.
         this.streamLoop = new StreamLoop();
-        await this.streamLoop.Init(this.server, fps, format, iFrameRate, bitRateMBPS, formatId, downsampleRate, ratePrevCounts);
+        await this.streamLoop.Init(this.server, fps, format, iFrameRate, bitRateMBPS, formatId, downsampleRate);
 
         console.log(`Finished set format`);
     }

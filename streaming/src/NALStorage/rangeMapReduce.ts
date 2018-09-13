@@ -1,4 +1,4 @@
-import { binarySearchMap, insertIntoListMap, binarySearchNumber } from "../util/algorithms";
+import { binarySearchMap, insertIntoListMap, binarySearchNumber, findAtOrBeforeIndex } from "../util/algorithms";
 import { group } from "../util/math";
 import { UnionUndefined } from "../util/misc";
 
@@ -41,7 +41,7 @@ function mergeOntoRange(base: NALRange, additional: NALRange, countFrames: boole
         if(additional.firstTime > base.lastTime) return;
 
         if(additional.firstTime < base.lastTime && countFrames) {
-            console.error(`Overlapping ranges while counting frames. This should not happen.`);
+            console.error(`Overlapping ranges while counting frames. This should not happen. New range is after existing range.`);
         }
 
         if(countFrames) {
@@ -50,15 +50,15 @@ function mergeOntoRange(base: NALRange, additional: NALRange, countFrames: boole
 
         base.lastTime = additional.lastTime;
     }
-
     if(additional.firstTime < base.firstTime) {
         if(additional.lastTime < base.firstTime) return;
 
         if(additional.lastTime > base.lastTime && countFrames) {
-            console.error(`Overlapping ranges while counting frames. This should not happen.`);
+            console.error(`Overlapping ranges while counting frames. This should not happen. New range is before existing range.`);
         }
 
-        if(countFrames) {
+        // If we completely eclipse it don't count the frames twice.
+        if(countFrames && additional.lastTime <= base.lastTime) {
             base.frameCount += additional.frameCount;
         }
 
@@ -67,7 +67,7 @@ function mergeOntoRange(base: NALRange, additional: NALRange, countFrames: boole
 }
 
 // Ranges are end exclusive?
-//  Returns all changes/new ranges
+//  Returns all changed/new ranges
 export function reduceRanges(newRanges: NALRange[], ranges: NALRange[], countFrames: boolean, minGapSize = 0): NALRange[] {
     let changedRanges: NALRange[] = [];
 
@@ -132,4 +132,69 @@ export function reduceRanges(newRanges: NALRange[], ranges: NALRange[], countFra
     }
 
     return changedRanges;
+}
+
+export function removeRange(removedRange: NALRange, ranges: NALRange[], countFrames: boolean): void {
+    if(countFrames) {
+        throw new Error(`countFrames with removeRange isn't supported`);
+    }
+
+    function removeSingleRange(removedRange: NALRange, range: NALRange): NALRange[] {
+        let newRanges: NALRange[] = [];
+        // Before range
+        if(range.firstTime < removedRange.firstTime) {
+            newRanges.push({
+                firstTime: range.firstTime,
+                lastTime: Math.min(range.lastTime, removedRange.firstTime),
+                frameCount: 0
+            });
+        }
+
+        // After range
+        if(range.lastTime > removedRange.lastTime) {
+            newRanges.push({
+                firstTime: Math.max(range.firstTime, removedRange.lastTime),
+                lastTime: range.lastTime,
+                frameCount: 0
+            });
+        }
+
+        return newRanges;
+    }
+
+    let index = findAtOrBeforeIndex(ranges, removedRange.firstTime, x => x.firstTime);
+    while(index < ranges.length) {
+        if(ranges[index].firstTime > removedRange.lastTime) break;
+        let mutatedRanges = removeSingleRange(removedRange, ranges[index]);
+        ranges.splice(index, 1, ...mutatedRanges);
+        index += mutatedRanges.length;
+    }
+}
+
+export function getMaskedRanges(maskRange: NALRange, ranges: NALRange[]): NALRange[] {
+    function getOverlap(maskRange: NALRange, range: NALRange): NALRange[] {
+        let mask: NALRange = {
+            firstTime: Math.max(maskRange.firstTime, range.firstTime),
+            lastTime: Math.min(maskRange.lastTime, range.lastTime),
+            frameCount: 0
+        };
+        mask.frameCount = range.frameCount / (range.lastTime - range.firstTime) * (mask.lastTime - mask.firstTime);
+
+        if(mask.firstTime >= mask.lastTime) {
+            return [];
+        }
+
+        return [mask];
+    }
+
+    let overlappingRanges: NALRange[] = [];
+
+    let index = findAtOrBeforeIndex(ranges, maskRange.firstTime, x => x.firstTime);
+    while(index < ranges.length) {
+        if(ranges[index].firstTime > maskRange.lastTime) break;
+        overlappingRanges.push(...getOverlap(maskRange, ranges[index]));
+        index++;
+    }
+
+    return overlappingRanges;
 }

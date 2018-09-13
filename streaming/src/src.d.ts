@@ -128,8 +128,8 @@ type MP4Video = {
     width: number;
     height: number;
 
-    /** All video ends right before the next keyframe. */
-    nextKeyFrameTime: number;
+    /** The video ends before the next key frame. But this could be undefined if there is no keyframe after this video. */
+    nextKeyFrameTime?: number;
 
     mp4Video: Buffer;
     frameTimes: NALInfoTime[];
@@ -156,13 +156,12 @@ ITimeServer {
     */
     syncTimeRanges(rate: number): Promise<NALRange[]>;
 
-    // TODO: Add a "live" flag that blocks until the video is available (and so never returns NO_VIDEO_AVAILABLE).
     /**
      * @param startTime Video is returned starting at the first key frame before or at this startTime (or after is nothing is at or before).
-     * @param minFrames At least minFrames will be returned, unless not enough frames exist. Otherwise the amount of frames returned is up to
-     *                      just before the next i frame after the minFrames are counted.
+     * @param minFrames We try to return at least minFrames, but may not sometimes for performance reasons.. The frame after the last frame will be a key frame, unless forPreview is true.
      * @param nextReceivedFrameTimes (For each rate) Is the time of next frame after startTime the client has. We won't return frames after (or at) this time.
      *                                  This is assumed to be the first time of a video, and so a key frame. If it isn't this frame may be returned.
+     *      - If live then we have no end (except determined by minFrames), and will block until we exceed the minFrames limit.
      * @param rate Rate of the video. The video plays at a multiple of this speed by default.
      * @param startTimeExclusive If true startTime now becomes exclusive, and the video is returned starting at the first key frame AFTER startTime.
      * @param onlyTimes If true only downloads the times for each video (so the video inside each MP4Video will be empty, and width and height will be 0).
@@ -170,10 +169,11 @@ ITimeServer {
     GetVideo(
         startTime: number,
         minFrames: number,
-        nextReceivedFrameTime: number|undefined,
+        nextReceivedFrameTime: number|undefined|"live",
         rate: number,
         startTimeExclusive: boolean,
         onlyTimes?: boolean,
+        forPreview?: boolean
     ): Promise<MP4Video | "VIDEO_EXCEEDS_NEXT_TIME" | "VIDEO_EXCEEDS_LIVE_VIDEO" | "CANCELLED">;
 
     CancelVideo(): Promise<void>;
