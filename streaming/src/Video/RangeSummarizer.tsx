@@ -8,7 +8,6 @@ import { formatDuration, formatDate } from "../util/format";
 import { getTimeSynced } from "../util/time";
 
 import "./RangeSummarizer.less";
-import { group, sum } from "../util/math";
 import { RealTimeToVideoTime, RealDurationToVideoDuration, GetRangeFPSEstimate, GetVideoFPSEstimate } from "../NALStorage/TimeMap";
 import { getIntialInputNumberValue, InputNumber, setInputValue, getInitialCheckboxValue, Checkbox } from "../util/Input";
 import { unitList, UnitDurationObj, UnitType } from "../util/timeUnits";
@@ -85,14 +84,7 @@ import { PreviewVideo } from "./PreviewVideo";
 
 interface IProps {
     server: IHost;
-
-    // TODO: Allow ranges to be mutated, by changing endTimes of the last range,
-    //  OR by adding new ranges. Removing ranges will never be allowed.
-    // ranges are sorted be time
-    receivedRanges: NALRange[];
-    serverRanges: NALRange[];
-    receivedFrames: NALInfoTime[];
-
+    
     currentPlayTime: number;
     targetPlayTime: number;
 
@@ -101,9 +93,23 @@ interface IProps {
     loadedVideos: MP4Video[];
 
     onTimeClick: (time: number) => void;
-    getServerRanges: (rate: number) => Promise<NALRange[]>;
 
     isLiveStreaming: boolean;
+
+    rate: number;
+    serverRangesFull: {
+        [rate: number]: {
+            // ranges are sorted be time
+            serverRanges: NALRange[];
+        } | undefined;
+    };
+
+    receivedRangesFull: {
+        [rate: number]: {
+            ReceivedRanges: NALRange[];
+            VideoFrames: NALInfoTime[];
+        } | undefined;
+    }
 }
 
 interface Viewport {
@@ -407,12 +413,12 @@ export class RangeSummarizer extends React.Component<IProps, IState> {
 
     private renderVideo(): JSX.Element {
         let {
-            serverRanges,
-            receivedRanges,
-            receivedFrames,
+            receivedRangesFull,
 
             targetPlayTime,
             currentPlayTime,
+
+            serverRangesFull
         } = this.props;
         let {
             viewport,
@@ -433,6 +439,12 @@ export class RangeSummarizer extends React.Component<IProps, IState> {
             if(!timeObjs) return [];
             return timeObjs.filter(x => viewport.startTime <= x.time && x.time <= viewport.endTime);
         }
+        function heightCSS(index: number, count: number) {
+            return {
+                top: index / count * 100 + "%",
+                height: 1 / count * 100 + "%",
+            };
+        }
         function formatRangeCSS(range: NALRange): React.CSSProperties {
             // Dammit, css is 16 bit precision? At a render level too, so we can't cheat it by using left and translateX
             // So... we have to make sure the ranges aren't very large, which means we can't just use pos.
@@ -449,48 +461,70 @@ export class RangeSummarizer extends React.Component<IProps, IState> {
 
             return {
                 left: start * 100 + "%",
-                width: (end - start) * 100 + "%",
+                width: (end - start) * 100 + "%"
             };
         }
 
-        let enableFrameLevelDisplay = receivedFrames.length < 100 || (viewport.endTime - viewport.startTime) < 10000;
-
         let curSeqNum = -1;
-        let curPlayTimeObj = findAtOrBefore(receivedFrames, currentPlayTime, x => x.time);
-        if(curPlayTimeObj) {
-            curSeqNum = curPlayTimeObj.addSeqNum;
+        {
+            let receivedFrames = receivedRangesFull[this.props.rate];
+            if(receivedFrames) {
+                let curPlayTimeObj = findAtOrBefore(receivedFrames.VideoFrames, currentPlayTime, x => x.time);
+                if(curPlayTimeObj) {
+                    curSeqNum = curPlayTimeObj.addSeqNum;
+                }
+            }
         }
+
+        let rates = Object.keys(serverRangesFull).map(x => +x);
 
         return (
             <div className={`RangeSummarizer-ruler-video ${!viewLocked ? "RangeSummarizer-ruler-video--viewUnlocked" : ""} ${softViewUnlocked ? "RangeSummarizer-ruler-video--softViewUnlocked" : ""}`}>
                 <div
                     className="RangeSummarizer-ruler-video-cutOffOverflow"
                 >
-                    {filterSegments(serverRanges).map(range => (
-                        <div
-                            key={"serverRange-" + range.firstTime}
-                            className="RangeSummarizer-ruler-video-serverRange"
-                            style={formatRangeCSS(range)}
-                        ></div>
-                    ))}
+                    {rates.map((rate, i) => {
+                        let ranges = serverRangesFull[+rate];
+                        if(!ranges) return null;
+                        return filterSegments(ranges.serverRanges).map(range => (
+                            <div
+                                key={"serverRange-" + range.firstTime}
+                                className="RangeSummarizer-ruler-video-serverRange"
+                                style={{...formatRangeCSS(range), ... heightCSS(i, rates.length)}}
+                            >
+                                <div className="RangeSummarizer-ruler-video-serverRange-text">{rate}x</div>
+                            </div>
+                        ))
+                    })}
 
-                    {filterSegments(receivedRanges).map(range => (
-                        <div
-                            key={"receivedRange-" +range.firstTime}
-                            className="RangeSummarizer-ruler-video-receivedRange"
-                            style={formatRangeCSS(range)}
-                        ></div>
-                    ))}
+                    {rates.map((rate, i) => {
+                        let rangesObj = receivedRangesFull[rate];
+                        if(!rangesObj) return null;
+                        return filterSegments(rangesObj.ReceivedRanges).map(range => (
+                            <div
+                                key={"receivedRange-" +range.firstTime}
+                                className="RangeSummarizer-ruler-video-receivedRange"
+                                style={{...formatRangeCSS(range), ... heightCSS(i, rates.length)}}
+                            ></div>
+                        ));
+                    })}
 
-                    {enableFrameLevelDisplay && filterFrames(receivedFrames).map(timeObj => (
-                        <div
-                            key={"receivedFrame-" + timeObj.time}
-                            className={`RangeSummarizer-ruler-video-receivedFrame ${timeObj.type === NALType.NALType_keyframe ? "RangeSummarizer-ruler-video-receivedFrame--keyframe" : ""}`}
-                            style={{
-                                left: pos(timeObj.time) * 100 + "%"
-                            }}
-                        ></div>
-                    ))}
+                    {rates.map((rate, i) => {
+                        let rangesObj = receivedRangesFull[rate];
+                        if(!rangesObj) return null;
+                        let receivedFrames = rangesObj.VideoFrames;
+                        let enableFrameLevelDisplay = receivedFrames.length < 100 || (viewport.endTime - viewport.startTime) < 10000;
+                        return enableFrameLevelDisplay && filterFrames(receivedFrames).map(timeObj => (
+                            <div
+                                key={"receivedFrame-" + timeObj.time}
+                                className={`RangeSummarizer-ruler-video-receivedFrame ${timeObj.type === NALType.NALType_keyframe ? "RangeSummarizer-ruler-video-receivedFrame--keyframe" : ""}`}
+                                style={{
+                                    left: pos(timeObj.time) * 100 + "%",
+                                    ... heightCSS(i, rates.length)
+                                }}
+                            ></div>
+                        ))
+                    })}
                 </div>
 
                 <div
@@ -549,7 +583,6 @@ export class RangeSummarizer extends React.Component<IProps, IState> {
 
     public render() {
         let { viewport } = this.state;
-        let { serverRanges } = this.props;
         //let segments = serverRanges.segments;
 
         //let beforeRanges = segments.filter(x => x.firstTime < viewport.startTime);
@@ -589,11 +622,13 @@ export class RangeSummarizer extends React.Component<IProps, IState> {
                 */}
 
                 {
+                /*
                 <PreviewVideo
                     viewport={cloneDeep(viewport)}
                     setViewport={viewport => this.setState({viewport})}
-                    getServerRanges={this.props.getServerRanges}
+                    serverRanges={this.props.serverRangesFull}
                 />
+                //*/
                 }
 
                 {this.renderRuler()}

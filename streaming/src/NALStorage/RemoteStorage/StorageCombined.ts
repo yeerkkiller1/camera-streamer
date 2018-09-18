@@ -1,8 +1,8 @@
 import { randomUID, UnionUndefined, profile } from "../../util/misc";
-import { sort, findAtOrBefore } from "../../util/algorithms";
+import { sort, findAtOrBefore, findAtOrBeforeIndex } from "../../util/algorithms";
 import { reduceRanges, deleteRanges, removeRange } from "../rangeMapReduce";
 import { GetMinGapSize } from "../TimeMap";
-import { group, sum, min, minMap, max } from "../../util/math";
+import { max } from "../../util/math";
 import { PChannelMultiListen } from "../../receiver/PChannelMultiListen";
 import { PChan, TransformChannel, Deferred } from "pchannel";
 import { readNal } from "../NALBuffers";
@@ -17,23 +17,34 @@ import { createChunkData } from "../LocalNALRate";
 
 export class NALStorageManagerImpl implements NALStorageManager {
     private nextAddSeqNum = new Deferred<number>();
-    private rates = new Deferred<number[]>();
 
     private storageHolders: { [rate: number]: {
         storage: Deferred<NALStorage>;
         deferredAddChannel: PChan<NALHolderMin>;
     } } = {};
 
+    private storageSystemsCtors: ((rate: number) => RemoteStorage)[];
+    private maxCostPerMonthStorage: number;
+    private averageFrameBytes: number;
+    private framesPerSecond: number;
+    private baseRate: number;
+    private secondPerRate1Chunk: number;
     constructor(
-        private storageSystemsCtors: ((rate: number) => RemoteStorage)[],
-        private maxCostPerMonthStorage: number,
-        private averageFrameBytes: number,
-        private framesPerSecond: number,
-        private baseRate: number,
+        config: {
+            storageSystemsCtors: ((rate: number) => RemoteStorage)[];
+            maxCostPerMonthStorage: number;
+            averageFrameBytes: number;
+            framesPerSecond: number;
+            baseRate: number;
+            secondPerRate1Chunk: number;
+        }
     ) {
-        // So... there are storage systems we are using, and storage systems we used in the past.
-        //  We may still need to read from the ones we used in the past... so... StorageCombined should take that into
-        //  account.
+        this.storageSystemsCtors = config.storageSystemsCtors;
+        this.maxCostPerMonthStorage = config.maxCostPerMonthStorage;
+        this.averageFrameBytes = config.averageFrameBytes;
+        this.framesPerSecond = config.framesPerSecond;
+        this.baseRate = config.baseRate;
+        this.secondPerRate1Chunk = config.secondPerRate1Chunk;
 
         // And now, we need to read the storage systems for rate 1, and find the newest addSeqNum.
 
@@ -51,7 +62,9 @@ export class NALStorageManagerImpl implements NALStorageManager {
                 console.error(`This is a fatal error, the StorageManager will just break after this.`);
             });
 
-        this.rates.Resolve(this.getRates());
+        this.getRates().catch(e => {
+            console.error(`getRates error, ${e.stack}`);
+        });
     }
 
     private async getRates(): Promise<number[]> {
@@ -72,16 +85,24 @@ export class NALStorageManagerImpl implements NALStorageManager {
         }
         
         let rates = Object.keys(this.storageHolders).map(x => +x);
-        rates.sort();
+        sort(rates, x => x);
         return rates;
     }
 
-    private secondPerRate1Chunk = 20;
     public AddNAL(val: NALHolderMin): void {
         let rate = val.rate;
         this.GetStorage(rate);
         let storageObj = this.storageHolders[rate];
         let value = storageObj.storage.Value();
+        if(value && !storageObj.deferredAddChannel.HasValues()) {
+            if("error" in value) {
+                throw new Error(`Could not get storage, rate ${rate}, error: ${value.error}`);
+            }
+            if(!value.v.IsWriteable()) {
+                console.warn(`Ignoring NAL for rate as it is impractical to store. Rate: ${rate}.`);
+                return;
+            }
+        }
         // Only synchronously add if there is nothing asynchronously added
         if(value && !storageObj.deferredAddChannel.HasValues()) {
             if("error" in value) {
@@ -92,14 +113,23 @@ export class NALStorageManagerImpl implements NALStorageManager {
             storageObj.deferredAddChannel.SendValue(val);
         }
     }
-    public GetRates(): Promise<number[]> {
-        return this.rates.Promise();
+
+    private newRateChannel = new PChannelMultiListen<number>();
+    public async SyncRates(callback: (newRate: number) => void): Promise<number[]> {
+        this.newRateChannel.Subscribe(callback);
+        let rates = Object.keys(this.storageHolders).map(x => +x);
+        sort(rates, x => x);
+        return rates;
     }
     public GetNextAddSeqNum(): Promise<number> {
         return this.nextAddSeqNum.Promise();
     }
 
     public GetStorage(rate: number): Promise<NALStorage> {
+        if(rate === null || isNaN(rate)) {
+            console.error(`What? ${new Error().stack}`);
+            throw new Error(`Tried to get storage with invalid rate ${rate}`);
+        }
         if(!(rate in this.storageHolders)) {
             let costPerStorage = this.maxCostPerMonthStorage / Math.pow(2, Math.log(rate) / Math.log(this.baseRate) + 1);
             let deferred = new Deferred<NALStorage>().Resolve(this.createStorageHolder(rate, costPerStorage));
@@ -111,12 +141,22 @@ export class NALStorageManagerImpl implements NALStorageManager {
 
             (async () => {
                 let storage = await deferred.Promise();
+
+                if(!storage.IsWriteable()) {
+                    console.warn(`Ignoring NALs for rate as it is impractical to store. Rate: ${rate}.`);
+                    while(pchan.HasValues()) {
+                        await pchan.GetPromise();
+                    }
+                    return;
+                }
+                
                 while(true) {
                     let nal = await pchan.GetPromise();
                     storage.AddNAL(nal);
                 }
             })();
-            
+
+            this.newRateChannel.SendValue(rate);
         }
         return this.storageHolders[rate].storage.Promise();
     }
@@ -129,7 +169,12 @@ export class NALStorageManagerImpl implements NALStorageManager {
         let bytesPerSecond = this.averageFrameBytes * framesPerSecond;
         
         let chunkSizeBytes = bytesPerSecond * rate * this.secondPerRate1Chunk;
+        if(chunkSizeBytes < this.averageFrameBytes * 2) {
+            chunkSizeBytes = this.averageFrameBytes * 2;
+        }
         let secondsPerChunk = chunkSizeBytes / bytesPerSecond;
+
+        console.log(`Creating storage holder for ${rate}, costAvailable ${costAvailable}, chunk size ${chunkSizeBytes}, seconds per chunk ${secondsPerChunk}`);
 
         let costPerStorage = costAvailable / storageSystems.length;
 
@@ -151,28 +196,31 @@ export class NALStorageManagerImpl implements NALStorageManager {
             throw new Error(`The storage with the cheapest access cost doesn't support live data. The local system should have 0 access cost, and should support live data. And anything that has free accesses should support live data.`);
         }
 
-        let maxGB = liveStorageObj.maxGB;
+        let lastMaxStorage: typeof storageCosts[0] | undefined;
         let writeStorageSystems: RemoteStorage[] = [];
-        writeStorageSystems.push(liveStorage);
-        for(let i = 1; i < storageCosts.length; i++) {
+        for(let i = 0; i < storageCosts.length; i++) {
             let obj = storageCosts[i];
-            if(obj.maxGB < maxGB) {
-                console.warn(`Not using storage system as it is more expensive to store data in it than another storage system that also has cheaper access costs. ${obj.storage.DebugName()}`);
+            let notUsed = lastMaxStorage && obj.maxGB < lastMaxStorage.maxGB;
+
+            console.log(`Candidate storage ${obj.storage.DebugName()}, rate ${rate}, maxGB ${(obj.maxGB).toFixed(3)}, rough maxCost ${costPerStorage} ${notUsed ? (`not used`) : ""}`);
+            if(notUsed) {
                 continue;
             }
-            maxGB = obj.maxGB;
+            if(!obj.storage.IsFixedStorageSize()) {
+                lastMaxStorage = obj;
+            }
             writeStorageSystems.push(obj.storage);
         }
 
-        costPerStorage = costAvailable / writeStorageSystems.length
+        costPerStorage = costAvailable / writeStorageSystems.length;
         let writeStorageSystemObjs = writeStorageSystems.map(storage => ({
             storage,
-            maxBytes: storage.MaxGB(bytesPerSecond, secondsPerChunk, costPerStorage),
+            maxBytes: storage.MaxGB(bytesPerSecond, secondsPerChunk, costPerStorage) * 1024 * 1024 * 1024,
             chunkThresholdBytes: chunkSizeBytes
         }));
 
         writeStorageSystemObjs = writeStorageSystemObjs.filter(storage => {
-            if(storage.maxBytes < storage.chunkThresholdBytes * minChunks) {
+            if(!storage.storage.IsFixedStorageSize() && storage.maxBytes < storage.chunkThresholdBytes * minChunks) {
                 console.warn(`Storage stores less than ${minChunks} chunks, so we won't use it. ${storage.storage.DebugName()}`);
                 return false;
             }
@@ -214,13 +262,15 @@ class StorageCombined implements NALStorage {
     public async Init(): Promise<void> {
         let { readStorageSystems, writeStorageSystemObjs } = this;
         let promises: (Promise<void>)[] = [];
-        for(let i = 0; i < readStorageSystems.length; i++) {
-            promises.push(readStorageSystems[i].Init(undefined, (x) => this.onChunkDeleted(x), 0, 0));
-        }
         for(let i = 0; i < writeStorageSystemObjs.length; i++) {
             let obj = writeStorageSystemObjs[i];
-            let next = UnionUndefined(writeStorageSystemObjs[i]);
+            let next = UnionUndefined(writeStorageSystemObjs[i + 1]);
             promises.push(obj.storage.Init(next && next.storage, (x) => this.onChunkDeleted(x), obj.chunkThresholdBytes, obj.maxBytes));
+        }
+        for(let i = 0; i < readStorageSystems.length; i++) {
+            // Don't double init if it has already been write inited.
+            if(writeStorageSystemObjs.map(x => x.storage).indexOf(readStorageSystems[i]) >= 0) continue;
+            promises.push(readStorageSystems[i].Init(undefined, (x) => this.onChunkDeleted(x), 0, 0));
         }
         await Promise.all(promises);
 
@@ -291,7 +341,7 @@ class StorageCombined implements NALStorage {
     public AddNAL(val: NALHolderMin): void {
         this.addNALTime(val.time);
         this.localSystem.AddSingleNAL(val);
-    };
+    }
 
     public async GetVideo(
         startTime: number,
@@ -320,11 +370,13 @@ class StorageCombined implements NALStorage {
             let { storage } = obj;
             let metadatas = storage.GetChunkMetadatas();
 
-            let chunk = findAtOrBefore(metadatas, startTime, x => x.Ranges[0].firstTime);
+            let chunkIndex = findAtOrBeforeIndex(metadatas, startTime, x => x.Ranges[0].firstTime);
+            let chunk = UnionUndefined(metadatas[chunkIndex]);
 
             if(!chunk || chunk.IsMoved) {
                 continue;
             }
+            let chunkChecked = chunk;
             let chunkUID = chunk.ChunkUID;
 
             cancelToken.Promise().then(() => {
@@ -347,12 +399,12 @@ class StorageCombined implements NALStorage {
 
                         let { videoTimes, livePromise } = callGetVideoTimes();
 
-                        if(videoTimes === "VIDEO_EXCEEDS_LIVE_VIDEO" && nextReceivedFrameTime === "live") {
+                        if((videoTimes === "VIDEO_EXCEEDS_NEXT_TIME" || videoTimes === "VIDEO_EXCEEDS_LIVE_VIDEO") && nextReceivedFrameTime === "live") {
                             if(livePromise) {
                                 await livePromise;
                                 continue;
                             } else {
-                                throw new Error(`GetVideo failed because request exceeded live video... but requested chunk was not live. Either there is a bug in GetVideo, or the input parameters were invalid.`);
+                                throw new Error(`GetVideo failed because request exceeded live video... but requested chunk was not live. Either there is a bug in GetVideo, or the input parameters were invalid. videoTimes ${videoTimes}, startTime ${startTime}, startTimeExclusive: ${startTimeExclusive}, nextReceivedTime ${nextReceivedFrameTime}, chunk ${chunkChecked.Ranges[0].firstTime} to ${chunkChecked.Ranges.last().lastTime}`);
                             }
                         }
 
@@ -394,6 +446,7 @@ class StorageCombined implements NALStorage {
                                 allowMissingEndKeyframe,
                                 indexTyped
                             );
+
                             return {
                                 videoTimes,
                                 livePromise,
@@ -413,6 +466,34 @@ class StorageCombined implements NALStorage {
 
             if(abortResult !== undefined) {
                 return abortResult;
+            }
+
+            // Set nextKeyFrameTime to the next chunk start if it is undefined.
+            if(nextKeyFrameTime === undefined && !forPreview) {
+                // Get a new chunkIndex, as if any chunk is exported the indexes will change.
+                //  If the chunk we are searching for was deleted we will get -1 (~0), so we will take the first chunk,
+                //  which turns out to be correct, so we can just leave it.
+                let chunkIndex = findAtOrBeforeIndex(metadatas, startTime, x => x.Ranges[0].firstTime);
+                let nextChunk = UnionUndefined(metadatas[chunkIndex + 1]);
+                if(nextChunk) {
+                    nextKeyFrameTime = nextChunk.Ranges[0].firstTime;
+                } else {
+                    if(nextReceivedFrameTime === "live") {
+                        // No matter how many chunks are deleted chunkIndex should always be at least -1, and never greater than all the chunks that are
+                        //  left (we delete old chunks, not newer ones, so a deleted chunk will never be newer than existing chunks), so nextChunk
+                        //  should always be valid, unless we read from the last chunk, in which case it should have been live, and blocked while
+                        //  reading until nextKeyFrameTime could be populated... so this should really never happen.
+
+                        // This can happen if the next chunk is deleted before we get the nextTime from it.
+                        //todonext
+                        // Fix this.
+
+                        console.log(`Using chunk ${chunkUID}`);
+                        console.log("nals", nals.map(x => x.time));
+                        console.error(`Live data requested, but we found no next time, and we are the last chunk? So... this shouldn't be possible, the previous chunk should still be live until the next chunk is ready to be live. startTime ${startTime}, startTimeExclusive: ${startTimeExclusive}, nextReceivedTime ${nextReceivedFrameTime}, chunk ${chunkChecked.Ranges[0].firstTime} to ${chunkChecked.Ranges.last().lastTime}`);
+                        process.exit();
+                    }
+                }
             }
 
             if(onlyTimes && timeOnlyTimes) {

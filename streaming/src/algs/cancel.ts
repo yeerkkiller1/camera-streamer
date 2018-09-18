@@ -37,8 +37,6 @@ export function createCancelPending<F extends (...args: any[]) => Promise<any>=a
         }
     );
 
-    //todonext
-    // This function adds like 50ms SYNCHRONOUS overhead. WTF?
     async function call(...args: any[]) {
         let ourCallToken = ++nextNextCallToken;
         let ourCallCancel: Deferred<void>;

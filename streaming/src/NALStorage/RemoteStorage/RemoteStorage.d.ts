@@ -16,6 +16,50 @@ type Chunk = ChunkMetadata & {
 };
 
 
+
+interface NALStorageManager {
+    AddNAL(val: NALHolderMin): Promise<void>|void;
+    GetNextAddSeqNum(): Promise<number>;
+
+    SyncRates(callback: (newRate: number) => void): Promise<number[]>;
+    GetStorage(rate: number): Promise<NALStorage>;
+}
+
+interface NALStorage {
+    Init(): Promise<void>;
+
+    IsWriteable(): boolean;
+
+    AddNAL(val: NALHolderMin): void;
+
+    GetRanges(): NALRange[];
+    SubscribeToRanges(
+        rangesChanged: (changedRanges: NALRange[]) => void,
+        rangesDeleted: (deleteTime: number) => void,
+    ): () => void;
+
+    GetNextAddSeqNum(): number;
+
+    
+    GetVideo(
+        startTime: number,
+        minFrames: number,
+        nextReceivedFrameTime: number|undefined|"live",
+        startTimeExclusive: boolean,
+        onlyTimes: boolean|undefined,
+        forPreview: boolean|undefined,
+        cancelToken: {
+            Promise(): Promise<void>;
+            Value(): {
+                v: void;
+            } | {
+                error: any;
+            } | undefined;
+        },
+    ): Promise<MP4Video | "VIDEO_EXCEEDS_LIVE_VIDEO" | "VIDEO_EXCEEDS_NEXT_TIME" | "CANCELLED">;
+}
+
+
 // One instance per rate (and eventually camera + rate combination)
 interface RemoteStorageBase {
     /** May be called many times, which should not init the metadata multiple times, but should replace the nextStorageSystem value and onChunkDeletion callback. */
@@ -60,6 +104,8 @@ interface RemoteStorageBase {
     AddChunk(chunk: Chunk): Promise<void>;
 
     DebugName(): string;
+
+    IsFixedStorageSize(): boolean;
 }
 interface RemoteStorageLocal extends RemoteStorageBase {
     /** If this is present, this storage system can accept single nals. This means the caller doesn't need to buffer them,
@@ -69,47 +115,3 @@ interface RemoteStorageLocal extends RemoteStorageBase {
     
 }
 type RemoteStorage = RemoteStorageBase | RemoteStorageLocal;
-
-
-
-interface NALStorage {
-    Init(): Promise<void>;
-
-    IsWriteable(): boolean;
-
-    AddNAL(val: NALHolderMin): void;
-
-    GetRanges(): NALRange[];
-    SubscribeToRanges(
-        rangesChanged: (changedRanges: NALRange[]) => void,
-        rangesDeleted: (deleteTime: number) => void,
-    ): () => void;
-
-    GetNextAddSeqNum(): number;
-
-    
-    GetVideo(
-        startTime: number,
-        minFrames: number,
-        nextReceivedFrameTime: number|undefined|"live",
-        startTimeExclusive: boolean,
-        onlyTimes: boolean|undefined,
-        forPreview: boolean|undefined,
-        cancelToken: {
-            Promise(): Promise<void>;
-            Value(): {
-                v: void;
-            } | {
-                error: any;
-            } | undefined;
-        },
-    ): Promise<MP4Video | "VIDEO_EXCEEDS_LIVE_VIDEO" | "VIDEO_EXCEEDS_NEXT_TIME" | "CANCELLED">;
-}
-
-interface NALStorageManager {
-    AddNAL(val: NALHolderMin): Promise<void>|void;
-    GetNextAddSeqNum(): Promise<number>;
-
-    GetRates(): Promise<number[]>;
-    GetStorage(rate: number): Promise<NALStorage>;
-}

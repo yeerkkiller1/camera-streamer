@@ -51,30 +51,6 @@ pi setup code:
 // time gst-launch-1.0 -vv -e multifilesrc location="frame%d.jpeg" ! capsfilter caps="image/jpeg,width=1920,height=1080,framerate=30/1" ! jpegdec ! omxh264enc target-bitrate=15000000 control-rate=variable ! video/x-h264, profile=high ! filesink location="test.mp4"
 */
 
-//todonext
-// Bundle these and pass them to the client.
-//  - Then add metadata on things such a nal rates (maybe do start code parsing on output?), bit rate, fps, etc
-//  - Then make the sender have dynamic fps, with the limiting factor being encoding speed (and capped a certain fps).
-//  - We also want to measure bandwidth restrictions, and possibly restrict fps based on that. We should receive callbacks
-//      when a frame is received (or when every nth frame is received) so we can roughly estimate display lag. If display
-//      lag gets over a certain amount for a certain number of frames in a row, we should reduce the FPS.
-//      - We should also add limits on the number of unacknowledged frames we will send, and make sure we noticed
-//          lag on more frames then that. This will let us maintain the fps even if the network is flakey, as
-//          lowering the fps won't help at all if the network is flakey (and instead result in very low FPS,
-//          with no benefit). Eventually the buffer will get really big if our FPS is higher than the average bandwidth,
-//          causing the lag to continue even when the network is back up, which will allow our FPS to still be correct,
-//          just not to wildly drop every time the network goes down.
-//      It is impossible to passively tell the difference between very high latency and bandwidth limitations.
-//      If there is simply 10 second latency, irregardless of how much we send, it will make it look like we and bandwidth
-//      limited, unless we actively send less and find no difference in latency. So we should have a configurable max
-//      latency limit, to make it possible for very slow connections to still work.
-//  - We need to figure out time drift. Usually for long videos (like a few hours), you can just encode at a certain fps,
-//      and the video may play a few seconds? faster or slower. But... for video that plays continously, easily for
-//      weeks, we need a way to recover from time drift on the server being different than on the client.
-//      - Start by displaying the amount of lag. HOPEFULLY the client's clock is faster than the camera's, meaning
-//          sometimes the realtime video will pause and wait for the camera to give more data. Otherwise we will
-//          at least see the lag slowly build up over time, at which point we can add corrective measures.
-
 
 function mkdirPromise(path: string) {
     return new Promise<void>((resolve, reject) => {
@@ -128,13 +104,153 @@ async function getFinalStorageFolder() {
 })();
 //*/
 
-let nalManager = new NALStorageManagerImpl(
-    [rate => new LocalRemoteStorage(rate)],
-    10,
-    1024 * 50,
-    10,
-    4
-);
+//todonext
+// - Make LocalRemoteStorage that gives S3 simulated MaxGB and CostPerGBDownload functions, and use it to simulate what we planning on using in S3
+// - Setup actual S3
+
+// Let's dual store in wasabi and backblaze, and not bother with S3, as request costs get absurb in S3.
+
+//todonext
+// Crap... we may need to split chunks. High rate storage is running into problems with exceeding its budget and
+//  not being able to store the minimum number of chunks. But then again... there is a absolute minimum, and
+//  at most we can split chunks down to the iframe rate, and then we can't store it. And if a storage system
+//  can only store 2 frames of data, it isn't really useful.
+//  - BUT, the problem isn't really that, it's that we might want to use larger chunks to reduce uploader request rates,
+//      but then split the large chunks for high rates, as even after splitting high rates won't cause high uploader request rates.
+//  - ALSO, if chunks are too small, the metadata for them will be too large and we will run out of memory on the server.
+
+const secondPerRate1Chunk = 2;
+// Eh... more than the real cost, because localStorage is digital ocean so sort of free.
+const totalCostPerMonth = 20;
+const averageFrameBytes = 1024 * 10;
+const framesPerSecond = 10;
+const baseRate = 4;
+
+let maxTotalDiskUsage = 1024 * 1024 * 10;
+//maxTotalDiskUsage = 1024 * 1024 * 160;
+
+let localStorage = (rate: number) => new LocalRemoteStorage(rate, totalCostPerMonth, maxTotalDiskUsage);
+
+const secondsPerMonth = 60 * 60 * 24 * 30;
+
+let s3Standard = (rate: number) => new LocalRemoteStorage(rate, 0, 0, "./dist/s3standard/", {
+    debugName: "s3_standard",
+    maxGB(bytesPerSecond: number, secondPerChunk: number, maxCost: number) {
+        // No duration restrictions
+
+        let costPerGBPerMonth = 0.023;
+
+        // PUT request
+        let costPerUploadRequest = 0.005 / 1000;
+
+        let requestCostPerMonth = secondsPerMonth / secondPerChunk * costPerUploadRequest;
+
+        return (maxCost - requestCostPerMonth) / costPerGBPerMonth;
+    },
+    costPerGB(bytes: number) {
+        // Get request
+        let requestCost = 0.0004 / 1000;
+        // Data returned by S3 select. Is this what we shoudl use?
+        let costPerGBDownload = 0.0007;
+        return costPerGBDownload * bytes / 1024 / 1024 / 1024 + requestCost;
+    },
+});
+
+let s3Infrequent = (rate: number) => new LocalRemoteStorage(rate, 0, 0, "./dist/s3infrequent/", {
+    debugName: "s3_infrequent",
+    maxGB(bytesPerSecond: number, secondPerChunk: number, maxCost: number) {
+        // No duration restrictions
+        
+        let costPerGBPerMonth = 0.0125;
+
+        // PUT request
+        let costPerUploadRequest = 0.01 / 1000;
+
+        let requestCostPerMonth = secondsPerMonth / secondPerChunk * costPerUploadRequest;
+
+        return (maxCost - requestCostPerMonth) / costPerGBPerMonth;
+    },
+    costPerGB(bytes: number) {
+        let requestCost = 0.001 / 1000;
+        let costPerGBDownload = 0.01;
+        return costPerGBDownload * bytes / 1024 / 1024 / 1024 + requestCost;
+    },
+});
+
+// Expedited. Anything else takes too long to request the data, which could be worth it for reduces fees, but...
+//  if we can store in backblaze for just a little more with no restrictions and much cheaper fees, or
+//  other S3 alternatives, then anything other than expedited is not worth it.
+let s3Glacier = (rate: number) => new LocalRemoteStorage(rate, 0, 0, "./dist/s3glacier/", {
+    debugName: "s3_glacier",
+    maxGB(bytesPerSecond: number, secondPerChunk: number, maxCost: number) {
+       
+        let costPerGBPerMonth = 0.004;
+
+        // Transition request cost?
+        let costPerUploadRequest = 0.05 / 1000;
+
+        let requestCostPerMonth = secondsPerMonth / secondPerChunk * costPerUploadRequest;
+
+        let maxGB = (maxCost - requestCostPerMonth) / costPerGBPerMonth;
+        
+        // Duration restrictions of 90 days
+        let minGB = bytesPerSecond * secondsPerMonth / 1024 / 1024 / 1024;
+        if(maxGB < minGB) {
+            return 0;
+        }
+
+        return maxGB;
+    },
+    costPerGB(bytes: number) {
+        let requestCost = 0.001;
+        let costPerGBDownload = 0.03;
+        return costPerGBDownload * bytes / 1024 / 1024 / 1024 + requestCost;
+    },
+});
+
+
+let wasabi = (rate: number) => new LocalRemoteStorage(rate, 0, 0, "./dist/wasabi/", {
+    debugName: "wasabi",
+    maxGB(bytesPerSecond: number, secondPerChunk: number, maxCost: number) {
+        let costPerGBPerMonth = 0.0049;
+        let maxGB = maxCost / costPerGBPerMonth;
+        return maxGB;
+    },
+    costPerGB(bytes: number) {
+        // This doesn't seem like a sustainable business practice
+        return 0;
+    },
+});
+
+let backblaze = (rate: number) => new LocalRemoteStorage(rate, 0, 0, "./dist/backblaze/", {
+    debugName: "backblaze",
+    maxGB(bytesPerSecond: number, secondPerChunk: number, maxCost: number) {       
+        let costPerGBPerMonth = 0.005;
+        let maxGB = maxCost * costPerGBPerMonth;
+        return maxGB;
+    },
+    costPerGB(bytes: number) {
+        let costPerGB
+        // This doesn't seem like a sustainable business practice
+        return 0;
+    },
+});
+
+let nalManager = new NALStorageManagerImpl({
+    storageSystemsCtors: [
+        localStorage,
+        backblaze,
+        //wasabi,
+        //s3Standard,
+        //s3Infrequent,
+        //s3Glacier
+    ],
+    maxCostPerMonthStorage: totalCostPerMonth,
+    averageFrameBytes,
+    framesPerSecond,
+    baseRate,
+    secondPerRate1Chunk,
+});
 
 
 /*
@@ -348,8 +464,11 @@ class Receiver extends TimeServer implements IReceiver, IHost {
         await (await this.cameraClient.Promise()).setStreamFormat(fps, iFrameRate, bitRateMBPS, format, curFormatId, RateMultiplier);
     }
 
-    public async GetRates(): Promise<number[]> {
-        return nalManager.GetRates();
+    public async SyncRates(): Promise<number[]> {
+        let client = this.client;
+        return nalManager.SyncRates(newRate => {
+            client.onNewRate(newRate);
+        });
     }
 
     public async GetNextAddSeqNum(): Promise<number> {

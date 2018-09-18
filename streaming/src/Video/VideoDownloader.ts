@@ -1,14 +1,14 @@
 import { createCancelPending } from "../algs/cancel";
 import { ConnectToServer } from "ws-class";
-import { findAtOrBefore, findAfter, insertIntoList, insertIntoListMap, insertIntoListMapped, removeFromListMap, findAtOrBeforeIndex, findAt, findAtIndex } from "../util/algorithms";
+import { findAtOrBefore, findAfter, insertIntoList, insertIntoListMap, insertIntoListMapped, removeFromListMap, findAtOrBeforeIndex, findAt, findAtIndex, sort } from "../util/algorithms";
 import { UnionUndefined } from "../util/misc";
 import { GetVideoFPSEstimate, GetMinGapSize, GetRangeFPSEstimate } from "../NALStorage/TimeMap";
 import { reduceRanges, removeRange } from "../NALStorage/rangeMapReduce";
 import { Deferred } from "pchannel";
 import { sum } from "../util/math";
 
-export class VideoDownloader {
-    private data: {
+export class VideoDownloader implements IBrowserReceiver {
+    public data: {
         [rate: number]: {
             ReceivedRanges: NALRange[];
             Videos: MP4Video[];
@@ -21,7 +21,12 @@ export class VideoDownloader {
         }
     } = {};
     
-
+    public Rates: number[] = [];
+    private server = ConnectToServer<IHost>({
+        port: 7060,
+        host: "localhost",
+        bidirectionController: this
+    });
 
     constructor(
         private onVideoReceived: (video: MP4Video) => void,
@@ -30,24 +35,44 @@ export class VideoDownloader {
         private onlyTimes?: boolean,
         private forPreview?: boolean,
         // TODO: If this isn't enough to fill up the play buffer, the play buffer will basically break.
-        private videoStorageSize = 1024 * 1024 * 256
+        private videoStorageSize = 1024 * 1024 * 10
     ) {
-        (window as any)["videos"] = this.GetInfo(1).Videos;
+        (async () => {
+            try {
+                let initialRates = await this.server.SyncRates();
+                for(let rate of initialRates) {
+                    this.Rates.push(rate);
+                }
+                sort(this.Rates, x => x);
+            } catch(e) {
+                console.error(`Error when syncing rates. This is really bad. ${e}`);
+            }
+        })();
+        
+        //(window as any)["videos"] = this.GetInfo(1).Videos;
     }
 
-    private server = ConnectToServer<IHost>({
-        port: 7060,
-        host: "localhost",
-        bidirectionController: this
-    });
-
-    public Rates = this.server.GetRates();
-
+    
+    public acceptNewTimeRanges_VOID(rate: number, ranges: NALRange[]): void {
+        // Not used
+    }
+    public onDeleteTime(rate: number, deleteTime: number): void {
+        // Not used
+    }
+    public onNewRate(rate: number): void {
+        if(this.Rates.indexOf(rate) >= 0) return;
+        this.Rates.push(rate);
+        sort(this.Rates, x => x);
+    }
 
     public DownloadVideo = createCancelPending(
         () => this.server.CancelVideo(),
         (doAsyncCall, isCancelError) =>
     async (rate: number, startTime: number, minFrames: number, live = false): Promise<{video?: MP4Video; nextTime: number|undefined}|"FINISHED"> => {
+
+        if(rate === undefined) {
+            console.log("download video", {rate}, new Error().stack);
+        }
 
         let nextReceiverRange: NALRange|undefined;
         let startTimeExclusive = false;
@@ -111,25 +136,37 @@ export class VideoDownloader {
 
         if(video) {
             nextTime = video.nextKeyFrameTime;
+
+            if(!this.forPreview) {
+                console.log(`downloaded rate ${rate}, next time ${nextTime}, ${video.frameTimes[0].addSeqNum}`, video.frameTimes.map(x => x.time));
+            }
         }
 
         let times = video.frameTimes;
-        let range: NALRange = { firstTime: times[0].time, lastTime: nextTime || times.last().time, frameCount: 0 };
 
-        if(this.forPreview) {
+        let nextRangeTime = times.last().time;
+        if(nextTime && (nextTime - nextRangeTime < GetMinGapSize(rate))) {
+            // Maybe set nextTime to undefined so we don't jump to the next segment, as the chances of wanting to play skipping
+            //  large segments gaps is low. But then again... downloading the data doesn't hurt.
+            nextRangeTime = nextTime;
+        }
+
+        let range: NALRange = { firstTime: times[0].time, lastTime: nextRangeTime, frameCount: 0 };
+
+        //if(this.forPreview) {
             let previousIndex = findAtIndex(summaryObj.addTimesSortedByFirstTime, range.firstTime, x => x.firstTime);
             if(previousIndex >= 0) {
                 let addTime = summaryObj.addTimesSortedByFirstTime[previousIndex].addTime;
                 this.removeVideo(rate, addTime);
             }
-        }
+        //}
 
-        reduceRanges(
+        range = reduceRanges(
             [range],
             summaryObj.ReceivedRanges,
             false,
             GetMinGapSize(rate)
-        );
+        )[0];
         if(video.nextKeyFrameTime) {
             reduceRanges(
                 [range],

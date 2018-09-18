@@ -1,5 +1,4 @@
 import { binarySearchMap, insertIntoListMap, binarySearchNumber, findAtOrBeforeIndex } from "../util/algorithms";
-import { group } from "../util/math";
 import { UnionUndefined } from "../util/misc";
 
 // Sorted by startTime
@@ -94,6 +93,18 @@ export function reduceRanges(newRanges: NALRange[], ranges: NALRange[], countFra
             // Ignore cases when the entire range is already accounted for.
             return;
         }
+
+        // Extend to prev/next to account for minGapSize.
+        if(prevSegment) {
+            if(segment.firstTime - prevSegment.lastTime < minGapSize) {
+                segment.firstTime = prevSegment.lastTime;
+            }
+        }
+        if(nextSegment) {
+            if(nextSegment.firstTime - segment.lastTime < minGapSize) {
+                segment.lastTime = nextSegment.firstTime;
+            }
+        }
     
         // prevSegment.firstTime <= segment.firstTime
         if(prevSegment && prevSegment.lastTime >= segment.firstTime) {
@@ -124,7 +135,7 @@ export function reduceRanges(newRanges: NALRange[], ranges: NALRange[], countFra
             debugger;
         }
 
-        changedRanges.push(originalSegment);
+        changedRanges.push({...segment});
     }
 
     for(let rangeObj of newRanges) {

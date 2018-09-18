@@ -1,4 +1,4 @@
-import { appendFilePromise, readFilePromise, openReadPromise, readDescPromise, existsFilePromise, statFilePromise, closeDescPromise, writeFilePromise, openWritePromise, writeDescPromise, unlinkFilePromise, readdirPromise } from "../util/fs";
+import { appendFilePromise, readFilePromise, openReadPromise, readDescPromise, existsFilePromise, statFilePromise, closeDescPromise, writeFilePromise, openWritePromise, writeDescPromise, unlinkFilePromise, readdirPromise, mkdirFilePromise } from "../util/fs";
 import { keyBy, profile, randomUID, UnionUndefined, isEmpty } from "../util/misc";
 import { sort, insertIntoListMap, findAtIndex, findAt } from "../util/algorithms";
 import { TransformChannel, Deferred } from "pchannel";
@@ -30,13 +30,20 @@ export class LocalRemoteStorage implements RemoteStorageLocal {
         [chunkUID: string]: ChunkObj
     } = {};
     private nextStorageSystem: RemoteStorage|undefined;
-    private path: string = "./dist/";
     private onChunkDeleted!: (deleteTime: number) => void;
     private chunkThresholdBytes: number|undefined;
     private maxBytes: number|undefined;
 
     constructor(
-        private rate: number
+        private rate: number,
+        private baseTotalCost: number,
+        private baseTotalStorageBytes: number,
+        private path = "./dist/local/",
+        private fakeOverrides?: {
+            debugName: string;
+            maxGB: (bytesPerSecond: number, secondPerChunk: number, maxCost: number) => number;
+            costPerGB: (bytes: number) => number;
+        }
     ) {}
 
     public async Init(
@@ -45,6 +52,11 @@ export class LocalRemoteStorage implements RemoteStorageLocal {
         chunkThresholdBytes: number,
         maxBytes: number
     ): Promise<void> {
+
+        if(!await existsFilePromise(this.path)) {
+            await mkdirFilePromise(this.path);
+        }
+
         // We need to read all of the data from the file system (well not the nals I guess, but at least the index files)
         //  and then add the chunk metadatas.
 
@@ -55,7 +67,9 @@ export class LocalRemoteStorage implements RemoteStorageLocal {
         this.maxBytes = maxBytes;
         
         let fileNames = await readdirPromise(this.path);
-        let nalFileNames = fileNames.filter(x => x.endsWith(".nal"));
+        let nalFileNames = fileNames.filter(x => x.endsWith(".nal") && x.startsWith(`chunk_rate_${this.rate}_`));
+
+        console.log(`Init ${this.DebugName()}, max bytes: ${maxBytes}, next storage system: ${nextStorageSystem && nextStorageSystem.DebugName()}`);
 
         for(let nalFileName of nalFileNames) {
             let indexFileName = nalFileName.slice(0, -".nal".length) + ".index";
@@ -88,9 +102,13 @@ export class LocalRemoteStorage implements RemoteStorageLocal {
                 LastAddSeqNum: nalInfos.last().addSeqNum
             };
 
-            let index: (NALIndexInfo & { finishedWrite: boolean })[] = [];
+            let index: (NALIndexInfo & { finishedWrite: boolean } | Deferred<void>)[] = [];
             for(let indexInfo of nalInfos) {
                 index.push({ ...indexInfo, finishedWrite: true });
+            }
+
+            if(chunkMetadata.IsLive) {
+                index.push(new Deferred<void>());
             }
 
             this.chunks[chunkUID] = {
@@ -99,6 +117,7 @@ export class LocalRemoteStorage implements RemoteStorageLocal {
                 fileBasePath: this.path + chunkUID,
                 writeLoop: this.createWriteLoop(),
             };
+            insertIntoListMap(this.chunksList, chunkMetadata, x => x.Ranges[0].firstTime);
         }
     }
 
@@ -115,12 +134,13 @@ export class LocalRemoteStorage implements RemoteStorageLocal {
         };
     }
     private createChunkUID(startNAL: NALInfoTime) {
-        return `chunk_${startNAL.rate}_${startNAL.addSeqNum}`;
+        return `chunk_rate_${startNAL.rate}_addSeqNum_${startNAL.addSeqNum}`;
     }
     private addChunk(nal: NALInfoTime): string {
         let { chunks, chunksList } = this;
 
         let chunkUID = this.createChunkUID(nal);
+        //console.log(`Creating new chunk ${chunkUID}, chunk limit ${this.chunkThresholdBytes}`);
         let chunkMetadata: ChunkMetadataExtended = {
             ChunkUID: chunkUID,
             Ranges: [{ firstTime: nal.time, lastTime: nal.time, frameCount: 0 }],
@@ -154,8 +174,17 @@ export class LocalRemoteStorage implements RemoteStorageLocal {
         if(chunksList.length > 0) {
             let chunkUID = chunksList.last().ChunkUID;
             let list = chunks[chunkUID].index;
-            if(list.length > 0 && "then" in list.last()) {
-                liveChunkUID = chunkUID;
+            if(list.length > 0) {
+                let last = list.last();
+                if("Promise" in last) {
+                    liveChunkUID = chunkUID;
+                } else {
+                    if(chunks[chunkUID].metadata.IsLive) {
+                        throw new Error(`Chunk has IsLive true, but last value of index isn't a promise. This is invalid. Chunk: ${chunkUID}`);
+                    }
+                    // type check to make sure if check is correct
+                    let x: NALInfoTime = last;
+                }
             }
         }
 
@@ -166,38 +195,47 @@ export class LocalRemoteStorage implements RemoteStorageLocal {
         }
 
         
-        let nalDeferred = chunks[liveChunkUID].index.last();
+        let chunkObj = chunks[liveChunkUID];
+
+        let nalDeferred = chunkObj.index.last();
         if(!nalDeferred || !("Promise" in nalDeferred)) {
             throw new Error(`Live chunk is corrupted. Last element in index isn't promise, and yet size exceeds threshold. Last value was ${nalDeferred}`);
         }
-
-        let chunkObj = chunks[liveChunkUID];
 
         if(chunkObj.writeLoop === "exporting") {
             throw new Error(`Chunk is being moved to another storage and is still being written to? This should not be possible. Chunk metadata says live status is ${chunkObj.metadata.IsLive}`);
         }
 
+        if(nalHolder.time < chunkObj.metadata.Ranges.last().lastTime) {
+            throw new Error(`Time cannot flow backwards. NAL received out of order.`);
+        }
+
         // See if this chunk should be finished.
         if(chunkObj.metadata.Size > chunkThresholdBytes && nalHolder.type === NALType.NALType_keyframe) {
+            console.log(`Finishing chunk ${chunkObj.metadata.ChunkUID}, size ${chunkObj.metadata.Size}`);
+
             // Yep, exceeds size and next nal is keyframe, make it not live, and create new chunk.
             chunkObj.metadata.IsLive = false;
-            chunkObj.writeLoop(() => finalizeNALsOnDisk(chunkObj.fileBasePath));
+            let finalizedBasePath = chunkObj.fileBasePath;
+            chunkObj.writeLoop(async () => await finalizeNALsOnDisk(finalizedBasePath));
             chunkObj.index.pop();
             liveChunkUID = this.addChunk(nalHolder);
             nalDeferred.Resolve();
 
-            nalDeferred = chunks[liveChunkUID].index.last();
+            // Add nal to chunk, and queue it to be added to FS
+            chunkObj = chunks[liveChunkUID];
+
+            if(chunkObj.writeLoop === "exporting") {
+                throw new Error(`Chunk is being moved to another storage and is still being written to? This should not be possible. Chunk metadata says live status is ${chunkObj.metadata.IsLive}`);
+            }
+
+            nalDeferred = chunkObj.index.last();
             if(!nalDeferred || !("Promise" in nalDeferred)) {
                 throw new Error(`Live chunk is corrupted. Last element in index isn't promise, and yet size exceeds threshold. Last value was ${nalDeferred}`);
             }
         }
 
-        // Add nal to chunk, and queue it to be added to FS
-        chunkObj = chunks[liveChunkUID];
-
-        if(chunkObj.writeLoop === "exporting") {
-            throw new Error(`Chunk is being moved to another storage and is still being written to? This should not be possible. Chunk metadata says live status is ${chunkObj.metadata.IsLive}`);
-        }
+        
 
         let minGap = GetMinGapSize(this.rate);
         let lastRange = chunkObj.metadata.Ranges.last();
@@ -206,7 +244,7 @@ export class LocalRemoteStorage implements RemoteStorageLocal {
         }
 
         // Check for time going backwards
-        if(nalHolder.time <= lastRange.lastTime) {
+        if(nalHolder.time <= lastRange.lastTime && lastRange.frameCount > 0) {
             throw new Error(`Time did not increase between two NALs. Time must always move forward, and no two NALs may have the same time.`);
         }
 
@@ -230,17 +268,16 @@ export class LocalRemoteStorage implements RemoteStorageLocal {
         // Update chunk
         lastRange.frameCount++;
 
-        let pos = chunkObj.index.length > 0 ? (chunkObj.index.last() as NALIndexInfo).pos : 0;
+        let pos = chunkObj.index.length > 0 ? (chunkObj.index.last() as NALIndexInfo).pos + (chunkObj.index.last() as NALIndexInfo).len : 0;
         let { nal, pps, sps, ... nalInfo } = nalHolder;
+
+        let writeObj = writeNALToDisk(chunkObj.fileBasePath, nalHolder, pos);
         let indexObj: NALIndexInfo & { finishedWrite: boolean } = {
             ... nalInfo,
             pos: pos,
-            len: 0,
+            len: writeObj.len,
             finishedWrite: false,
         };
-
-        let writeObj = writeNALToDisk(chunkObj.fileBasePath, nalHolder, pos);
-        indexObj.len = writeObj.len;
         chunkObj.metadata.Size += writeObj.len;
         chunkObj.metadata.LastAddSeqNum = nalInfo.addSeqNum;
         
@@ -248,43 +285,64 @@ export class LocalRemoteStorage implements RemoteStorageLocal {
         chunkObj.index.push(new Deferred<void>());
         nalDeferred.Resolve();
 
+
         // Queue write to disk
         chunkObj.writeLoop(async () => {
             await writeObj.fnc();
             indexObj.finishedWrite = true;
         });
-
-        (() => {
-            if(this.GetCurrentBytes() < maxBytes) {
-                return;
+        
+        let removeIndex = 0;
+        while(this.GetCurrentBytes() < maxBytes && removeIndex < this.chunksList.length) {
+            let candidate = this.chunksList[removeIndex++];
+            if(candidate.IsMoved) {
+                continue;
             }
-            let candidate = this.chunksList[0];
+
             if(candidate === undefined) {
                 console.error(`GetCurrentBytes is broken. We exceed max bytes, but have no chunks. ${this.DebugName()}`);
-                return;
+                break;
             }
+            if(this.chunks[candidate.ChunkUID].writeLoop === "exporting") {
+                break;
+            }
+            //console.log(`Exporting chunk, ${candidate.ChunkUID} size ${candidate.Size} total storage size ${this.GetCurrentBytes()}, max size ${maxBytes}`);
             if(candidate.IsLive) {
-                console.error(`We have too many bytes, but the oldest chunk is not finished, so we cannot store export this storage. ${this.DebugName()}`);
-                return;
+                //console.error(`We have too many bytes, but the oldest chunk is not finished, so we cannot store export this storage. Candidate: ${candidate.ChunkUID}, ${this.DebugName()}`);
+                break;
             }
             let candidateChecked = candidate;
+            candidateChecked.IsMoved = true;
 
             let { nextStorageSystem } = this;
             if(nextStorageSystem === undefined) {
                 let chunkUID = candidateChecked.ChunkUID;
                 console.error(`Completely deleting chunk ${chunkUID}, ${this.DebugName()}`);
-                this.removeChunk(chunkUID).catch(e => {
+                (async () => {
+                    if(chunkObj.writeLoop === "exporting") {
+                        throw new Error(`We shouldn't be exporting this chunk, we decided to delete it.`);
+                    }
+
+                    // Wait until writes finish, as it may not even have finished writing before we try to delete it.
+                    let writesFinished = new Deferred<void>();
+                    chunkObj.writeLoop(async () => { writesFinished.Resolve() });
+                    await writesFinished.Promise();
+
+                    await this.removeChunk(chunkUID);
+                })().catch(e => {
                     console.error(`Error when deleting chunk ${chunkUID}, ${e.stack}`);
-                    this.onChunkDeleted(candidate.Ranges.last().lastTime);
                 });
-                return;
+                this.onChunkDeleted(candidate.Ranges.last().lastTime);
+            } else {
+                //console.log(`Exporting chunk ${candidate.ChunkUID}`);
+
+                let nextStorageSystemChecked = nextStorageSystem;
+                
+                this.ExportChunk(candidate.ChunkUID, async chunk => {
+                    await nextStorageSystemChecked.AddChunk(chunk);
+                });
             }
-            let nextStorageSystemChecked = nextStorageSystem;
-            
-            this.ExportChunk(candidate.ChunkUID, async chunk => {
-                await nextStorageSystemChecked.AddChunk(chunk);
-            });
-        })();
+        }
     }
 
     public ExportChunk(chunkUID: string, exportFnc: (chunk: Chunk) => Promise<void>): void {
@@ -313,6 +371,12 @@ export class LocalRemoteStorage implements RemoteStorageLocal {
             let nalData = await readNALsBulkFromDisk(chunkObj.fileBasePath);
             let chunkBuffer = createChunkData(index, nalData);
 
+            if(chunkBuffer.length < nalData.length) {
+                console.error(`What? How is the chunk smaller than just the nals?`);
+                console.log(`Chunk ${chunkObj.metadata.ChunkUID}, chunkBuffer: ${chunkBuffer.length}, NALData: ${nalData.length}, index count: ${index.length}`);
+                process.exit();
+            }
+
             let { pendingReads, ...chunkMetadata } = chunkObj.metadata;
             let chunk: Chunk = {
                 ... chunkMetadata,
@@ -329,10 +393,9 @@ export class LocalRemoteStorage implements RemoteStorageLocal {
 
         let chunkObj = chunks[chunkUID];
 
-        chunkObj.metadata.IsMoved = true;
-
         let waitCount = 0;
         while(!isEmpty(chunkObj.metadata.pendingReads)) {
+            console.log(`Waiting for reads to finish to remove chunk ${chunkUID}`);
             await Promise.all(Object.values(chunkObj.metadata.pendingReads));
             waitCount++;
             if(waitCount > 100) {
@@ -358,20 +421,24 @@ export class LocalRemoteStorage implements RemoteStorageLocal {
 
         let { Data, ...chunkMetadataBase } = chunk;
         let chunkMetadata: ChunkMetadataExtended = { ... chunkMetadataBase, pendingReads: {} };
+
+        console.log(`Adding chunk ${chunk.ChunkUID}, data size: ${Data.length} to ${this.DebugName()}, isLive: ${chunkMetadata.IsLive}`);
+
         insertIntoListMap(this.chunksList, chunkMetadata, x => x.Ranges[0].firstTime);
 
         let chunkData = parseChunkData(Data);
 
+        let chunkUID = chunk.ChunkUID;
+        let fileBasePath = this.path + chunkUID;
         // Wait until we write to disk before we add it to memory, as all in memory reads
         //  read from disk presently (if they didn't then we could make writing non-blocking).
-        await writeNALsBulkToDisk(chunk.ChunkUID, chunkData.nalsBulk, chunkData.index);
+        await writeNALsBulkToDisk(fileBasePath, chunkData.nalsBulk, chunkData.index, chunkMetadata.IsLive);
 
         let index: (NALIndexInfo & { finishedWrite: boolean })[] = [];
         for(let indexInfo of chunkData.index) {
             index.push({ ...indexInfo, finishedWrite: true });
         }
 
-        let chunkUID = chunk.ChunkUID;
         this.chunks[chunkUID] = {
             metadata: chunkMetadata,
             index: index,
@@ -399,13 +466,30 @@ export class LocalRemoteStorage implements RemoteStorageLocal {
             throw new Error(`cancelId already used on other ReadNALs. ${cancelId}`);
         }
         pendingReads[cancelId] = onRead;
+        try {
+            let times = await accessFnc(chunkObj.index) as (NALIndexInfo & { finishedWrite: boolean })[];
+            if(times.length === 0) {
+                return [];
+            }
 
-        let times = await accessFnc(chunkObj.index);
-        if(times.length === 0) {
-            return [];
+            if(times.some(x => !x.finishedWrite)) {
+                if(chunkObj.writeLoop === "exporting") {
+                    throw new Error(`Some writes are not finished but we are exporting data?`);
+                }
+                // Eh... excessive waiting, but this shouldn't happen that often.
+                let writesFinished = new Deferred<void>();
+                chunkObj.writeLoop(async () => { writesFinished.Resolve() });
+                await writesFinished.Promise();
+                if(times.some(x => !x.finishedWrite)) {
+                    throw new Error(`Waited for writes to finish, but they didn't. This should be impossible.`);
+                }
+            }
+
+            return await readNALs(chunkObj.fileBasePath, times, onRead.Promise());
+        } finally {
+            onRead.Resolve();
+            delete pendingReads[cancelId];
         }
-
-        return readNALs(chunkObj.fileBasePath, times as NALIndexInfo[], onRead.Promise())
     }
     public CancelReadNALs(cancelId: string, chunkUID: string): void {
         this.chunks[chunkUID].metadata.pendingReads[cancelId].Resolve();
@@ -417,25 +501,37 @@ export class LocalRemoteStorage implements RemoteStorageLocal {
 
 
     public GetCurrentBytes(): number {
-        return sum(this.GetChunkMetadatas().map(x => x.Size));
+        return sum(this.GetChunkMetadatas().filter(x => !x.IsMoved).map(x => x.Size));
     }
     
 
     /** Requires bytesPerSecond, secondsPerChunk, and maxCost, so we can take into account extra glacier minimum storage restrictions. */
     public MaxGB(bytesPerSecond: number, secondsPerChunk: number, maxCost: number): number {
-        let chunkSize = bytesPerSecond * secondsPerChunk;
-        return chunkSize * 3;
+        if(this.fakeOverrides) {
+            return this.fakeOverrides.maxGB(bytesPerSecond, secondsPerChunk, maxCost);
+        }
+        return maxCost / this.baseTotalCost * this.baseTotalStorageBytes / 1024 / 1024 / 1024;
     }
 
     /** Assumes 1 request. If you are planning on making more than 1 request, call this once, and then multiply it by the number of requests.
      *      (this should probably be called with the chunk size).
     */
     public CostPerGBDownload(bytes: number): number {
+        if(this.fakeOverrides) {
+            return this.fakeOverrides.costPerGB(bytes);
+        }
         return 0;
     }
 
     public DebugName(): string {
+        if(this.fakeOverrides) {
+            return this.fakeOverrides.debugName + "_" + this.rate;
+        }
         return `disk_rate_${this.rate}`;
+    }
+
+    public IsFixedStorageSize(): boolean {
+        return !this.fakeOverrides;
     }
 }
 
@@ -443,7 +539,7 @@ export function createChunkData(index: NALIndexInfo[], nalData: Buffer): Buffer 
     let indexData = Buffer.from(JSON.stringify(index));
     let indexLengthBytes = Buffer.alloc(4);
     indexLengthBytes.writeUInt32BE(indexData.length, 0);
-    return Buffer.from([ indexLengthBytes, indexData, nalData ]);
+    return Buffer.concat([ indexLengthBytes, indexData, nalData ]);
 }
 
 function parseChunkData(chunk: Buffer): {

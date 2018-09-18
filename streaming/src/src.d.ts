@@ -139,6 +139,7 @@ type MP4Video = {
 interface IBrowserReceiver extends Controller<IBrowserReceiver> {
     acceptNewTimeRanges_VOID(rate: number, ranges: NALRange[]): void;
     onDeleteTime(rate: number, deleteTime: number): void;
+    onNewRate(rate: number): void;
 }
 
 interface IHost extends
@@ -146,7 +147,7 @@ interface IHost extends
 ITimeServer {
     //subscribeToWebcamFrameInfo(): Promise<void>;
 
-    GetRates(): Promise<number[]>;
+    SyncRates(): Promise<number[]>;
 
     /** If we have data at a frame level there will be ranges of zero length.
      *      The data will be sorted by time.

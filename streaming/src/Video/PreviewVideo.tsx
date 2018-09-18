@@ -25,7 +25,11 @@ import { PollLoop } from "../site/PollLoop";
 interface IProps {
     viewport: { startTime: number; endTime: number; };
     setViewport: (viewport: { startTime: number; endTime: number; }) => void;
-    getServerRanges: (rate: number) => Promise<NALRange[]>;
+    serverRanges: {
+        [rate: number]: {
+            serverRanges: NALRange[];
+        }|undefined
+    };
 }
 interface FramePreviewImage {
     imageUrl: string;
@@ -98,8 +102,11 @@ export class PreviewVideo extends React.Component<IProps, IState> {
         });
     }
 
+    lastHash: string|undefined;
     componentWillUpdate(nextProps: IProps, nextState: IState) {
-        if(this.getPreviewFramesHash(this.props, this.state) !== this.getPreviewFramesHash(nextProps, nextState)) {
+        let currentHash = this.getPreviewFramesHash(nextProps, nextState);
+        if(this.lastHash !== currentHash) {
+            this.lastHash = currentHash;
             (async () => {
                 try {
                     await this.getPreviewFrames(nextProps, nextState);
@@ -113,10 +120,23 @@ export class PreviewVideo extends React.Component<IProps, IState> {
         }
     }
     getPreviewFramesHash(props: IProps, state: IState): string {
+        let { serverRanges, viewport } = props;
+
+        let allVisisbleRanges: { [rate: number]: NALRange[] } = {};
+        for(let rateStr in serverRanges) {
+            let ranges = serverRanges[rateStr];
+            if(!ranges) continue;
+            let visibleRanges = getMaskedRanges(
+                { firstTime: viewport.startTime, lastTime: viewport.endTime, frameCount: 0 },
+                ranges.serverRanges
+            );
+            allVisisbleRanges[rateStr] = visibleRanges;
+        }
+
         return JSON.stringify({
             viewport: props.viewport,
             widthPx: state.widthPx,
-            pollSeqNum: state.pollSeqNum,
+            allVisisbleRanges: allVisisbleRanges
         });
     }
 
@@ -125,9 +145,10 @@ export class PreviewVideo extends React.Component<IProps, IState> {
         (doAsyncCall, isCancelError) =>
     async (props: IProps, state: IState) => {
         await doAsyncCall(profile, "getPreviewFrames", async (): Promise<any> => {
+
             let { viewport } = props;
             let { widthPx, imageRows } = state;
-            let rates = await doAsyncCall(() => this.downloader.Rates);
+            let rates = this.downloader.Rates;
 
             let viewportSize = (viewport.endTime - viewport.startTime);
 
@@ -149,9 +170,12 @@ export class PreviewVideo extends React.Component<IProps, IState> {
                 
                 while(rateIndex > 0) {
                     let rate = rates[rateIndex];
-                    let ranges = await doAsyncCall(this.props.getServerRanges, rate);
+                    let ranges = this.props.serverRanges[rate];
+                    if(!ranges) {
+                        throw new Error(`Have no server ranges for rate that is in rates list? ${rate}`);
+                    }
 
-                    let visibleRanges = getMaskedRanges({ firstTime: viewport.startTime, lastTime: viewport.endTime, frameCount: 0 }, ranges);
+                    let visibleRanges = getMaskedRanges({ firstTime: viewport.startTime, lastTime: viewport.endTime, frameCount: 0 }, ranges.serverRanges);
                     let frameCount = sum(visibleRanges.map(x => x.frameCount));
                     // If there aren't enough frame, get more frames
                     if(frameCount < targetPreviewFrames * 0.5 || frameCount < 4) {
@@ -271,6 +295,11 @@ export class PreviewVideo extends React.Component<IProps, IState> {
 
             let currentRate = await doAsyncCall(getRate, state.heightPx / aspectRatioEstimate);
 
+            if(!currentRate) {
+                console.log(`No current rate, cannot get previews.`);
+                return;
+            }
+
             let previewFrames = await doAsyncCall(getVideos, currentRate);
 
             let correctRate = await doAsyncCall(getRate, this.getMaxFrameWidthPx(previewFrames));
@@ -280,9 +309,14 @@ export class PreviewVideo extends React.Component<IProps, IState> {
             if(correctRate < currentRate) {
                 previewFrames = await doAsyncCall(getVideos, correctRate);
             }
+
+            if(previewFrames.length === 0) {
+                console.log(`No preview frames`);
+                return;
+            }
             
             // Get average width in time, and take a fraction of that, and make poll delay that.
-            let framePositions = this.getPreviewFramePositions(previewFrames);
+            let framePositions = this.getPreviewFramePositions(previewFrames, false);
             let averageTime = mean(framePositions.map(x => (x.right - x.left) * (viewport.endTime - viewport.startTime)));
 
             let pollDelay = averageTime * 0.5 / imageRows;
@@ -338,7 +372,7 @@ export class PreviewVideo extends React.Component<IProps, IState> {
         this.props.setViewport({ startTime: s, endTime: e });
     }
 
-    private getPreviewFramePositions(previewFrames: PreviewVideo["state"]["previewFrames"]) {
+    private getPreviewFramePositions(previewFrames: PreviewVideo["state"]["previewFrames"], forRender: boolean) {
         let { viewport } = this.props;
         let { widthPx, heightPx, imageRows } = this.state;
 
@@ -500,7 +534,9 @@ export class PreviewVideo extends React.Component<IProps, IState> {
             }
 
             sort(downsampledFrames, x => x.time);
-            console.log(`Downsampled ${previewFrames.length} to ${downsampledFrames.length}`);
+            if(!forRender) {
+                console.log(`Downsampled ${previewFrames.length} to ${downsampledFrames.length}`);
+            }
             previewFrames = downsampledFrames;
 
             
@@ -735,7 +771,7 @@ export class PreviewVideo extends React.Component<IProps, IState> {
         let { viewport } = this.props;
         let { previewFrames, widthPx, heightPx, imageRows } = this.state;
 
-        let previewFramesLocation = this.getPreviewFramePositions(previewFrames);
+        let previewFramesLocation = this.getPreviewFramePositions(previewFrames, true);
 
         // TODO: Only increase pollSeqNum if a range inside the viewport has been extended.
         return (

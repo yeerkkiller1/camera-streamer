@@ -1,4 +1,4 @@
-import { appendFile, writeFile, readFile, open, read, close, exists, stat, write, unlink } from "fs";
+import { appendFile, writeFile, readFile, open, read, close, exists, stat, write, unlink, mkdir } from "fs";
 import * as fs from "fs";
 
 export function unlinkFilePromise(filePath: string) {
@@ -37,6 +37,14 @@ export function existsFilePromise(filePath: string) {
     return new Promise<boolean>((resolve, reject) => {
         exists(filePath, (exists) => {
             resolve(exists);
+        });
+    });
+}
+
+export function mkdirFilePromise(filePath: string) {
+    return new Promise<void>((resolve, reject) => {
+        mkdir(filePath, (err) => {
+            err ? reject(err) : resolve();
         });
     });
 }

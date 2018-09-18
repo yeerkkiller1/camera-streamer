@@ -1,14 +1,9 @@
 import { Deferred, PChan } from "pchannel";
 import { clock } from "../util/time";
 import { findAfterIndex, findAtOrBeforeOrAfterIndex, findAtIndex } from "../util/algorithms";
-import { RealTimeToVideoTime, RealDurationToVideoDuration, GetTimescaleSeconds } from "./TimeMap";
+import { RealTimeToVideoTime, RealDurationToVideoDuration, GetTimescaleSeconds, GetMinGapSize } from "./TimeMap";
 import { MuxVideo } from "mp4-typescript";
-
-//todonext
-// Convert this to a naked function that takes a NALIndexInfo[], a function to get the underlying NALMinInfo, and
-//  has an optional newNal channel that sends void, but triggers when NALIndexInfo has more data?
-// BUT, there is definitely a bug in the live loop already. Maybe the channel should send NALIndexInfo?
-//  Or we should at least do something to fix the bug.
+import { UnionUndefined } from "../util/misc";
 
 export function GetVideoTimes(
     startTime: number,
@@ -21,6 +16,13 @@ export function GetVideoTimes(
     if(nalInfos.length === 0) {
         return "VIDEO_EXCEEDS_LIVE_VIDEO";
     }
+
+    // Actually, we also need to impose a maxgap size in the times choosen. Because if we make a video span across
+    //  two far apart videos we tie though gaps together, which is odd, AND breaks the video by making one frame
+    //  stay on the screen for too long (days, which breaks our 32-bit timescale based frame duration encoding).
+    //  - Well, and not to mention, we don't want to play the video gaps, we want to skip them.
+    let rate = nalInfos[0].rate;
+    let minGap = GetMinGapSize(rate);
 
     function getNextKeyFrameIndex(index: number): number {
         index++;
@@ -62,7 +64,35 @@ export function GetVideoTimes(
     }
 
     // End before the next keyframe
-    let nextKeyFrameIndex = getNextKeyFrameIndex(firstNalIndex + minFrames);
+    let nextKeyFrameIndex = nalInfos.length;
+    {
+        let validNextKeyFrameIndex = firstNalIndex;
+        let index = firstNalIndex + 1;
+        while(index < nalInfos.length) {
+            let lastKeyFrame = UnionUndefined(nalInfos[validNextKeyFrameIndex]);
+
+            if(nalInfos[index].type === NALType.NALType_keyframe) {
+                validNextKeyFrameIndex = nextKeyFrameIndex = index;
+
+                if(index >= firstNalIndex + minFrames) {
+                    break;
+                }
+            }
+
+            if(lastKeyFrame && (nalInfos[index].time - lastKeyFrame.time >= minGap)) {
+                let lastTime = lastKeyFrame.time;
+                let curTime = nalInfos[index].time;
+                if(nalInfos[index].type !== NALType.NALType_keyframe) {
+                    console.warn(`Gap exceeding min gap size in video found, BUT, the frame is an intraframe and so DEPENDS on the previous frame. So we are stitching it with the last frame, even though there should be a video gap here. Time: ${lastTime} to ${curTime}, min gap size ${minGap}`);
+                } else {
+                    break;
+                }
+            }
+
+            index++;
+        }
+    }
+
     if(nextReceivedFrameTime) {
         let nextNalIndex = findAtIndex(nalInfos, nextReceivedFrameTime, x => x.time);
         let nextNal = nalInfos[nextNalIndex];
@@ -109,8 +139,7 @@ export async function muxVideo(nals: NALHolderMin[], rate: number, speed: number
         let frameDurationInSeconds = 0;
         if(i < nals.length - 1) {
             let next = nals[i + 1];
-            frameDurationInSeconds = (next.time - x.time) / 1000;
-            //console.log({frameDurationInSeconds});
+            frameDurationInSeconds = RealDurationToVideoDuration(next.time - x.time, rate) / 1000;
         }
         
         return {
@@ -119,7 +148,7 @@ export async function muxVideo(nals: NALHolderMin[], rate: number, speed: number
         };
     });
 
-    let baseMediaDecodeTimeInSeconds = nals[0].time / 1000;
+    let baseMediaDecodeTimeInSeconds = RealTimeToVideoTime(nals[0].time, rate) / 1000;
     let mp4Video = await MuxVideo({
         sps: keyframe.sps,
         pps: keyframe.pps,

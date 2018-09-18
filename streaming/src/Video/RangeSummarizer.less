@@ -38,10 +38,18 @@
             &-serverRange, &-requestedRange, &-receivedRange {
                 .block();
                 min-width: 1px;
+                opacity: 0.8;
             }
 
             &-serverRange {
                 background: hsla(203, 75%, 75%, 1);
+                &-text {
+                    color: hsl(0, 0%, 50%);
+                    font-size: 12px;
+                    left: 3px;
+                    bottom: 1px;
+                    position: absolute;
+                }
             }
 
             &-requestedRange {

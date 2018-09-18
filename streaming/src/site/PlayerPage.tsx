@@ -1,4 +1,4 @@
-import { g, PChan, TransformChannel, TransformChannelAsync, SetTimeoutAsync } from "pchannel";
+import { g, PChan, TransformChannel, TransformChannelAsync, SetTimeoutAsync, Deferred } from "pchannel";
 
 import * as React from "react";
 import * as ReactDOM from "react-dom";
@@ -8,7 +8,7 @@ import { setTimeServer, getTimeSynced } from "../util/time";
 
 // For polyfills
 import "../util/math";
-import { binarySearchMapped, binarySearchMap, insertIntoListMap, findAtOrBefore, findAfter, findAtOrBeforeIndex, findClosest, findClosestIndex, findAtOrBeforeOrAfter, findAtOrBeforeOrAfterIndex, findAt, findAtOrAfter } from "../util/algorithms";
+import { binarySearchMapped, binarySearchMap, insertIntoListMap, findAtOrBefore, findAfter, findAtOrBeforeIndex, findClosest, findClosestIndex, findAtOrBeforeOrAfter, findAtOrBeforeOrAfterIndex, findAt, findAtOrAfter, sort } from "../util/algorithms";
 import { formatDuration } from "../util/format";
 import { RangeSummarizer } from "../Video/RangeSummarizer";
 import { VideoHolder, IVideoHolder } from "../Video/VideoHolder";
@@ -30,6 +30,7 @@ interface IProps { }
 
 interface RangeSummaryObj {
     serverRanges: NALRange[];
+    rangesLoaded: Deferred<void>;
 }
 interface IState {
     rate: number;
@@ -209,9 +210,29 @@ export class PlayerPage extends React.Component<IProps, IState> implements IBrow
         }
     }
 
+    onNewRate(rate: number): void {
+        let { rates } = this.state;
+        if(rates.indexOf(rate) >= 0) return;
+
+        rates.push(rate);
+        sort(rates, x => x);
+
+        (async () => {
+            try {
+                let ranges = await this.server.syncTimeRanges(rate);
+                this.addServerRanges(rate, ranges);
+                this.getSummaryObj(rate).rangesLoaded.Resolve();
+            } catch(e) {
+                console.error(`Error in syncing ranges, this is a big problem. ${e.stack}`);
+            }
+        })();
+    }
     async syncVideoInfo() {
-        let rates = await this.server.GetRates();
-        this.setState({ rates });
+        let rates = await this.server.SyncRates();
+        console.log({rates});
+        for(let rate of rates) {
+            this.onNewRate(rate);
+        }
 
         this.setRate(this.state.rate, true);
     }
@@ -219,7 +240,7 @@ export class PlayerPage extends React.Component<IProps, IState> implements IBrow
     private getSummaryObj(rate: number): RangeSummaryObj {
         let summary = this.state.rateSummaries[rate];
         if(!summary) {
-            summary = this.state.rateSummaries[rate] = { serverRanges: [] };
+            summary = this.state.rateSummaries[rate] = { serverRanges: [], rangesLoaded: new Deferred<void>() };
         }
         return summary;
     }
@@ -268,15 +289,15 @@ export class PlayerPage extends React.Component<IProps, IState> implements IBrow
     }
 
     getServerRanges = async (rate: number): Promise<NALRange[]> => {
-        let serverRanges = this.getSummaryObj(rate).serverRanges;
+        let obj = this.getSummaryObj(rate);
 
-        // Starting syncing data on this rate
-        if(serverRanges.length === 0) {
-            let ranges = await this.server.syncTimeRanges(rate);
-            this.addServerRanges(rate, ranges);
+        if(obj.rangesLoaded.Value()) {
+            return obj.serverRanges;
         }
 
-        return serverRanges;
+        await obj.rangesLoaded.Promise();
+
+        return obj.serverRanges;
     };
 
     acceptNewTimeRanges_VOID(rate: number, ranges: NALRange[]): void {
@@ -420,17 +441,22 @@ export class PlayerPage extends React.Component<IProps, IState> implements IBrow
             }
 
             let timeObj = await doAsyncCall(this.downloader.DownloadVideo, this.state.rate, startTime, minFrames, live);
+
+            // TODO: Maybe add playback support (so not here, in an independent loop) for jumping video gaps
+            //  during playback (as the regular video player won't jump gaps).
+
             // No more video available, so stop. (Probably hit the live data, and we don't have live video playing support right now)
-            if(timeObj === "FINISHED") return;
             // Reached the end of the video
-            if(timeObj.nextTime === undefined) {
-                console.log(`Reached end of video, and live functionality is not coded yet.`);
+            if(timeObj === "FINISHED" || timeObj.nextTime === undefined) {
+                // TODO: Switch to live video.
+                console.log(`Reached end of video, but switching from non-live to live video isn't coded yet. ${timeObj}`);
                 return;
             }
 
             let holder = this.videoCache[this.state.rate];
             if(startPlaying && holder && !holder.IsPlaying()) {
-                await holder.Play();
+                let holderChecked = holder;
+                await doAsyncCall(() => holderChecked.Play());
             }
 
             if(live && holder && this.state.currentPlayTime < startTime - minPlayBuffer * 1.5) {
@@ -442,10 +468,12 @@ export class PlayerPage extends React.Component<IProps, IState> implements IBrow
             while(true) {
                 let realTimeBuffer = 0;
 
-                let curRange = findAtOrBeforeOrAfter(this.downloader.GetInfo(this.state.rate).ReceivedRanges, this.state.currentPlayTime, x => x.firstTime);
-                if(curRange && curRange.lastTime >= this.state.currentPlayTime) {
-                    realTimeBuffer = curRange.lastTime - this.state.currentPlayTime;
-                    nextTime = curRange.lastTime;
+                if(nextTime < this.state.currentPlayTime) {
+                    let curRange = findAtOrBeforeOrAfter(this.downloader.GetInfo(this.state.rate).ReceivedRanges, this.state.currentPlayTime, x => x.firstTime);
+                    if(curRange && curRange.lastTime >= this.state.currentPlayTime) {
+                        realTimeBuffer = curRange.lastTime - this.state.currentPlayTime;
+                        nextTime = curRange.lastTime;
+                    }
                 }
 
                 let delay = RealDurationToVideoDuration(realTimeBuffer, this.state.rate) / this.state.playRate - minPlayBuffer;
@@ -531,7 +559,7 @@ export class PlayerPage extends React.Component<IProps, IState> implements IBrow
             if(currentPlayTime !== this.state.currentPlayTime) {
                 this.setState({ currentPlayTime });
             }
-            if(Math.abs(currentPlayTime - this.state.targetPlayTime) < VideoDurationToRealDuration(5000, this.state.rate)) {
+            if(RealDurationToVideoDuration(Math.abs(currentPlayTime - this.state.targetPlayTime), this.state.rate) < 5000) {
                 if(currentPlayTime !== this.state.targetPlayTime) {
                     this.setState({ targetPlayTime: currentPlayTime });
                 }
@@ -610,14 +638,13 @@ export class PlayerPage extends React.Component<IProps, IState> implements IBrow
                                             loadedVideos={videoInfo.Videos}
                                             server={this.server}
                                             debugVideo={false}
-                                            receivedRanges={videoInfo.ReceivedRanges}
-                                            serverRanges={rangesObj.serverRanges}
-                                            receivedFrames={videoInfo.VideoFrames}
                                             currentPlayTime={this.state.currentPlayTime}
                                             targetPlayTime={this.state.targetPlayTime}
                                             onTimeClick={time => this.streamVideo(time)}
-                                            getServerRanges={this.getServerRanges}
                                             isLiveStreaming={this.state.isLive}
+                                            rate={rate}
+                                            serverRangesFull={this.state.rateSummaries}
+                                            receivedRangesFull={this.downloader.data}
                                         />
                                     );
                                 })()}

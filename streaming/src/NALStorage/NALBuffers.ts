@@ -159,6 +159,11 @@ export async function readNalLoop(nalFilePath: string, onNal: (nal: NALHolderMin
         }
 
         if(remainingBuf !== undefined) {
+            if(remainingBuf.length === 1 && remainingBuf[0] === 0) {
+                return false;
+            }
+
+            console.log(remainingBuf);
             throw new Error(`Last nal is truncated or corrupted? For file: ${nalFilePath}, extra ${remainingBuf.length} bytes`);
         }
     } catch(e) {
@@ -173,7 +178,7 @@ export async function loadIndexFromDisk(nalFilePath: string, indexFilePath: stri
     index: NALIndexInfo[];
     isLive: boolean;
 } | undefined> {
-    return await profile(`Init ${nalFilePath}`, async () => {
+    //return await profile(`Init ${nalFilePath}`, async () => {
         let nalExists = await existsFilePromise(nalFilePath);
         let indexExists = await existsFilePromise(indexFilePath);
         if(!nalExists) {
@@ -222,6 +227,9 @@ export async function loadIndexFromDisk(nalFilePath: string, indexFilePath: stri
             
             let lastNal = index.last();
             let predictedEnd = lastNal.pos + lastNal.len;
+            if(!isLive) {
+                predictedEnd += 1;
+            }
             if(predictedEnd !== nalStats.size) {
                 throw new Error(`Index and nal file don't specify the same size. The index thinks the nal file is ${predictedEnd} long, but the nal file is really ${nalStats.size}`);
             }
@@ -265,24 +273,31 @@ export async function loadIndexFromDisk(nalFilePath: string, indexFilePath: stri
         
         sort(nalInfos, x => x.time);
 
-        await createIndexFile(indexFilePath, nalInfos);
+        await createIndexFile(indexFilePath, nalInfos, isLive);
 
         return { index: nalInfos, isLive };
-    });
+    //});
 }
 
 export function writeNALToDisk(
     fileBasePath: string,
     nalHolder: NALHolderMin,
-    pos: number
+    pos: number,
 ): {
     fnc: () => Promise<void>;
     len: number;
 } {
     let nalFullBuffer = writeNal(nalHolder);
-    
-    let { nal, sps, pps, ...indexObj } = nalHolder;
-    let x: NALIndexInfo = { ...indexObj, len: nalFullBuffer.length, pos: pos };
+    let nalIndexObj: NALIndexInfo = {
+        pos: pos,
+        len: nalFullBuffer.length,
+        rate: nalHolder.rate,
+        time: nalHolder.time,
+        type: nalHolder.type,
+        width: nalHolder.width,
+        height: nalHolder.height,
+        addSeqNum: nalHolder.addSeqNum,
+    };
 
     let nalFilePath = fileBasePath + ".nal";
     let indexFilePath = fileBasePath + ".index";
@@ -292,7 +307,7 @@ export function writeNALToDisk(
         fnc: async () => {
             await Promise.all([
                 appendFilePromise(nalFilePath, nalFullBuffer),
-                appendFilePromise(indexFilePath, JSON.stringify(indexObj) + "\n")
+                appendFilePromise(indexFilePath, JSON.stringify(nalIndexObj) + "\n")
             ]);
         }
     };
@@ -302,17 +317,17 @@ export async function readNALsBulkFromDisk(fileBasePath: string): Promise<Buffer
     return readFilePromise(fileBasePath + ".nal");
 }
 
-export async function writeNALsBulkToDisk(fileBasePath: string, nalsBulk: Buffer, index: NALIndexInfo[]): Promise<void> {
+export async function writeNALsBulkToDisk(fileBasePath: string, nalsBulk: Buffer, index: NALIndexInfo[], isLive: boolean): Promise<void> {
     let nalFilePath = fileBasePath + ".nal";
     let indexFilePath = fileBasePath + ".index";
 
     await Promise.all([
         writeFilePromise(nalFilePath, nalsBulk),
-        createIndexFile(indexFilePath, index),
+        createIndexFile(indexFilePath, index, isLive),
     ]);
 }
 
-async function createIndexFile(indexFilePath: string, index: NALIndexInfo[]): Promise<void> {
+async function createIndexFile(indexFilePath: string, index: NALIndexInfo[], isLive: boolean): Promise<void> {
     // Delete the index file if it exists, as it is garbage
     try {
         await unlinkFilePromise(indexFilePath);
@@ -327,11 +342,15 @@ async function createIndexFile(indexFilePath: string, index: NALIndexInfo[]): Pr
 
         let nalInfosText = nals.map(x => JSON.stringify(x) + "\n").join("");
         await appendFilePromise(indexFilePath, nalInfosText);
-        console.log(`Wrote part at ${i}, length ${size}`);
+        //console.log(`Wrote part at ${i}, length ${size}`);
 
         i += size;
     }
-    console.log(`Rewrote index file ${indexFilePath}`);
+    //console.log(`Rewrote index file ${indexFilePath}`);
+
+    if(!isLive) {
+        await appendFilePromise(indexFilePath, JSON.stringify("finished") + "\n");
+    }
 }
 
 export async function finalizeNALsOnDisk(
@@ -342,7 +361,7 @@ export async function finalizeNALsOnDisk(
 
     await Promise.all([
         appendFilePromise(nalFilePath, Buffer.from([0])),
-        appendFilePromise(indexFilePath, "finished" + "\n")
+        appendFilePromise(indexFilePath, JSON.stringify("finished") + "\n")
     ]);
 }
 
