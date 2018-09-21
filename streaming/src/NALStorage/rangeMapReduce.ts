@@ -174,7 +174,7 @@ export function removeRange(removedRange: NALRange, ranges: NALRange[], countFra
     }
 
     let index = findAtOrBeforeIndex(ranges, removedRange.firstTime, x => x.firstTime);
-    while(index < ranges.length) {
+    while(ranges[index]) {
         if(ranges[index].firstTime > removedRange.lastTime) break;
         let mutatedRanges = removeSingleRange(removedRange, ranges[index]);
         ranges.splice(index, 1, ...mutatedRanges);

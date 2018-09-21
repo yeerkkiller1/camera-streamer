@@ -521,7 +521,6 @@ class Receiver extends TimeServer implements IReceiver, IHost {
         minFrames: number,
         nextReceivedFrameTime: number|undefined|"live",
         rate: number,
-        startTimeExclusive: boolean,
         onlyTimes?: boolean,
         forPreview?: boolean
     ): Promise<MP4Video | "VIDEO_EXCEEDS_NEXT_TIME" | "VIDEO_EXCEEDS_LIVE_VIDEO" | "CANCELLED"> {
@@ -542,7 +541,7 @@ class Receiver extends TimeServer implements IReceiver, IHost {
         try {
             let manager = await nalManager.GetStorage(rate);
 
-            return await manager.GetVideo(startTime, minFrames, nextReceivedFrameTime, startTimeExclusive, onlyTimes, forPreview, cancelToken);
+            return await manager.GetVideo(startTime, minFrames, nextReceivedFrameTime, onlyTimes, forPreview, cancelToken);
         } finally {
             onCallComplete.Resolve(undefined);
             {
@@ -659,7 +658,6 @@ let server = createServer(async (request, response) => {
             time,
             1,
             undefined,
-            false,
             false,
             true,
             new Deferred<void>()

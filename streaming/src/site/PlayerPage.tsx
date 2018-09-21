@@ -448,6 +448,7 @@ export class PlayerPage extends React.Component<IProps, IState> implements IBrow
             // No more video available, so stop. (Probably hit the live data, and we don't have live video playing support right now)
             // Reached the end of the video
             if(timeObj === "FINISHED" || timeObj.nextTime === undefined) {
+                // This also happens if we reach our nextTime.
                 // TODO: Switch to live video.
                 console.log(`Reached end of video, but switching from non-live to live video isn't coded yet. ${timeObj}`);
                 return;
@@ -466,7 +467,7 @@ export class PlayerPage extends React.Component<IProps, IState> implements IBrow
             
             let nextTime = timeObj.nextTime;
             while(true) {
-                let realTimeBuffer = 0;
+                let realTimeBuffer = nextTime - this.state.currentPlayTime;
 
                 if(nextTime < this.state.currentPlayTime) {
                     let curRange = findAtOrBeforeOrAfter(this.downloader.GetInfo(this.state.rate).ReceivedRanges, this.state.currentPlayTime, x => x.firstTime);

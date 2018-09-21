@@ -45,7 +45,6 @@ interface NALStorage {
         startTime: number,
         minFrames: number,
         nextReceivedFrameTime: number|undefined|"live",
-        startTimeExclusive: boolean,
         onlyTimes: boolean|undefined,
         forPreview: boolean|undefined,
         cancelToken: {
@@ -85,18 +84,17 @@ interface RemoteStorageBase {
     /** Sorted by Ranges[0].firstTime */
     GetChunkMetadatas(): ChunkMetadata[];
 
-    /** Call this directly after using GetChunkMetadata and the index corresponding to the range in GetChunkMetadata is guaranteed to exist. */
-    ReadNALs(
-        cancelId: string,
-        chunkUID: string,
-        accessFnc: (
-            // A promise value may exist at the end of the array, and signifies that the index is live. When the promise is resolved
-            //  the array will be updated (either to have another NALInfoTime, or to no longer be live). If it isn't live it means
-            //  the NAL after the last nal is a keyframe.
-            index: (NALInfoTime | { Promise(): Promise<void> })[]
-        ) => Promise<NALInfoTime[]>
-    ): Promise<NALHolderMin[] | "CANCELLED">;
-    CancelReadNALs(cancelId: string, chunkUID: string): void;
+
+
+
+    // A promise value may exist at the end of the array, and signifies that the index is live. When the promise is resolved
+    //  the array will be updated (either to have another NALInfoTime, or to no longer be live). If it isn't live it means
+    //  the NAL after the last nal is a keyframe.
+    GetIndex(cancelId: string, chunkUID: string): Promise<{index: (NALInfoTime | { Promise(): Promise<void> })[]}>;
+    // Must be called synchronously after calling GetIndex.
+    ReadNALs(cancelId: string, chunkUID: string, times: NALInfoTime[]): Promise<NALHolderMin[] | "CANCELLED">;
+
+    CancelCall(cancelId: string, chunkUID: string): void;
 
     /** Exports chunk. Assumes exportFnc moves it to another storage system, and when it finishes we delete the chunk from ourself. */
     ExportChunk(chunkUID: string, exportFnc: (chunk: Chunk) => Promise<void>): void;

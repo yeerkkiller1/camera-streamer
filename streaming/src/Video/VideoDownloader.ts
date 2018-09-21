@@ -6,6 +6,7 @@ import { GetVideoFPSEstimate, GetMinGapSize, GetRangeFPSEstimate } from "../NALS
 import { reduceRanges, removeRange } from "../NALStorage/rangeMapReduce";
 import { Deferred } from "pchannel";
 import { sum } from "../util/math";
+import { getTimeSynced } from "../util/time";
 
 export class VideoDownloader implements IBrowserReceiver {
     public data: {
@@ -74,9 +75,10 @@ export class VideoDownloader implements IBrowserReceiver {
             console.log("download video", {rate}, new Error().stack);
         }
 
-        let nextReceiverRange: NALRange|undefined;
+        let nextReceivedTime: number|undefined;
         let startTimeExclusive = false;
 
+        
         let summaryObj = this.GetInfo(rate);
         {
             // If we have a video at startTime return it, and it's end as the nextTime.
@@ -86,34 +88,38 @@ export class VideoDownloader implements IBrowserReceiver {
             //  us unfinished). This forces preview logic to keep requesting data, instead of getting stuck of incomplete data.
             if(video && video.frameTimes.last().time >= startTime && video.nextKeyFrameTime) {
                 let nextTime: number|undefined;
-                let nextVideo = summaryObj.Videos[videoIndex + 1];
-                if(nextVideo) {
+                nextTime = video.nextKeyFrameTime;
+                if(!nextTime) {
+                    let nextVideo = summaryObj.Videos[videoIndex + 1];
                     nextTime = nextVideo.frameTimes[0].time;
-                } else {
-                    nextTime = video.nextKeyFrameTime;
                 }
+
+                // We need to refresh to download time of this video, so it isn't evacuated from the cache.
+                this.updateAddTime(rate, video);
 
                 return { video: video, nextTime };
             }
-        }
-        {
-            let range = findAfter(summaryObj.fixedReceivedRanges, startTime, x => x.firstTime);
-            if(range) {
-                nextReceiverRange = range;
+
+            let nextVideo = summaryObj.Videos[videoIndex + 1];
+            if(video && nextVideo) {
+                nextReceivedTime = nextVideo.frameTimes[0].time;
             }
         }
+        
+        /* Shouldn't need this, as startTime should be moved to the next time with the nextTime manipulation stuff above.
         {
             let range = findAtOrBefore(summaryObj.fixedReceivedRanges, startTime, x => x.firstTime);
             if(range && range.lastTime > startTime) {
                 startTimeExclusive = true;
             }
         }
+        */
 
-
+        console.log(`GetVideo, startTime: ${startTime}, minFrames: ${minFrames}, nextReceivedTime: ${nextReceivedTime}, startTimeExclusive: ${startTimeExclusive}`);
         let video = await doAsyncCall(this.server.GetVideo,
             startTime,
             minFrames,
-            live ? "live" : nextReceiverRange && nextReceiverRange.firstTime,
+            live ? "live" : nextReceivedTime,
             rate,
             startTimeExclusive,
             this.onlyTimes,
@@ -127,9 +133,16 @@ export class VideoDownloader implements IBrowserReceiver {
 
         let nextTime: number|undefined;
         if(video === "VIDEO_EXCEEDS_NEXT_TIME") {
-            if(!nextReceiverRange) {
+            if(nextReceivedTime) {
+                debugger;
+                return { video: undefined, nextTime: nextReceivedTime };
+            }
+            if(!nextReceivedTime) {
                 //throw new Error(`Impossible, the server has no data after time. startTime: ${startTime}`);
             }
+
+            debugger;
+            console.log(`${video}, nextReceivedTime: ${nextReceivedTime}`);
 
             return "FINISHED";
         }
@@ -165,14 +178,17 @@ export class VideoDownloader implements IBrowserReceiver {
             [range],
             summaryObj.ReceivedRanges,
             false,
-            GetMinGapSize(rate)
-        )[0];
+            // 0 gap size, as the nextTime stuff above should handle that.
+            0,
+            //GetMinGapSize(rate)
+        )[0] || range;
         if(video.nextKeyFrameTime) {
             reduceRanges(
                 [range],
                 summaryObj.fixedReceivedRanges,
                 false,
-                GetMinGapSize(rate)
+                0,
+                //GetMinGapSize(rate)
             );
         }
 
@@ -180,7 +196,7 @@ export class VideoDownloader implements IBrowserReceiver {
             insertIntoListMap(summaryObj.VideoFrames, frame, x => x.time, "warn");
         }
         insertIntoListMap(summaryObj.Videos, video, x => x.frameTimes[0].time, "warn");
-        this.addVideo(rate, Date.now(), video, range);
+        this.addVideo(rate, getTimeSynced(), video, range);
 
         // If the video storage exceeds a certain amount, start evicting old videos.
         let curBytes = sum(summaryObj.Videos.map(x => x.mp4Video.length));
@@ -197,6 +213,9 @@ export class VideoDownloader implements IBrowserReceiver {
     });
 
     private addVideo(rate: number, addTime: number, video: MP4Video, range: NALRange): void {
+        if(!range) {
+            debugger;
+        }
         let summaryObj = this.GetInfo(rate);
 
         while(findAt(summaryObj.addTimes, addTime, x => x.addTime)) {
@@ -205,6 +224,33 @@ export class VideoDownloader implements IBrowserReceiver {
         insertIntoListMap(summaryObj.addTimes, { addTime, video, range }, x => x.addTime);
         insertIntoListMap(summaryObj.addTimesSortedByFirstTime, { addTime, firstTime: video.frameTimes[0].time }, x => x.firstTime);
     }
+
+    private updateAddTime(rate: number, video: MP4Video): void {
+        let summaryObj = this.GetInfo(rate);
+
+        let newAddTime = getTimeSynced();
+
+        while(findAt(summaryObj.addTimes, newAddTime, x => x.addTime)) {
+            newAddTime += 0.01;
+        }
+
+        let oldVideoObj = findAt(summaryObj.addTimesSortedByFirstTime, video.frameTimes[0].time, x => x.firstTime);
+        if(!oldVideoObj) {
+            debugger;
+            throw new Error(`Cannot find video with start time ${video.frameTimes[0].time}`);
+        }
+        let oldVideo = findAt(summaryObj.addTimes, oldVideoObj.addTime, x => x.addTime);
+        if(!oldVideo) {
+            debugger;
+            throw new Error(`Cannot find video added at time ${oldVideoObj.addTime}`);
+        }
+        
+        removeFromListMap(summaryObj.addTimes, oldVideoObj.addTime, x => x.addTime);
+        oldVideo.addTime = newAddTime;
+        oldVideoObj.addTime = newAddTime;
+        insertIntoListMap(summaryObj.addTimes, oldVideo, x => x.addTime);
+    }
+
 
     private removeVideo(rate: number, addTime: number) {
         let summaryObj = this.GetInfo(rate);
@@ -222,7 +268,13 @@ export class VideoDownloader implements IBrowserReceiver {
             removeFromListMap(summaryObj.VideoFrames, frameTime.time, x => x.time);
         }
 
-        removeRange(videoAddObj.range, summaryObj.ReceivedRanges, false);
+        try {
+            removeRange(videoAddObj.range, summaryObj.ReceivedRanges, false);
+        } catch(e) {
+            console.log(videoAddObj, summaryObj);
+            debugger;
+            throw e;
+        }
 
         // TODO: Warn if removing a permanent video, this should really only be for temporary videos (with undefined nextTimes).
         // fixed video should never need to be removed

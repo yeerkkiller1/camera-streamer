@@ -1,5 +1,5 @@
 import { randomUID, UnionUndefined, profile } from "../../util/misc";
-import { sort, findAtOrBefore, findAtOrBeforeIndex } from "../../util/algorithms";
+import { sort, findAtOrBefore, findAtOrBeforeIndex, binarySearchMap, findAt, findAtIndex } from "../../util/algorithms";
 import { reduceRanges, deleteRanges, removeRange } from "../rangeMapReduce";
 import { GetMinGapSize } from "../TimeMap";
 import { max } from "../../util/math";
@@ -90,6 +90,10 @@ export class NALStorageManagerImpl implements NALStorageManager {
     }
 
     public AddNAL(val: NALHolderMin): void {
+        if(val.rate === 1) {
+            this.nextAddSeqNum.ForceResolve(val.addSeqNum + 1);
+        }
+        
         let rate = val.rate;
         this.GetStorage(rate);
         let storageObj = this.storageHolders[rate];
@@ -249,7 +253,7 @@ class StorageCombined implements NALStorage {
     constructor(
         private rate: number,
         // Should also be in writeStorageSystemObjs, we just pass it twice to help with typings
-        private localSystem: RemoteStorageLocal,
+        private liveSystem: RemoteStorageLocal,
         private readStorageSystems: RemoteStorage[],
         private writeStorageSystemObjs: {
             storage: RemoteStorage;
@@ -313,13 +317,17 @@ class StorageCombined implements NALStorage {
     }
     public GetNextAddSeqNum(): number {
         // Go through all systems, in case we just loaded data, and the live storage system has changed since them
-        return max(this.readStorageSystems.map(x => {
+        let addSeqNum = max(this.readStorageSystems.map(x => {
             let metadatas = x.GetChunkMetadatas();
             if(metadatas.length === 0) {
                 return 0;
             }
             return metadatas.last().LastAddSeqNum;
         }));
+
+        console.log({addSeqNum});
+
+        return addSeqNum;
     }
 
     public SubscribeToRanges(
@@ -340,14 +348,13 @@ class StorageCombined implements NALStorage {
 
     public AddNAL(val: NALHolderMin): void {
         this.addNALTime(val.time);
-        this.localSystem.AddSingleNAL(val);
+        this.liveSystem.AddSingleNAL(val);
     }
-
+    
     public async GetVideo(
         startTime: number,
         minFrames: number,
         nextReceivedFrameTime: number | "live" | undefined,
-        startTimeExclusive: boolean,
         onlyTimes: boolean | undefined,
         forPreview: boolean | undefined,
         cancelToken: {
@@ -358,166 +365,218 @@ class StorageCombined implements NALStorage {
                 error: any;
             } | undefined;
         }
-    ): Promise<MP4Video | "VIDEO_EXCEEDS_LIVE_VIDEO" | "VIDEO_EXCEEDS_NEXT_TIME" | "CANCELLED"> {
-
+    ): Promise<MP4Video | "CANCELLED"> {
         let cancelId = randomUID("GetVideo_canceltoken");
 
-        // We check from small sources to larger sources, as small sources contain more recent data.
-        //  So, data maybe be something like [0, 1], [2, 4], [4, 8]
-        //  Which means if we are looking for data from 3 to 0 then we want the first range with data before or at 3,
-        //  which is, [2, 4], which is the range we want to start at.        
-        for(let obj of this.writeStorageSystemObjs) {
-            let { storage } = obj;
-            let metadatas = storage.GetChunkMetadatas();
+        const getFirstTimeOfNextChunk = (chunkFirstTime: number): number|undefined => {
+            for(let i = 0; i < this.writeStorageSystemObjs.length; i++) {
+                let { storage } = this.writeStorageSystemObjs[i];
+                let metadatas = storage.GetChunkMetadatas();
 
-            let chunkIndex = findAtOrBeforeIndex(metadatas, startTime, x => x.Ranges[0].firstTime);
-            let chunk = UnionUndefined(metadatas[chunkIndex]);
+                let index = findAtIndex(metadatas, chunkFirstTime, x => x.Ranges[0].firstTime);
+                let metadata = UnionUndefined(metadatas[index]);
+                if(metadata && !metadata.IsMoved) {
+                    let nextMetadata = UnionUndefined(metadatas[index + 1]);
+                    if(nextMetadata && !nextMetadata.IsMoved) {
+                        return nextMetadata.Ranges[0].firstTime;
+                    }
 
-            if(!chunk || chunk.IsMoved) {
-                continue;
-            }
-            let chunkChecked = chunk;
-            let chunkUID = chunk.ChunkUID;
-
-            cancelToken.Promise().then(() => {
-                storage.CancelReadNALs(cancelId, chunkUID);
-            });
-
-            let abortResult: "VIDEO_EXCEEDS_LIVE_VIDEO" | "VIDEO_EXCEEDS_NEXT_TIME" | undefined;
-            let nextKeyFrameTime: number|undefined;
-
-            let timeOnlyTimes: NALInfoTime[] | undefined;
-
-            let nals = await Promise.race([storage.ReadNALs(cancelId, chunkUID,
-                async index => {
-
-                    let curLiveIterationCount = 0;
-                    while(true) {
-                        if(curLiveIterationCount++ > 1000) {
-                            throw new Error(`Exceeded live iteration max of 1000, so aborting GetVideo loop.`);
+                    while(i > 0) {
+                        i--;
+                        let obj = this.writeStorageSystemObjs[i];
+                        let metadatas = obj.storage.GetChunkMetadatas();
+                        for(let i = 0; i < metadatas.length; i++) {
+                            let metadata = metadatas[i];
+                            if(!metadata.IsMoved) {
+                                return metadata.Ranges[0].firstTime;
+                            }
                         }
+                    }
+                    return undefined;
+                }
+            }
+            return undefined;
+        };
 
-                        let { videoTimes, livePromise } = callGetVideoTimes();
+        const getChunk = (chunkFirstTime: number): { storage: RemoteStorage; chunk: ChunkMetadata }|undefined => {
+            for(let i = 0; i < this.writeStorageSystemObjs.length; i++) {
+                let obj = this.writeStorageSystemObjs[i];
+                let { storage } = obj;
+                let metadatas = storage.GetChunkMetadatas();
 
-                        if((videoTimes === "VIDEO_EXCEEDS_NEXT_TIME" || videoTimes === "VIDEO_EXCEEDS_LIVE_VIDEO") && nextReceivedFrameTime === "live") {
-                            if(livePromise) {
-                                await livePromise;
-                                continue;
+                let metadata = findAt(metadatas, chunkFirstTime, x => x.Ranges[0].firstTime);
+                if(metadata && !metadata.IsMoved) {
+                    return {
+                        storage,
+                        chunk: metadata
+                    };
+                }
+            }
+            return undefined;
+        };
+
+        const prepareRead = async (): Promise<{ times: NALInfoTime[]; nextKeyFrameTime: number|undefined; chunkFirstTime?: number; } | "CANCELLED"> => {
+
+            const fnc = async (): Promise<{ times: NALInfoTime[]; nextKeyFrameTime: number|undefined; chunkFirstTime?: number; } | undefined> => {
+
+                let oldestTime = this.writeStorageSystemObjs.last().storage.GetChunkMetadatas()[0].Ranges[0].firstTime;
+                if(startTime < oldestTime) {
+                    console.log(`startTime less than oldestTime, so it is being changed to oldestTime.`);
+                    startTime = oldestTime;
+                }
+
+                // We check from small sources to larger sources, as small sources contain more recent data.
+                //  So, data maybe be something like [7, 8], [4, 7], [0, 4]
+                //  Which means if we are looking for data from 5 to 8 then we want the first range with data before or at 5,
+                //  which is, [4, 7], which is the range we want to start at.
+                for(let i = 0; i < this.writeStorageSystemObjs.length; i++) {
+                    let obj = this.writeStorageSystemObjs[i];
+                    let { storage } = obj;
+                    let metadatas = storage.GetChunkMetadatas();
+
+                    let chunkIndex = findAtOrBeforeIndex(metadatas, startTime, x => x.Ranges[0].firstTime);
+                    let baseChunkIndex = chunkIndex;
+                    while(metadatas[chunkIndex] && metadatas[chunkIndex].IsMoved) {
+                        chunkIndex++;
+                    }
+                    let chunk = UnionUndefined(metadatas[chunkIndex]);
+
+                    console.log(`Storage ${storage.DebugName()}, chunkIndex: ${chunkIndex}, valid ${!!chunk}, baseChunkIndex: ${baseChunkIndex}`);
+
+                    if(!chunk) {
+                        continue;
+                    }
+
+                    let chunkUID = chunk.ChunkUID;
+
+                    cancelToken.Promise().then(() => {
+                        storage.CancelCall(cancelId, chunkUID);
+                    });
+                    console.log(`Reading ${chunk.ChunkUID} from ${obj.storage.DebugName()}`);
+
+                    let indexObj = await Promise.race([storage.GetIndex(cancelId, chunkUID), cancelToken.Promise()]);
+                    if(!indexObj) {
+                        return;
+                    }
+                    let { livePromise, videoTimes } = callGetVideoTimes(indexObj.index);
+                    let { nextKeyFrameTime } = videoTimes;
+
+                    if(!nextKeyFrameTime) {
+                        if(livePromise) {
+                            // No next chunk to choose from
+                            if(nextReceivedFrameTime === "live") {
+                                if(forPreview) {
+                                    // Fine, just read it
+                                } else {
+                                    // Wait on live promise, then return and rerun the function
+                                    await Promise.race([livePromise, cancelToken.Promise()]);
+                                    return;
+                                }
                             } else {
-                                throw new Error(`GetVideo failed because request exceeded live video... but requested chunk was not live. Either there is a bug in GetVideo, or the input parameters were invalid. videoTimes ${videoTimes}, startTime ${startTime}, startTimeExclusive: ${startTimeExclusive}, nextReceivedTime ${nextReceivedFrameTime}, chunk ${chunkChecked.Ranges[0].firstTime} to ${chunkChecked.Ranges.last().lastTime}`);
+                                return { times: [], nextKeyFrameTime: undefined };
                             }
-                        }
-
-                        if(typeof videoTimes === "string") {
-                            abortResult = videoTimes;
-                            return [];
-                        }
-                        
-                        nextKeyFrameTime = videoTimes.nextKeyFrameTime;
-                        timeOnlyTimes = videoTimes.times;
-                        if(onlyTimes) {
-                            return [];
                         } else {
-                            return videoTimes.times;
+                            // Get the time from the next chunk
+                            nextReceivedFrameTime = getFirstTimeOfNextChunk(chunk.Ranges[0].firstTime);
                         }
                     }
 
-                    function callGetVideoTimes() {
-                        let livePromise: Promise<void>|undefined;
-                        // Index should always have entries, unless it is finished and empty. But how could it finish if it is empty!?
-                        let nextPromise = index.last();
-                        if("Promise" in nextPromise) {
-                            livePromise = nextPromise.Promise();
-                            index.pop();
-                        }
-                        try {
-                            let indexTyped = index as NALInfoTime[];
-                            let allowMissingEndKeyframe: boolean = livePromise === undefined ? true : false;
-                            if(forPreview) {
-                                allowMissingEndKeyframe = true;
-                            }
-                            let videoTimes = GetVideoTimes(
-                                startTime,
-                                minFrames,
-                                nextReceivedFrameTime === "live" ? undefined : nextReceivedFrameTime,
-                                startTimeExclusive,
-                                // If the chunk is finished, we don't need an end keyframe, as every chunk implicitly has a keyframe
-                                //  after the last NAL.
-                                allowMissingEndKeyframe,
-                                indexTyped
-                            );
-
-                            return {
-                                videoTimes,
-                                livePromise,
-                            };
-                        } finally {
-                            if(livePromise) {
-                                index.push(nextPromise);
-                            }
-                        }
-                    }
-                }
-            ), cancelToken.Promise()]);
-
-            if(nals == undefined || nals === "CANCELLED") {
-                return "CANCELLED";
-            }
-
-            if(abortResult !== undefined) {
-                return abortResult;
-            }
-
-            // Set nextKeyFrameTime to the next chunk start if it is undefined.
-            if(nextKeyFrameTime === undefined && !forPreview) {
-                // Get a new chunkIndex, as if any chunk is exported the indexes will change.
-                //  If the chunk we are searching for was deleted we will get -1 (~0), so we will take the first chunk,
-                //  which turns out to be correct, so we can just leave it.
-                let chunkIndex = findAtOrBeforeIndex(metadatas, startTime, x => x.Ranges[0].firstTime);
-                let nextChunk = UnionUndefined(metadatas[chunkIndex + 1]);
-                if(nextChunk) {
-                    nextKeyFrameTime = nextChunk.Ranges[0].firstTime;
-                } else {
-                    if(nextReceivedFrameTime === "live") {
-                        // No matter how many chunks are deleted chunkIndex should always be at least -1, and never greater than all the chunks that are
-                        //  left (we delete old chunks, not newer ones, so a deleted chunk will never be newer than existing chunks), so nextChunk
-                        //  should always be valid, unless we read from the last chunk, in which case it should have been live, and blocked while
-                        //  reading until nextKeyFrameTime could be populated... so this should really never happen.
-
-                        // This can happen if the next chunk is deleted before we get the nextTime from it.
-                        //todonext
-                        // Fix this.
-
-                        console.log(`Using chunk ${chunkUID}`);
-                        console.log("nals", nals.map(x => x.time));
-                        console.error(`Live data requested, but we found no next time, and we are the last chunk? So... this shouldn't be possible, the previous chunk should still be live until the next chunk is ready to be live. startTime ${startTime}, startTimeExclusive: ${startTimeExclusive}, nextReceivedTime ${nextReceivedFrameTime}, chunk ${chunkChecked.Ranges[0].firstTime} to ${chunkChecked.Ranges.last().lastTime}`);
-                        process.exit();
-                    }
-                }
-            }
-
-            if(onlyTimes && timeOnlyTimes) {
-                let firstTime = UnionUndefined(timeOnlyTimes[0]);
-                let video: MP4Video = {
-                    rate: this.rate,
-
-                    width: firstTime ? firstTime.width : 0,
-                    height: firstTime ? firstTime.height : 0,
-
-                    nextKeyFrameTime,
-                    mp4Video: Buffer.alloc(0),
-                    frameTimes: timeOnlyTimes,
+                    return {
+                        times: videoTimes.times,
+                        nextKeyFrameTime,
+                        chunkFirstTime: chunk.Ranges[0].firstTime
+                    };
                 };
-                return video;
+            };
+
+            let curLiveWait = 0;
+            while(true) {
+                let value = await fnc();
+                if(cancelToken.Value()) {
+                    return "CANCELLED";
+                }
+                if(value) {
+                    return value;
+                }
+                curLiveWait++;
+                let maxWaitCount = Math.max(minFrames * 2, 100);
+                if(curLiveWait > maxWaitCount) {
+                    throw new Error(`Took too long to get values, waited ${maxWaitCount} times.`)
+                }
             }
-            
-            let video = await Promise.race([await muxVideo(nals, this.rate, 1, nextKeyFrameTime), cancelToken.Promise()]);
-            if(!video) {
-                return "CANCELLED";
-            }
-            return video;
+
+            throw new Error(`Cannot find any storage systems that matches. This should not be possible.`);
         }
 
-        return "VIDEO_EXCEEDS_LIVE_VIDEO";
+        let readObj = await prepareRead();
+        if(readObj === "CANCELLED") {
+            return "CANCELLED";
+        }
+        let { times, nextKeyFrameTime, chunkFirstTime } = readObj;
+
+        if(times.length === 0 || onlyTimes) {
+            return {
+                frameTimes: times,
+                height: 0,
+                width: 0,
+                mp4Video: Buffer.from([]),
+                nextKeyFrameTime: nextKeyFrameTime,
+                rate: this.rate
+            };
+        }
+
+        if(!chunkFirstTime) {
+            throw new Error(`Impossible, no chunk, but we have times? Times ${times.map(x => x.time).join(", ")}`);
+        }
+
+        let chunkData = getChunk(chunkFirstTime);
+        if(!chunkData) {
+            throw new Error(`Cannot find chunk. ${chunkFirstTime}`);
+        }
+
+        let chunkDataChecked = chunkData;
+        cancelToken.Promise().then(x => {
+            chunkDataChecked.storage.CancelCall(cancelId, chunkDataChecked.chunk.ChunkUID);
+        });
+
+        let nals = await Promise.race([chunkData.storage.ReadNALs(cancelId, chunkData.chunk.ChunkUID, times), cancelToken.Promise()]);
+
+        if(!nals || nals === "CANCELLED") {
+            return "CANCELLED";
+        }
+        let video = await Promise.race([await muxVideo(nals, this.rate, 1, nextKeyFrameTime), cancelToken.Promise()]);
+        if(!video) {
+            return "CANCELLED";
+        }
+        return video;
+        
+
+        function callGetVideoTimes(index: (NALInfoTime | { Promise(): Promise<void> })[]) {
+            let livePromise: Promise<void>|undefined;
+            // Index should always have entries, unless it is finished and empty. But how could it finish if it is empty!?
+            let nextPromise = index.last();
+            if("Promise" in nextPromise) {
+                livePromise = nextPromise.Promise();
+                index.pop();
+            }
+            try {
+                let indexTyped = index as NALInfoTime[];
+                let videoTimes = GetVideoTimes(
+                    startTime,
+                    minFrames,
+                    nextReceivedFrameTime === "live" ? undefined : nextReceivedFrameTime,
+                    indexTyped
+                );
+
+                return {
+                    videoTimes,
+                    livePromise
+                };
+            } finally {
+                if(livePromise) {
+                    index.push(nextPromise);
+                }
+            }
+        }
     }
 }

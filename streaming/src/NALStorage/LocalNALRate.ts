@@ -380,6 +380,7 @@ export class LocalRemoteStorage implements RemoteStorageLocal {
             let { pendingReads, ...chunkMetadata } = chunkObj.metadata;
             let chunk: Chunk = {
                 ... chunkMetadata,
+                IsMoved: false,
                 Data: chunkBuffer,
             };
 
@@ -422,7 +423,7 @@ export class LocalRemoteStorage implements RemoteStorageLocal {
         let { Data, ...chunkMetadataBase } = chunk;
         let chunkMetadata: ChunkMetadataExtended = { ... chunkMetadataBase, pendingReads: {} };
 
-        console.log(`Adding chunk ${chunk.ChunkUID}, data size: ${Data.length} to ${this.DebugName()}, isLive: ${chunkMetadata.IsLive}`);
+        //console.log(`Adding chunk ${chunk.ChunkUID}, data size: ${Data.length} to ${this.DebugName()}, isLive: ${chunkMetadata.IsLive}`);
 
         insertIntoListMap(this.chunksList, chunkMetadata, x => x.Ranges[0].firstTime);
 
@@ -447,19 +448,11 @@ export class LocalRemoteStorage implements RemoteStorageLocal {
         };
     }
 
-
-    public async ReadNALs(
-        cancelId: string,
-        chunkUID: string,
-        accessFnc: (
-            index: (NALInfoTime | { Promise(): Promise<void> })[]
-        ) => Promise<NALInfoTime[]>
-    ): Promise<NALHolderMin[] | "CANCELLED"> {
-        let chunkObj = this.chunks[chunkUID];
-        if(chunkObj.metadata.IsMoved) {
-            throw new Error(`Cannot Read from chunk as it has been moved. Do not attempt to start new reads on moved chunks. ${chunkUID}`);
-        }
-
+    // Hmm... so, this locks it synchronously, and then after the async part finishes, it should synchronously unlock it and return to
+    //  the caller. So in theory, if multiple lockChunk functions are called, with gaps in between, there should be no race
+    //  condition of the chunks being deleted inbetween (unless in the gaps we add nals, but that won't happen, as that function
+    //  should be entirely independent of lockChunk calls.)
+    private async lockChunk<T>(cancelId: string, chunkObj: ChunkObj, fnc: (onCancelled: Promise<void>) => Promise<T>): Promise<T> {
         let onRead = new Deferred<void>();
         let { pendingReads } = chunkObj.metadata;
         if(cancelId in pendingReads) {
@@ -467,7 +460,46 @@ export class LocalRemoteStorage implements RemoteStorageLocal {
         }
         pendingReads[cancelId] = onRead;
         try {
-            let times = await accessFnc(chunkObj.index) as (NALIndexInfo & { finishedWrite: boolean })[];
+            return await fnc(onRead.Promise());
+        } finally {
+            onRead.Resolve();
+            delete pendingReads[cancelId];
+        }
+    }
+
+    // But... we also need to lock the chunk while reading the index, and then keep it locked to prevent it from being deleted
+    //  until we can start the ReadNALs call.
+    public async GetIndex(cancelId: string, chunkUID: string): Promise<{index: (NALInfoTime | { Promise(): Promise<void> })[]}> {
+        let chunkObj = this.chunks[chunkUID];
+        if(chunkObj.metadata.IsMoved) {
+            throw new Error(`Cannot Read from chunk as it has been moved. Do not attempt to start new reads on moved chunks. ${chunkUID}`);
+        }
+
+        return this.lockChunk(cancelId, chunkObj, onCancelled => {
+            return new Promise<{index: (NALInfoTime | { Promise(): Promise<void> })[]}>((resolve, reject) => {
+                setTimeout(() => {
+                    let chunkObj = this.chunks[chunkUID];
+                    if(chunkObj.metadata.IsMoved) {
+                        reject(new Error(`Cannot Read from chunk as it has been moved. Do not attempt to start new reads on moved chunks. ${chunkUID}`));
+                        return;
+                    }
+    
+                    resolve({
+                        index: chunkObj.index
+                    });
+                }, 1000);
+            });
+        });
+    }
+
+    public async ReadNALs(cancelId: string, chunkUID: string, timesRaw: NALInfoTime[]): Promise<NALHolderMin[] | "CANCELLED"> {
+        let chunkObj = this.chunks[chunkUID];
+        if(chunkObj.metadata.IsMoved) {
+            throw new Error(`Cannot Read from chunk as it has been moved. Do not attempt to start new reads on moved chunks. ${chunkUID}`);
+        }
+
+        return this.lockChunk(cancelId, chunkObj, async (onCancelled) => {
+            let times = timesRaw as (NALIndexInfo & { finishedWrite: boolean })[];
             if(times.length === 0) {
                 return [];
             }
@@ -485,14 +517,21 @@ export class LocalRemoteStorage implements RemoteStorageLocal {
                 }
             }
 
-            return await readNALs(chunkObj.fileBasePath, times, onRead.Promise());
-        } finally {
-            onRead.Resolve();
-            delete pendingReads[cancelId];
-        }
+            return await readNALs(chunkObj.fileBasePath, times, onCancelled);
+        });
     }
-    public CancelReadNALs(cancelId: string, chunkUID: string): void {
-        this.chunks[chunkUID].metadata.pendingReads[cancelId].Resolve();
+
+
+    public CancelCall(readTokenRaw: {}, chunkUID: string): void {
+        let readToken = readTokenRaw as {id: string|null};
+        if(readToken.id === null) {
+            return;
+        }
+        let chunkObj = UnionUndefined(this.chunks[chunkUID]);
+        if(!chunkObj) return;
+        let readDeferred = UnionUndefined(chunkObj.metadata.pendingReads[readToken.id]);
+        if(!readDeferred) return;
+        readDeferred.Resolve();
     }
 
     public GetChunkMetadatas(): ChunkMetadata[] {

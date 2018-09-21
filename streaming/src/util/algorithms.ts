@@ -40,10 +40,9 @@ export function findAtOrBeforeIndex<T>(list: T[], value: number, map: (t: T) => 
     if(index < 0) {
         index = ~index - 1;
     }
-    // Eh... idk
-    if(index < 0) {
-        index = 0;
-    }
+    // I removed `if(index < 0) index = 0;`, will that break anything? If we are before everything we really shouldn't
+    //  return a valid index, because that value isn't at or before us.
+    
     return index;
 }
 export function findAtOrBeforeOrAfterIndex<T>(list: T[], value: number, map: (t: T) => number): number {
