@@ -44,9 +44,9 @@ interface NALStorage {
     GetVideo(
         startTime: number,
         minFrames: number,
-        nextReceivedFrameTime: number|undefined|"live",
-        onlyTimes: boolean|undefined,
-        forPreview: boolean|undefined,
+        nextReceivedFrameTime: number|undefined|null|"live",
+        onlyTimes: boolean|undefined|null,
+        forPreview: boolean|undefined|null,
         cancelToken: {
             Promise(): Promise<void>;
             Value(): {
@@ -55,7 +55,7 @@ interface NALStorage {
                 error: any;
             } | undefined;
         },
-    ): Promise<MP4Video | "VIDEO_EXCEEDS_LIVE_VIDEO" | "VIDEO_EXCEEDS_NEXT_TIME" | "CANCELLED">;
+    ): Promise<MP4Video | "CANCELLED">;
 }
 
 
@@ -83,7 +83,6 @@ interface RemoteStorageBase {
     
     /** Sorted by Ranges[0].firstTime */
     GetChunkMetadatas(): ChunkMetadata[];
-
 
 
 

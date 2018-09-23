@@ -321,6 +321,17 @@ export async function writeNALsBulkToDisk(fileBasePath: string, nalsBulk: Buffer
     let nalFilePath = fileBasePath + ".nal";
     let indexFilePath = fileBasePath + ".index";
 
+    index = index.map(x => ({
+        pos: x.pos,
+        len: x.len,
+        rate: x.rate,
+        time: x.time,
+        type: x.type,
+        width: x.width,
+        height: x.height,
+        addSeqNum: x.addSeqNum,
+    }))
+
     await Promise.all([
         writeFilePromise(nalFilePath, nalsBulk),
         createIndexFile(indexFilePath, index, isLive),

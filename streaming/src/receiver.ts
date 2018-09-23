@@ -119,14 +119,14 @@ async function getFinalStorageFolder() {
 //      but then split the large chunks for high rates, as even after splitting high rates won't cause high uploader request rates.
 //  - ALSO, if chunks are too small, the metadata for them will be too large and we will run out of memory on the server.
 
-const secondPerRate1Chunk = 2;
+const secondPerRate1Chunk = 10;
 // Eh... more than the real cost, because localStorage is digital ocean so sort of free.
 const totalCostPerMonth = 20;
 const averageFrameBytes = 1024 * 10;
 const framesPerSecond = 10;
 const baseRate = 4;
 
-let maxTotalDiskUsage = 1024 * 1024 * 10;
+let maxTotalDiskUsage = 1024 * 1024 * 160;
 //maxTotalDiskUsage = 1024 * 1024 * 160;
 
 let localStorage = (rate: number) => new LocalRemoteStorage(rate, totalCostPerMonth, maxTotalDiskUsage);
@@ -519,11 +519,11 @@ class Receiver extends TimeServer implements IReceiver, IHost {
     public async GetVideo(
         startTime: number,
         minFrames: number,
-        nextReceivedFrameTime: number|undefined|"live",
+        nextReceivedFrameTime: number|undefined|null|"live",
         rate: number,
-        onlyTimes?: boolean,
-        forPreview?: boolean
-    ): Promise<MP4Video | "VIDEO_EXCEEDS_NEXT_TIME" | "VIDEO_EXCEEDS_LIVE_VIDEO" | "CANCELLED"> {
+        onlyTimes?: boolean|null,
+        forPreview?: boolean|null
+    ): Promise<MP4Video | "CANCELLED"> {
         let client = this.client;
         let cancelToken = new Deferred<void>();
         let onCallComplete = new Deferred<void>();

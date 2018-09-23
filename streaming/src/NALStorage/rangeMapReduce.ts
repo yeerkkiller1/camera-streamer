@@ -174,6 +174,9 @@ export function removeRange(removedRange: NALRange, ranges: NALRange[], countFra
     }
 
     let index = findAtOrBeforeIndex(ranges, removedRange.firstTime, x => x.firstTime);
+    if(index < 0) {
+        index = 0;
+    }
     while(ranges[index]) {
         if(ranges[index].firstTime > removedRange.lastTime) break;
         let mutatedRanges = removeSingleRange(removedRange, ranges[index]);
@@ -201,7 +204,10 @@ export function getMaskedRanges(maskRange: NALRange, ranges: NALRange[]): NALRan
     let overlappingRanges: NALRange[] = [];
 
     let index = findAtOrBeforeIndex(ranges, maskRange.firstTime, x => x.firstTime);
-    while(index < ranges.length) {
+    if(index < 0) {
+        index = 0;
+    }
+    while(ranges[index]) {
         if(ranges[index].firstTime > maskRange.lastTime) break;
         overlappingRanges.push(...getOverlap(maskRange, ranges[index]));
         index++;

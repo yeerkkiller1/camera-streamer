@@ -17,6 +17,7 @@ import { createChunkData } from "../LocalNALRate";
 
 export class NALStorageManagerImpl implements NALStorageManager {
     private nextAddSeqNum = new Deferred<number>();
+    private rateInited = new Deferred<void>();
 
     private storageHolders: { [rate: number]: {
         storage: Deferred<NALStorage>;
@@ -55,19 +56,25 @@ export class NALStorageManagerImpl implements NALStorageManager {
                 } catch(e) {
                     console.error(`Could process storage for rate 1. ${e.stack}`);
                     console.error(`This is a fatal error, the StorageManager will just break after this.`);
+                    process.exit();
                 }
             },
             e => {
                 console.error(`Could not get storage for rate 1. ${e.stack}`);
                 console.error(`This is a fatal error, the StorageManager will just break after this.`);
+                process.exit();
             });
 
-        this.getRates().catch(e => {
+        this.initRates().then(
+        () => {
+            this.rateInited.Resolve();
+        },
+        e => {
             console.error(`getRates error, ${e.stack}`);
         });
     }
 
-    private async getRates(): Promise<number[]> {
+    private async initRates(): Promise<number[]> {
         let rate = 1;
         let emptyCountLeft = 2;
         while(true) {
@@ -120,6 +127,7 @@ export class NALStorageManagerImpl implements NALStorageManager {
 
     private newRateChannel = new PChannelMultiListen<number>();
     public async SyncRates(callback: (newRate: number) => void): Promise<number[]> {
+        await this.rateInited.Promise();
         this.newRateChannel.Subscribe(callback);
         let rates = Object.keys(this.storageHolders).map(x => +x);
         sort(rates, x => x);
@@ -366,8 +374,6 @@ class StorageCombined implements NALStorage {
             } | undefined;
         }
     ): Promise<MP4Video | "CANCELLED"> {
-        let cancelId = randomUID("GetVideo_canceltoken");
-
         const getFirstTimeOfNextChunk = (chunkFirstTime: number): number|undefined => {
             for(let i = 0; i < this.writeStorageSystemObjs.length; i++) {
                 let { storage } = this.writeStorageSystemObjs[i];
@@ -419,7 +425,15 @@ class StorageCombined implements NALStorage {
 
             const fnc = async (): Promise<{ times: NALInfoTime[]; nextKeyFrameTime: number|undefined; chunkFirstTime?: number; } | undefined> => {
 
-                let oldestTime = this.writeStorageSystemObjs.last().storage.GetChunkMetadatas()[0].Ranges[0].firstTime;
+                let oldestTime = startTime;
+                let systems = this.writeStorageSystemObjs;
+                for(let i = systems.length - 1; i >= 0; i--) {
+                    let oldestMetadata = UnionUndefined(systems[i].storage.GetChunkMetadatas()[0]);
+                    if(oldestMetadata) {
+                        oldestTime = oldestMetadata.Ranges[0].firstTime;
+                        break;
+                    }
+                }
                 if(startTime < oldestTime) {
                     console.log(`startTime less than oldestTime, so it is being changed to oldestTime.`);
                     startTime = oldestTime;
@@ -441,7 +455,7 @@ class StorageCombined implements NALStorage {
                     }
                     let chunk = UnionUndefined(metadatas[chunkIndex]);
 
-                    console.log(`Storage ${storage.DebugName()}, chunkIndex: ${chunkIndex}, valid ${!!chunk}, baseChunkIndex: ${baseChunkIndex}`);
+                    console.log(`Storage ${storage.DebugName()}, chunkIndex: ${chunkIndex}, valid ${!!chunk}, baseChunkIndex: ${baseChunkIndex}, chunks: ${metadatas.length}`);
 
                     if(!chunk) {
                         continue;
@@ -449,6 +463,7 @@ class StorageCombined implements NALStorage {
 
                     let chunkUID = chunk.ChunkUID;
 
+                    let cancelId = randomUID(`GetVideo_GetIndex_CancelToken_${chunkUID}`);
                     cancelToken.Promise().then(() => {
                         storage.CancelCall(cancelId, chunkUID);
                     });
@@ -458,6 +473,7 @@ class StorageCombined implements NALStorage {
                     if(!indexObj) {
                         return;
                     }
+
                     let { livePromise, videoTimes } = callGetVideoTimes(indexObj.index);
                     let { nextKeyFrameTime } = videoTimes;
 
@@ -477,7 +493,7 @@ class StorageCombined implements NALStorage {
                             }
                         } else {
                             // Get the time from the next chunk
-                            nextReceivedFrameTime = getFirstTimeOfNextChunk(chunk.Ranges[0].firstTime);
+                            nextKeyFrameTime = getFirstTimeOfNextChunk(chunk.Ranges[0].firstTime);
                         }
                     }
 
@@ -501,7 +517,7 @@ class StorageCombined implements NALStorage {
                 curLiveWait++;
                 let maxWaitCount = Math.max(minFrames * 2, 100);
                 if(curLiveWait > maxWaitCount) {
-                    throw new Error(`Took too long to get values, waited ${maxWaitCount} times.`)
+                    throw new Error(`Took too long to get values, waited ${maxWaitCount} times.`);
                 }
             }
 
@@ -529,17 +545,30 @@ class StorageCombined implements NALStorage {
             throw new Error(`Impossible, no chunk, but we have times? Times ${times.map(x => x.time).join(", ")}`);
         }
 
+        // Get the chunk again, as it may have moved, or been deleted
         let chunkData = getChunk(chunkFirstTime);
         if(!chunkData) {
-            throw new Error(`Cannot find chunk. ${chunkFirstTime}`);
+            // TODO: Make sure this is older than the oldest chunk. If it isn't, the chunk isn't deleted,
+            //  and getChunk just failed to find the chunk.
+            console.error(`Trying to access deleted chunk ${chunkFirstTime}`);
+            return {
+                frameTimes: times,
+                height: 0,
+                width: 0,
+                mp4Video: Buffer.from([]),
+                nextKeyFrameTime: nextKeyFrameTime,
+                rate: this.rate
+            };
         }
 
+        let chunkUID = chunkData.chunk.ChunkUID;
+        let cancelId = randomUID(`GetVideo_ReadNALs_CancelToken_${chunkUID}`);
         let chunkDataChecked = chunkData;
         cancelToken.Promise().then(x => {
-            chunkDataChecked.storage.CancelCall(cancelId, chunkDataChecked.chunk.ChunkUID);
+            chunkDataChecked.storage.CancelCall(cancelId, chunkUID);
         });
 
-        let nals = await Promise.race([chunkData.storage.ReadNALs(cancelId, chunkData.chunk.ChunkUID, times), cancelToken.Promise()]);
+        let nals = await Promise.race([chunkData.storage.ReadNALs(cancelId, chunkUID, times), cancelToken.Promise()]);
 
         if(!nals || nals === "CANCELLED") {
             return "CANCELLED";

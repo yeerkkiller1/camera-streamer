@@ -181,8 +181,18 @@ export class PlayerPage extends React.Component<IProps, IState> implements IBrow
 
     unmountCallbacks: (() => void)[] = [];
     componentDidMount() {
-        this.syncVideoInfo();
+        this.initVideo();
     }
+    async initVideo() {
+        let rates = await this.server.SyncRates();
+        console.log({rates});
+        for(let rate of rates) {
+            this.onNewRate(rate);
+        }
+
+        this.setRate(this.state.rate, true);
+    }
+
     componentWillUnmount() {
         console.log(`componentWillUnmount`);
         for(let callback of this.unmountCallbacks) {
@@ -226,15 +236,6 @@ export class PlayerPage extends React.Component<IProps, IState> implements IBrow
                 console.error(`Error in syncing ranges, this is a big problem. ${e.stack}`);
             }
         })();
-    }
-    async syncVideoInfo() {
-        let rates = await this.server.SyncRates();
-        console.log({rates});
-        for(let rate of rates) {
-            this.onNewRate(rate);
-        }
-
-        this.setRate(this.state.rate, true);
     }
     
     private getSummaryObj(rate: number): RangeSummaryObj {
@@ -382,7 +383,6 @@ export class PlayerPage extends React.Component<IProps, IState> implements IBrow
 
         this.setState({ isLive: live });
 
-        //if(true as boolean) return;
         console.log(`streamVideo ${startTime}`);
 
         this.setState({ targetPlayTime: startTime, currentPlayTime: startTime });
@@ -440,7 +440,9 @@ export class PlayerPage extends React.Component<IProps, IState> implements IBrow
                 break;
             }
 
+            let start = Date.now();
             let timeObj = await doAsyncCall(this.downloader.DownloadVideo, this.state.rate, startTime, minFrames, live);
+            let time = Date.now() - start;
 
             // TODO: Maybe add playback support (so not here, in an independent loop) for jumping video gaps
             //  during playback (as the regular video player won't jump gaps).
@@ -452,6 +454,12 @@ export class PlayerPage extends React.Component<IProps, IState> implements IBrow
                 // TODO: Switch to live video.
                 console.log(`Reached end of video, but switching from non-live to live video isn't coded yet. ${timeObj}`);
                 return;
+            }
+
+            if(timeObj.video) {
+                //todonext
+                // Add a display of the encoding efficiency, so we can tell if we are going to increasingly lag.
+                console.log(`Video took ${time.toFixed(1)}ms to get, play duration is: ${(timeObj.video.frameTimes.length / GetVideoFPSEstimate(timeObj.video) * 1000).toFixed(1)} ms`);
             }
 
             let holder = this.videoCache[this.state.rate];
@@ -485,7 +493,10 @@ export class PlayerPage extends React.Component<IProps, IState> implements IBrow
                     await doAsyncCall(SetTimeoutAsync, delay);
                     // Actually... just delay once. Otherwise we might get in a bad state an infinitely loop (such as if the video stalls, even though it should have enough buffer).
                     // TODO: Figure out what it is stalling, as even if we can jump beyond the stall, it should never be stalling in the first place!
-                    break;
+                    if(holder && holder.IsPlaying()) {
+                        break;
+                    }
+                    // Unless we aren't playing, then we can loop infinite times.
                 } else {
                     let lastTime = (await this.getServerRanges(1)).last().lastTime;
 
@@ -496,7 +507,7 @@ export class PlayerPage extends React.Component<IProps, IState> implements IBrow
                     //  if our connection is unstable is will level out at a 3-4 second delay...)
 
                     // If we are more than 1.5 * minPlayBuffer from the latest time, and we should be live, we have to move up the current time.
-                    if(live && this.state.currentPlayTime < lastTime - minPlayBuffer * 1.5) {
+                    if(live && this.state.currentPlayTime < lastTime - minPlayBuffer * 10.5) {
                         console.log("Live feed has become delayed by too much, jumping to the present (this shouldn't occur often, and should only occur because of clock drift).");
                         nextTime = lastTime;
                     }

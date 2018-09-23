@@ -71,6 +71,11 @@ export class LocalRemoteStorage implements RemoteStorageLocal {
 
         console.log(`Init ${this.DebugName()}, max bytes: ${maxBytes}, next storage system: ${nextStorageSystem && nextStorageSystem.DebugName()}`);
 
+        //todonext
+        // We need to go through and delete any chunks that have addSeqNums that don't line up with their times. I guess...
+        //  we can iterate by time, and if addSeqNum doesn't increase, we should delete the chunk.
+        // BUT FIRST, we should probably fix the common addSeqNum problems
+
         for(let nalFileName of nalFileNames) {
             let indexFileName = nalFileName.slice(0, -".nal".length) + ".index";
             
@@ -136,7 +141,7 @@ export class LocalRemoteStorage implements RemoteStorageLocal {
     private createChunkUID(startNAL: NALInfoTime) {
         return `chunk_rate_${startNAL.rate}_addSeqNum_${startNAL.addSeqNum}`;
     }
-    private addChunk(nal: NALInfoTime): string {
+    private addNewChunk(nal: NALInfoTime): string {
         let { chunks, chunksList } = this;
 
         let chunkUID = this.createChunkUID(nal);
@@ -147,7 +152,7 @@ export class LocalRemoteStorage implements RemoteStorageLocal {
             Size: 0,
             IsLive: true,
             IsMoved: false,
-            pendingReads: {},
+            pendingReads: { },
             LastAddSeqNum: nal.addSeqNum
         };
         insertIntoListMap(chunksList, chunkMetadata, x => x.Ranges[0].firstTime);
@@ -191,7 +196,7 @@ export class LocalRemoteStorage implements RemoteStorageLocal {
 
         // Create it if it doesn't exist
         if(liveChunkUID === undefined) {
-            liveChunkUID = this.addChunk(nalHolder);
+            liveChunkUID = this.addNewChunk(nalHolder);
         }
 
         
@@ -212,14 +217,16 @@ export class LocalRemoteStorage implements RemoteStorageLocal {
 
         // See if this chunk should be finished.
         if(chunkObj.metadata.Size > chunkThresholdBytes && nalHolder.type === NALType.NALType_keyframe) {
-            console.log(`Finishing chunk ${chunkObj.metadata.ChunkUID}, size ${chunkObj.metadata.Size}`);
 
             // Yep, exceeds size and next nal is keyframe, make it not live, and create new chunk.
             chunkObj.metadata.IsLive = false;
             let finalizedBasePath = chunkObj.fileBasePath;
-            chunkObj.writeLoop(async () => await finalizeNALsOnDisk(finalizedBasePath));
+            chunkObj.writeLoop(async () => {
+                await finalizeNALsOnDisk(finalizedBasePath);
+                //console.log(`Finished chunk ${chunkObj.metadata.ChunkUID}, size ${chunkObj.metadata.Size}`);
+            });
             chunkObj.index.pop();
-            liveChunkUID = this.addChunk(nalHolder);
+            liveChunkUID = this.addNewChunk(nalHolder);
             nalDeferred.Resolve();
 
             // Add nal to chunk, and queue it to be added to FS
@@ -293,7 +300,8 @@ export class LocalRemoteStorage implements RemoteStorageLocal {
         });
         
         let removeIndex = 0;
-        while(this.GetCurrentBytes() < maxBytes && removeIndex < this.chunksList.length) {
+        let curSize = this.GetCurrentBytes()
+        while(curSize > maxBytes && removeIndex < this.chunksList.length) {
             let candidate = this.chunksList[removeIndex++];
             if(candidate.IsMoved) {
                 continue;
@@ -396,10 +404,11 @@ export class LocalRemoteStorage implements RemoteStorageLocal {
 
         let waitCount = 0;
         while(!isEmpty(chunkObj.metadata.pendingReads)) {
-            console.log(`Waiting for reads to finish to remove chunk ${chunkUID}`);
-            await Promise.all(Object.values(chunkObj.metadata.pendingReads));
+            let reads = Object.values(chunkObj.metadata.pendingReads).map(x => x.Promise());
+            console.log(`Waiting for reads to finish to remove chunk ${chunkUID}, reads: ${Object.keys(chunkObj.metadata.pendingReads).join(", ")}`);
+            await Promise.all(reads);
             waitCount++;
-            if(waitCount > 100) {
+            if(waitCount > 10) {
                 throw new Error(`Could not remove chunk, after too many waits for pending reads to finish.`);
             }
         }
@@ -417,11 +426,12 @@ export class LocalRemoteStorage implements RemoteStorageLocal {
 
     public async AddChunk(chunk: Chunk): Promise<void> {
         if(chunk.ChunkUID in this.chunks) {
-            throw new Error(`Chunk already added. ${chunk.ChunkUID}`);
+            console.error(`Chunk already added. ${chunk.ChunkUID}`);
+            return;
         }
 
         let { Data, ...chunkMetadataBase } = chunk;
-        let chunkMetadata: ChunkMetadataExtended = { ... chunkMetadataBase, pendingReads: {} };
+        let chunkMetadata: ChunkMetadataExtended = { ... chunkMetadataBase, pendingReads: { } };
 
         //console.log(`Adding chunk ${chunk.ChunkUID}, data size: ${Data.length} to ${this.DebugName()}, isLive: ${chunkMetadata.IsLive}`);
 
@@ -452,86 +462,96 @@ export class LocalRemoteStorage implements RemoteStorageLocal {
     //  the caller. So in theory, if multiple lockChunk functions are called, with gaps in between, there should be no race
     //  condition of the chunks being deleted inbetween (unless in the gaps we add nals, but that won't happen, as that function
     //  should be entirely independent of lockChunk calls.)
-    private async lockChunk<T>(cancelId: string, chunkObj: ChunkObj, fnc: (onCancelled: Promise<void>) => Promise<T>): Promise<T> {
+    private async lockChunk<T>(cancelId: string, chunkObj: ChunkObj, fnc: (onCancelled: Promise<void>) => Promise<T>): Promise<T | void> {
         let onRead = new Deferred<void>();
         let { pendingReads } = chunkObj.metadata;
+        let chunkUID = chunkObj.metadata.ChunkUID;
         if(cancelId in pendingReads) {
             throw new Error(`cancelId already used on other ReadNALs. ${cancelId}`);
         }
         pendingReads[cancelId] = onRead;
+        console.log(`Locking ${chunkUID} with ${cancelId}`);
         try {
-            return await fnc(onRead.Promise());
+            return await Promise.race([fnc(onRead.Promise() as any as Promise<void>), onRead.Promise()]);
         } finally {
-            onRead.Resolve();
+            console.log(`Unlocking ${chunkUID} with ${cancelId}`);
             delete pendingReads[cancelId];
+            onRead.Resolve();
         }
     }
 
-    // But... we also need to lock the chunk while reading the index, and then keep it locked to prevent it from being deleted
-    //  until we can start the ReadNALs call.
     public async GetIndex(cancelId: string, chunkUID: string): Promise<{index: (NALInfoTime | { Promise(): Promise<void> })[]}> {
         let chunkObj = this.chunks[chunkUID];
         if(chunkObj.metadata.IsMoved) {
             throw new Error(`Cannot Read from chunk as it has been moved. Do not attempt to start new reads on moved chunks. ${chunkUID}`);
         }
 
-        return this.lockChunk(cancelId, chunkObj, onCancelled => {
+        let result = await this.lockChunk(cancelId, chunkObj, onCancelled => {
             return new Promise<{index: (NALInfoTime | { Promise(): Promise<void> })[]}>((resolve, reject) => {
-                setTimeout(() => {
-                    let chunkObj = this.chunks[chunkUID];
-                    if(chunkObj.metadata.IsMoved) {
-                        reject(new Error(`Cannot Read from chunk as it has been moved. Do not attempt to start new reads on moved chunks. ${chunkUID}`));
-                        return;
-                    }
-    
+                setTimeout(() => {   
                     resolve({
                         index: chunkObj.index
                     });
-                }, 1000);
+                }, 0);
             });
         });
+
+        if(!result) {
+            return {index: []};
+        }
+        return result;
     }
 
     public async ReadNALs(cancelId: string, chunkUID: string, timesRaw: NALInfoTime[]): Promise<NALHolderMin[] | "CANCELLED"> {
-        let chunkObj = this.chunks[chunkUID];
+        let chunkObj = UnionUndefined(this.chunks[chunkUID]);
+        if(!chunkObj) {
+            throw new Error(`Cannot Read from chunk as it has been moved. Do not attempt to start new reads on moved chunks. ${chunkUID}`);
+        }
+
         if(chunkObj.metadata.IsMoved) {
             throw new Error(`Cannot Read from chunk as it has been moved. Do not attempt to start new reads on moved chunks. ${chunkUID}`);
         }
 
-        return this.lockChunk(cancelId, chunkObj, async (onCancelled) => {
+        let chunkObjChecked = chunkObj;
+
+        let result = await this.lockChunk(cancelId, chunkObj, async (onCancelled) => {
             let times = timesRaw as (NALIndexInfo & { finishedWrite: boolean })[];
             if(times.length === 0) {
                 return [];
             }
 
             if(times.some(x => !x.finishedWrite)) {
-                if(chunkObj.writeLoop === "exporting") {
+                if(chunkObjChecked.writeLoop === "exporting") {
                     throw new Error(`Some writes are not finished but we are exporting data?`);
                 }
                 // Eh... excessive waiting, but this shouldn't happen that often.
                 let writesFinished = new Deferred<void>();
-                chunkObj.writeLoop(async () => { writesFinished.Resolve() });
+                chunkObjChecked.writeLoop(async () => { writesFinished.Resolve() });
                 await writesFinished.Promise();
                 if(times.some(x => !x.finishedWrite)) {
                     throw new Error(`Waited for writes to finish, but they didn't. This should be impossible.`);
                 }
             }
 
-            return await readNALs(chunkObj.fileBasePath, times, onCancelled);
+            return await readNALs(chunkObjChecked.fileBasePath, times, onCancelled);
         });
+
+        if(!result) {
+            return "CANCELLED";
+        }
+        return result;
     }
 
 
-    public CancelCall(readTokenRaw: {}, chunkUID: string): void {
-        let readToken = readTokenRaw as {id: string|null};
-        if(readToken.id === null) {
-            return;
-        }
+    public CancelCall(cancelId: string, chunkUID: string): void {
         let chunkObj = UnionUndefined(this.chunks[chunkUID]);
         if(!chunkObj) return;
-        let readDeferred = UnionUndefined(chunkObj.metadata.pendingReads[readToken.id]);
+        let readDeferred = UnionUndefined(chunkObj.metadata.pendingReads[cancelId]);
         if(!readDeferred) return;
+        console.log(`Resolving ${cancelId}`);
+        delete chunkObj.metadata.pendingReads[cancelId];
         readDeferred.Resolve();
+        console.log(`Resolved ${cancelId}`);
     }
 
     public GetChunkMetadatas(): ChunkMetadata[] {

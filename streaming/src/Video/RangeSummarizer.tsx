@@ -622,7 +622,7 @@ export class RangeSummarizer extends React.Component<IProps, IState> {
                 */}
 
                 {
-                /*
+                //*
                 <PreviewVideo
                     viewport={cloneDeep(viewport)}
                     setViewport={viewport => this.setState({viewport})}

@@ -2,7 +2,7 @@ import { createCancelPending } from "../algs/cancel";
 import { ConnectToServer } from "ws-class";
 import { findAtOrBefore, findAfter, insertIntoList, insertIntoListMap, insertIntoListMapped, removeFromListMap, findAtOrBeforeIndex, findAt, findAtIndex, sort } from "../util/algorithms";
 import { UnionUndefined } from "../util/misc";
-import { GetVideoFPSEstimate, GetMinGapSize, GetRangeFPSEstimate } from "../NALStorage/TimeMap";
+import { GetVideoFPSEstimate, GetMinGapSize, GetRangeFPSEstimate, RealTimeToVideoTime, RealDurationToVideoDuration } from "../NALStorage/TimeMap";
 import { reduceRanges, removeRange } from "../NALStorage/rangeMapReduce";
 import { Deferred } from "pchannel";
 import { sum } from "../util/math";
@@ -71,10 +71,6 @@ export class VideoDownloader implements IBrowserReceiver {
         (doAsyncCall, isCancelError) =>
     async (rate: number, startTime: number, minFrames: number, live = false): Promise<{video?: MP4Video; nextTime: number|undefined}|"FINISHED"> => {
 
-        if(rate === undefined) {
-            console.log("download video", {rate}, new Error().stack);
-        }
-
         let nextReceivedTime: number|undefined;
         let startTimeExclusive = false;
 
@@ -86,7 +82,7 @@ export class VideoDownloader implements IBrowserReceiver {
             let video = summaryObj.Videos[videoIndex];
             // Only return it if it covers the requested time, and never return it if it has no nextKeyFrameTime (and so
             //  us unfinished). This forces preview logic to keep requesting data, instead of getting stuck of incomplete data.
-            if(video && video.frameTimes.last().time >= startTime && video.nextKeyFrameTime) {
+            if(video && video.nextKeyFrameTime && video.nextKeyFrameTime > startTime) {
                 let nextTime: number|undefined;
                 nextTime = video.nextKeyFrameTime;
                 if(!nextTime) {
@@ -115,7 +111,8 @@ export class VideoDownloader implements IBrowserReceiver {
         }
         */
 
-        console.log(`GetVideo, startTime: ${startTime}, minFrames: ${minFrames}, nextReceivedTime: ${nextReceivedTime}, startTimeExclusive: ${startTimeExclusive}`);
+        let time = getTimeSynced();
+        console.log(`GetVideo, rate: ${rate}, preview: ${this.forPreview}, onlyTimes: ${this.onlyTimes}, startTime: ${startTime}, minFrames: ${minFrames}, nextReceivedTime: ${nextReceivedTime}, startTimeExclusive: ${startTimeExclusive}`);
         let video = await doAsyncCall(this.server.GetVideo,
             startTime,
             minFrames,
@@ -126,34 +123,35 @@ export class VideoDownloader implements IBrowserReceiver {
             this.forPreview
         );
 
-        if(video === "CANCELLED" || video === "VIDEO_EXCEEDS_LIVE_VIDEO") {
-            console.log(`Video returned ${video}`);
+        time = getTimeSynced() - time;
+
+        if(typeof video === "object" && video.frameTimes.length > 0) {
+            let realDuration = video.frameTimes.length / GetVideoFPSEstimate(video) * 1000;
+            let videoDuration = RealDurationToVideoDuration(realDuration, video.rate);
+            let getVideoOverheadFrac = time / videoDuration;
+            // If live this will hover around 100%, because reality takes 100% of the time to happen as it does to play...
+            console.log(`GetVideo overhead ${(getVideoOverheadFrac * 100).toFixed(2)}%, rate ${video.rate}`);
+        }
+
+        if(video === "CANCELLED") {
             return "FINISHED";
         }
 
-        let nextTime: number|undefined;
-        if(video === "VIDEO_EXCEEDS_NEXT_TIME") {
-            if(nextReceivedTime) {
-                debugger;
-                return { video: undefined, nextTime: nextReceivedTime };
-            }
-            if(!nextReceivedTime) {
-                //throw new Error(`Impossible, the server has no data after time. startTime: ${startTime}`);
-            }
-
-            debugger;
-            console.log(`${video}, nextReceivedTime: ${nextReceivedTime}`);
-
+        if(typeof nextReceivedTime === "number" && video.frameTimes.length === 0 && video.nextKeyFrameTime === nextReceivedTime && !live) {
             return "FINISHED";
         }
 
-        if(video) {
-            nextTime = video.nextKeyFrameTime;
-
-            if(!this.forPreview) {
-                console.log(`downloaded rate ${rate}, next time ${nextTime}, ${video.frameTimes[0].addSeqNum}`, video.frameTimes.map(x => x.time));
-            }
+        if(video.frameTimes.length === 0) {
+            return {
+                nextTime: video.nextKeyFrameTime
+            };
         }
+
+        let nextTime = video.nextKeyFrameTime;
+
+        //if(!this.forPreview) {
+            console.log(`downloaded ${this.forPreview ? "preview, " : ""}${this.onlyTimes ? "only times, " : ""}rate ${rate}, next time ${nextTime}, startTime: ${startTime}, ${video.frameTimes[0].addSeqNum}`, video.frameTimes.map(x => x.time));
+        //}
 
         let times = video.frameTimes;
 

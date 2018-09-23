@@ -2,7 +2,7 @@ import * as React from "react";
 
 import "./PreviewVideo.less";
 import { ConnectToServer } from "ws-class";
-import { createCancelPending } from "../algs/cancel";
+import { createCancelPending, createIgnoreDuplicateCalls } from "../algs/cancel";
 import { findAtOrBefore, findAtOrBeforeIndex, findClosestIndex, findAtOrAfterIndex, sort, findAtOrBeforeOrAfterIndex } from "../util/algorithms";
 import { VideoDownloader } from "./VideoDownloader";
 import { GetVideoFrames } from "./getVideoFrame";
@@ -80,8 +80,10 @@ export class PreviewVideo extends React.Component<IProps, IState> {
         async () => {},
         async () => {},
         true,
-        true
+        // forPreview === false, because right request are slow, and preview downloads require a lot of exra calls.
+        false
     );
+    minFramesPerVideo = 1;
     
     componentDidMount() {
         this.getPreviewFrames(this.props, this.state);
@@ -111,10 +113,8 @@ export class PreviewVideo extends React.Component<IProps, IState> {
                 try {
                     await this.getPreviewFrames(nextProps, nextState);
                 } catch(e) {
-                    if(!this.getPreviewFrames.isCancelError(e)) {
-                        debugger;
-                        throw e;
-                    }
+                    console.log(`Error in getPreviewFrames`, e);
+                    throw e;
                 }
             })();
         }
@@ -140,11 +140,10 @@ export class PreviewVideo extends React.Component<IProps, IState> {
         });
     }
 
-    getPreviewFrames = createCancelPending(
-        () => {},
-        (doAsyncCall, isCancelError) =>
+    getPreviewFrames = createIgnoreDuplicateCalls(
     async (props: IProps, state: IState) => {
-        await doAsyncCall(profile, "getPreviewFrames", async (): Promise<any> => {
+        await profile("getPreviewFrames", async (): Promise<any> => {
+            console.log("getPreviewFrames start");
 
             let { viewport } = props;
             let { widthPx, imageRows } = state;
@@ -152,7 +151,7 @@ export class PreviewVideo extends React.Component<IProps, IState> {
 
             let viewportSize = (viewport.endTime - viewport.startTime);
 
-            const viewportFPSEstimate = 10;            
+            const viewportFPSEstimate = 10;
 
             const getRate = async (maxFrameWidthPx: number): Promise<number> => {
                 let targetPreviewFrames = Math.max(1, Math.floor(state.widthPx / maxFrameWidthPx)) * this.state.imageRows * this.state.imageRows;
@@ -190,7 +189,6 @@ export class PreviewVideo extends React.Component<IProps, IState> {
             };
 
             const getVideos = async (currentRate: number): Promise<PreviewVideo["state"]["previewFrames"]> => {
-                let minFramesPerVideo = 10;
                 let startTime = viewport.startTime - viewportSize * 0.5;
                 let lastTime = viewport.endTime + viewportSize * 0.5;
 
@@ -198,7 +196,7 @@ export class PreviewVideo extends React.Component<IProps, IState> {
                     let curFrames = 0;
                     let curTime = startTime;
                     while(curTime < lastTime) {
-                        let video = await doAsyncCall(this.downloader.DownloadVideo, currentRate, curTime, minFramesPerVideo, false);
+                        let video = await this.downloader.DownloadVideo(currentRate, curTime, this.minFramesPerVideo, false);
                         if(video === "CANCELLED" || video === "FINISHED") break;
                         if(!video.nextTime) break;
                         if(video.video) {
@@ -293,21 +291,21 @@ export class PreviewVideo extends React.Component<IProps, IState> {
                 aspectRatioEstimate = max(this.state.previewFrames.map(x => x.fullWidth / x.fullHeight));
             }
 
-            let currentRate = await doAsyncCall(getRate, state.heightPx / aspectRatioEstimate);
+            let currentRate = await getRate(state.heightPx / aspectRatioEstimate);
 
             if(!currentRate) {
                 console.log(`No current rate, cannot get previews.`);
                 return;
             }
 
-            let previewFrames = await doAsyncCall(getVideos, currentRate);
+            let previewFrames = await getVideos(currentRate);
 
-            let correctRate = await doAsyncCall(getRate, this.getMaxFrameWidthPx(previewFrames));
+            let correctRate = await getRate(this.getMaxFrameWidthPx(previewFrames));
 
             // If the currentRate is less than the correctRate then we requested too many frames, which is fine. We only
             //  really care if we requested too few frames.
             if(correctRate < currentRate) {
-                previewFrames = await doAsyncCall(getVideos, correctRate);
+                previewFrames = await getVideos(correctRate);
             }
 
             if(previewFrames.length === 0) {
@@ -323,7 +321,7 @@ export class PreviewVideo extends React.Component<IProps, IState> {
 
             this.setState({ previewFrames, pollDelay });
 
-            console.log(`finished getPreviewFrames, frames: ${previewFrames.length}, pollDelay ${pollDelay}`);
+            console.log(`getPreviewFrames finished, rate: ${correctRate}, frames: ${previewFrames.length}, pollDelay ${pollDelay}`);
         });
     });
 
@@ -776,7 +774,7 @@ export class PreviewVideo extends React.Component<IProps, IState> {
         // TODO: Only increase pollSeqNum if a range inside the viewport has been extended.
         return (
             <div className="PreviewVideo">
-                <PollLoop delay={this.state.pollDelay} callback={() => { !this.getPreviewFrames.isInCall() && this.setState({ pollSeqNum: this.state.pollSeqNum + 1 })}} />
+                <PollLoop delay={this.state.pollDelay} callback={() => { this.setState({ pollSeqNum: this.state.pollSeqNum + 1 })}} />
                 <div>
                     <button onClick={() => this.alignToGrid()}>Align to grid</button>
                 </div>
