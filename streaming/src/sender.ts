@@ -6,7 +6,7 @@ import { makeProcessSingle } from "./util/singleton";
 
 import * as v4l2camera from "v4l2camera";
 import { PChanReceive, PChanSend } from "controlFlow/pChan";
-import { TransformChannelAsync, PChan, Range, SetTimeoutAsync, Deferred } from "pchannel";
+import { TransformChannelAsync, PChan, Range, Deferred } from "pchannel";
 import { splitByStartCodes } from "./receiver/startCodes";
 import { encodeJpegFrames } from "./receiver/encodeNals";
 import { clock, setTimeServer, getTimeSynced } from "./util/time";

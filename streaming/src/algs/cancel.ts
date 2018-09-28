@@ -16,43 +16,47 @@ let fncId = 0;
 export function createIgnoreDuplicateCalls<F extends (...args: any[]) => Promise<any>=any>(
     fnc: F
 ): F {
-    let calls: Deferred<"run"|"cancel">[] = [];
+    let nextCall = new Deferred<void>();
+    let waitingCall: { args: any[]; result: Deferred<{ result: any } | "cancelled"> } | undefined;
+    (async () => {
+        while(true) {
+            await nextCall.Promise();
+
+            // Make a new nextCall deferred, so we catch any trailing calls.
+            // Swap waitingCall with undefined, as we WILL be satisfying this call, and we don't want
+            //  to let anything cancel it.
+            nextCall = new Deferred<void>();
+            if(waitingCall === undefined) {
+                throw new Error(`No waiting call? Impossible.`);
+            }
+            let currentWaitingCall = waitingCall;
+            waitingCall = undefined;
+
+            let result = await fnc(...currentWaitingCall.args);
+            currentWaitingCall.result.Resolve({result});
+        }
+    })();
+    // TODO: This function should return ReturnType<F>, but typescript doesn't think that is a Promise, even though
+    //  it has to be because of the F constraints.
     async function call(...args: any[]) {
-        while(calls.length > 1) {
-            let callToCancel = calls.splice(1, 1)[0];
-            callToCancel.Resolve("cancel");
+        if(waitingCall) {
+            // So... this works, because we replace waitingCall with our Deferred, so even if nextCall
+            //  is already resolved, by the time the run loop resumes it will find our waitingCall instead
+            waitingCall.result.Resolve("cancelled");
         }
+        waitingCall = { args, result: new Deferred() };
 
-        let currentCall = UnionUndefined(calls[0]);
+        // If nextCall is already resolved this is fine, we can resolve it multiple times.
+        // If we are waiting on fnc already inside the run loop then nextCall will be for the next
+        //  loop, so it will be fine.
+        nextCall.Resolve();
 
-        let ourCall = new Deferred<"run"|"cancel">();
-        calls.push(ourCall);
-        if(calls.length > 2) {
-            debugger;
+        let resultObj = await waitingCall.result.Promise();
+
+        if(resultObj === "cancelled") {
+            return "CANCELLED";
         }
-
-        if(currentCall) {
-            let action = await ourCall.Promise();
-            if(action === "cancel") {
-                console.log(`Skipping call`);
-                console.log(fnc);
-                return "CANCELLED";
-            }
-        }
-
-        try {
-            return await fnc(...args);
-        } finally {
-            let ourCallShifted = calls.shift();
-            if(ourCallShifted !== ourCall) {
-                console.warn(`Shift of current call is incorrect. Impossible. This function is broken`);
-            }
-            
-            let nextCall = UnionUndefined(calls[0]);
-            if(nextCall) {
-                nextCall.Resolve("run");
-            }
-        }
+        return resultObj.result;
     }
 
     const callId: ReplaceReturnType<F, ReturnType<F>|Promise<"CANCELLED">> & F = call as any;
@@ -114,17 +118,9 @@ export function createCancelPending<F extends (...args: any[]) => Promise<any>=a
                 nextCallToken = ourCallToken;
                 cancel();
                 
-                // Actually, if it is nested a few levels the exceptions may take a few waits to bubble up.
-                let curWaitCount = 0;
-                while(true) {
-                    await SetTimeoutAsync(0);
-                    if(!inCall) break;
-                    
-                    curWaitCount++;
-                    if(curWaitCount > 10) {
-                        break;
-                    }
-                }
+                // Actually, if it is nested a few levels the exceptions it may take until the end of the current tick to bubble up.
+                //  TODO: We can make infinitely nesting promises to wait until the end of this tick. But... SetTimeoutAsync is a lot easier.
+                await SetTimeoutAsync(0);
 
                 if(inCall) {
                     console.error(`Fnc did not cancel properly. Any async function in the target function should be wrapped in a doAsyncCall, and any errors that return true for isCancelError should be propogate upwards. Blocking until current function actually finishes`);

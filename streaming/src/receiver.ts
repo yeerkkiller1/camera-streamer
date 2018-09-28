@@ -1,6 +1,6 @@
 import * as wsClass from "ws-class";
 
-import { PChan, pchan, TransformChannel, TransformChannelAsync, Deferred, g, SetTimeoutAsync } from "pchannel";
+import { PChan, pchan, TransformChannel, TransformChannelAsync, Deferred, g } from "pchannel";
 
 import { mkdir, writeFile, writeFileSync, readFileSync } from "fs";
 
@@ -23,6 +23,7 @@ import { parseParams } from "./util/url";
 import { SizedCache } from "./Video/SizedCache";
 import { NALStorageManagerImpl } from "./NALStorage/RemoteStorage/StorageCombined";
 import { LocalRemoteStorage } from "./NALStorage/LocalNALRate";
+import { DiskStorageBase } from "./NALStorage/RemoteStorage/DiskStorageBase";
 
 //makeProcessSingle("receiver");
 
@@ -119,7 +120,8 @@ async function getFinalStorageFolder() {
 //      but then split the large chunks for high rates, as even after splitting high rates won't cause high uploader request rates.
 //  - ALSO, if chunks are too small, the metadata for them will be too large and we will run out of memory on the server.
 
-const secondPerRate1Chunk = 10;
+// Should be small, to reduce seek times, as we can only load a chunk at a time.
+const secondPerRate1Chunk = 2;
 // Eh... more than the real cost, because localStorage is digital ocean so sort of free.
 const totalCostPerMonth = 20;
 const averageFrameBytes = 1024 * 10;
@@ -129,11 +131,11 @@ const baseRate = 4;
 let maxTotalDiskUsage = 1024 * 1024 * 160;
 //maxTotalDiskUsage = 1024 * 1024 * 160;
 
-let localStorage = (rate: number) => new LocalRemoteStorage(rate, totalCostPerMonth, maxTotalDiskUsage);
+let localStorage = (rate: number) => new LocalRemoteStorage(new DiskStorageBase(), rate, totalCostPerMonth, maxTotalDiskUsage);
 
 const secondsPerMonth = 60 * 60 * 24 * 30;
 
-let s3Standard = (rate: number) => new LocalRemoteStorage(rate, 0, 0, "./dist/s3standard/", {
+let s3Standard = (rate: number) => new LocalRemoteStorage(new DiskStorageBase(), rate, 0, 0, "./dist/s3standard/", {
     debugName: "s3_standard",
     maxGB(bytesPerSecond: number, secondPerChunk: number, maxCost: number) {
         // No duration restrictions
@@ -156,7 +158,7 @@ let s3Standard = (rate: number) => new LocalRemoteStorage(rate, 0, 0, "./dist/s3
     },
 });
 
-let s3Infrequent = (rate: number) => new LocalRemoteStorage(rate, 0, 0, "./dist/s3infrequent/", {
+let s3Infrequent = (rate: number) => new LocalRemoteStorage(new DiskStorageBase(), rate, 0, 0, "./dist/s3infrequent/", {
     debugName: "s3_infrequent",
     maxGB(bytesPerSecond: number, secondPerChunk: number, maxCost: number) {
         // No duration restrictions
@@ -180,7 +182,7 @@ let s3Infrequent = (rate: number) => new LocalRemoteStorage(rate, 0, 0, "./dist/
 // Expedited. Anything else takes too long to request the data, which could be worth it for reduces fees, but...
 //  if we can store in backblaze for just a little more with no restrictions and much cheaper fees, or
 //  other S3 alternatives, then anything other than expedited is not worth it.
-let s3Glacier = (rate: number) => new LocalRemoteStorage(rate, 0, 0, "./dist/s3glacier/", {
+let s3Glacier = (rate: number) => new LocalRemoteStorage(new DiskStorageBase(), rate, 0, 0, "./dist/s3glacier/", {
     debugName: "s3_glacier",
     maxGB(bytesPerSecond: number, secondPerChunk: number, maxCost: number) {
        
@@ -209,7 +211,7 @@ let s3Glacier = (rate: number) => new LocalRemoteStorage(rate, 0, 0, "./dist/s3g
 });
 
 
-let wasabi = (rate: number) => new LocalRemoteStorage(rate, 0, 0, "./dist/wasabi/", {
+let wasabi = (rate: number) => new LocalRemoteStorage(new DiskStorageBase(), rate, 0, 0, "./dist/wasabi/", {
     debugName: "wasabi",
     maxGB(bytesPerSecond: number, secondPerChunk: number, maxCost: number) {
         let costPerGBPerMonth = 0.0049;
@@ -222,7 +224,7 @@ let wasabi = (rate: number) => new LocalRemoteStorage(rate, 0, 0, "./dist/wasabi
     },
 });
 
-let backblaze = (rate: number) => new LocalRemoteStorage(rate, 0, 0, "./dist/backblaze/", {
+let backblaze = (rate: number) => new LocalRemoteStorage(new DiskStorageBase(), rate, 0, 0, "./dist/backblaze/", {
     debugName: "backblaze",
     maxGB(bytesPerSecond: number, secondPerChunk: number, maxCost: number) {       
         let costPerGBPerMonth = 0.005;

@@ -40,16 +40,6 @@ declare const enum NALType {
     NALType_interframe = 3,
 }
 
-type NALInfoTime = {
-    rate: number;
-    time: number;
-    type: NALType;
-    width: number;
-    height: number;
-
-    addSeqNum: number;
-};
-
 
 type NALExtraInfo = {
     recordInfo: (
@@ -72,6 +62,16 @@ type NALExtraInfo = {
 
         sourceId: string;
     };
+};
+
+type NALInfoTime = {
+    rate: number;
+    time: number;
+    type: NALType;
+    width: number;
+    height: number;
+
+    addSeqNum: number;
 };
 
 // We want this to be optimized for storing in memory, as it would be nice if we could store

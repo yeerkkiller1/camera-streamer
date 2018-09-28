@@ -30,7 +30,8 @@ module.exports = function (wallaby) {
             global.TEST = true;
             global.NODE = true;
 
-            global.PROMISE_defaultTimeout = 100;
+            // Eh... we have too many long running pchannels for this to be feasible.
+            //global.PROMISE_defaultTimeout = 100;
         },
     };
 };

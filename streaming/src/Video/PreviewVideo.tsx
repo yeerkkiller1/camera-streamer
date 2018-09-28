@@ -6,7 +6,7 @@ import { createCancelPending, createIgnoreDuplicateCalls } from "../algs/cancel"
 import { findAtOrBefore, findAtOrBeforeIndex, findClosestIndex, findAtOrAfterIndex, sort, findAtOrBeforeOrAfterIndex } from "../util/algorithms";
 import { VideoDownloader } from "./VideoDownloader";
 import { GetVideoFrames } from "./getVideoFrame";
-import { SetTimeoutAsync, g } from "pchannel";
+import { g } from "pchannel";
 import { GetVideoFPSEstimate, RealTimeToVideoTime, VideoDurationToRealDuration, GetMinGapSize } from "../NALStorage/TimeMap";
 import { formatDate, formatDuration } from "../util/format";
 import { profile, profileSync, UnionUndefined, randomUID, keyBy } from "../util/misc";

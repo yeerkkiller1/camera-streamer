@@ -1,8 +1,5 @@
 import { RoundRecordTime } from "./TimeMap";
-import { statFilePromise, openReadPromise, readDescPromise, closeDescPromise, existsFilePromise, readFilePromise, unlinkFilePromise, appendFilePromise, writeFilePromise } from "../util/fs";
-import { profile } from "../util/misc";
 import { sort } from "../util/algorithms";
-import { Deferred } from "pchannel";
 
 function writeNal(nalInfo: NALHolderMin): Buffer {
     let buffer = Buffer.alloc(
@@ -125,62 +122,52 @@ export function readNal(nalFullBuffer: Buffer, warnOnIncomplete = true, pos = 0)
 }
 
 type IsLive = boolean;
-export async function readNalLoop(nalFilePath: string, onNal: (nal: NALHolderMin & {len: number}) => Promise<void>|void): Promise<IsLive> {
+export async function readNalLoop(storage: StorageBase, nalFilePath: string, onNal: (nal: NALHolderMin & {len: number}) => Promise<void>|void): Promise<IsLive> {
     let remainingBuf: Buffer|undefined;
-    let nalStats = await statFilePromise(nalFilePath);
-    let fd = await openReadPromise(nalFilePath);
+
+    // Changed to not be a loop, and to just read everything at once. Because... chunks don't resize, so they will be small,
+    //  and have to be kept in memory when we read them from remote systems, so keeping them in memory when we read them from
+    //  the local disk isn't a problem.
+    
+    let buf = await storage.GetFileContents(nalFilePath);
     let absPos = 0;
     try {
-        let nalPos = 0;
-        while(nalPos < nalStats.size) {
-            let curSize = Math.min(Math.pow(2, 30) - 1, nalStats.size - nalPos);
-            let buf = await readDescPromise(fd, nalPos, curSize);
-            if(remainingBuf) {
-                buf = Buffer.concat([remainingBuf, buf]);
-                remainingBuf = undefined;
-            }
-            let pos = 0;
-            while(pos < buf.length && hasCompleteNal(buf, pos)) {
-                if(buf[pos] !== 0) {
-                    return false;
-                }
-                let nal = readNal(buf, false, pos);
-                await onNal(nal);
-                pos += nal.len;
-                absPos += nal.len;
-            }
-
-            if(pos < buf.length) {
-                remainingBuf = buf.slice(pos);
-                console.log(`Creating remainingBuf size ${remainingBuf.length}, pos ${absPos}`);
-            }
-
-            nalPos += curSize;
-        }
-
-        if(remainingBuf !== undefined) {
-            if(remainingBuf.length === 1 && remainingBuf[0] === 0) {
+        while(absPos < buf.length && hasCompleteNal(buf, absPos)) {
+            if(buf[absPos] !== 0) {
                 return false;
             }
-
-            console.log(remainingBuf);
-            throw new Error(`Last nal is truncated or corrupted? For file: ${nalFilePath}, extra ${remainingBuf.length} bytes`);
+            let nal = readNal(buf, false, absPos);
+            await onNal(nal);
+            absPos += nal.len;
         }
     } catch(e) {
         throw new Error(`Error at absPos: ${absPos}, ${e.message}`);
-    } finally {
-        await closeDescPromise(fd);
     }
+
+    if(absPos < buf.length) {
+        remainingBuf = buf.slice(absPos);
+        console.log(`Creating remainingBuf size ${remainingBuf.length}, pos ${absPos}`);
+    }
+
+    if(remainingBuf !== undefined) {
+        if(remainingBuf.length === 1 && remainingBuf[0] === 0) {
+            return false;
+        }
+
+        console.log(remainingBuf);
+        throw new Error(`Last nal is truncated or corrupted? For file: ${nalFilePath}, extra ${remainingBuf.length} bytes`);
+    }
+
     return true;
 }
 
-export async function loadIndexFromDisk(nalFilePath: string, indexFilePath: string): Promise<{
+export async function loadIndexFromDisk(storage: StorageBase, nalFilePath: string, indexFilePath: string): Promise<{
     index: NALIndexInfo[];
     isLive: boolean;
 } | undefined> {
     //return await profile(`Init ${nalFilePath}`, async () => {
-        let nalExists = await existsFilePromise(nalFilePath);
-        let indexExists = await existsFilePromise(indexFilePath);
+        let nalExists = await storage.Exists(nalFilePath);
+        let indexExists = await storage.Exists(indexFilePath);
         if(!nalExists) {
             if(indexExists) {
                 console.warn(`Found index file but no nal file. Index: ${indexFilePath}, nal: ${nalFilePath}`);
@@ -190,12 +177,11 @@ export async function loadIndexFromDisk(nalFilePath: string, indexFilePath: stri
         }
 
         let isLive = true;
-        let nalStats = await statFilePromise(nalFilePath);
 
         try {
             let index: NALIndexInfo[] = [];
             {
-                let indexContents = await readFilePromise(indexFilePath);
+                let indexContents = await storage.GetFileContents(indexFilePath);
                 let contents = indexContents.toString().replace(/\n/g, ",").slice(0, -1);
                  
                 let indexRaw: (NALIndexInfo|"finished")[] = JSON.parse("[" + contents + "]");
@@ -230,25 +216,10 @@ export async function loadIndexFromDisk(nalFilePath: string, indexFilePath: stri
             if(!isLive) {
                 predictedEnd += 1;
             }
-            if(predictedEnd !== nalStats.size) {
-                throw new Error(`Index and nal file don't specify the same size. The index thinks the nal file is ${predictedEnd} long, but the nal file is really ${nalStats.size}`);
+            let size = await storage.GetFileSize(nalFilePath);
+            if(predictedEnd !== size) {
+                throw new Error(`Index and nal file don't specify the same size. The index thinks the nal file is ${predictedEnd} long, but the nal file is really ${size}`);
             }
-
-            let fd = await openReadPromise(nalFilePath);
-            try {
-                let nalBuffer = await readDescPromise(fd, lastNal.pos, lastNal.len);
-                let nal = readNal(nalBuffer);
-                
-                if(lastNal.time !== nal.time) {
-                    throw new Error(`Last index nal and last real nal have different times. Index ${lastNal.time}, nal ${nal.time}`);
-                }
-                if(lastNal.type !== nal.type) {
-                    throw new Error(`Last index nal and last real nal have different types. Index ${lastNal.type}, nal ${nal.type}`);
-                }
-            } finally {
-                await closeDescPromise(fd);
-            }
-
             
             let nalInfos = index;
             sort(nalInfos, x => x.time);
@@ -261,11 +232,9 @@ export async function loadIndexFromDisk(nalFilePath: string, indexFilePath: stri
         // TODO: Eh... if the nal file is corrupted we should rename the nal file. And ignore the error. But... we don't want
         //  too many nal files, so maybe always rename to the same file, so it overwrites it?
 
-        // TODO: Oh... we need to handle files > 2GB, which is almost certain to be the case here.
-
         let nalInfos: NALIndexInfo[] = [];
         let absPos = 0;
-        isLive = await readNalLoop(nalFilePath, nalHolder => {
+        isLive = await readNalLoop(storage, nalFilePath, nalHolder => {
             let { nal, sps, pps, len, ... indexInfo } = nalHolder;
             nalInfos.push({ ...indexInfo, pos: absPos, len });
             absPos += len;
@@ -273,13 +242,14 @@ export async function loadIndexFromDisk(nalFilePath: string, indexFilePath: stri
         
         sort(nalInfos, x => x.time);
 
-        await createIndexFile(indexFilePath, nalInfos, isLive);
+        await writeIndexFile(storage, indexFilePath, nalInfos, isLive);
 
         return { index: nalInfos, isLive };
     //});
 }
 
 export function writeNALToDisk(
+    storage: StorageBaseAppendable, 
     fileBasePath: string,
     nalHolder: NALHolderMin,
     pos: number,
@@ -306,18 +276,18 @@ export function writeNALToDisk(
         len: nalFullBuffer.length,
         fnc: async () => {
             await Promise.all([
-                appendFilePromise(nalFilePath, nalFullBuffer),
-                appendFilePromise(indexFilePath, JSON.stringify(nalIndexObj) + "\n")
+                storage.AppendData(nalFilePath, nalFullBuffer),
+                storage.AppendData(indexFilePath, JSON.stringify(nalIndexObj) + "\n")
             ]);
         }
     };
 }
 
-export async function readNALsBulkFromDisk(fileBasePath: string): Promise<Buffer> {
-    return readFilePromise(fileBasePath + ".nal");
+export async function readNALsBulkFromDisk(storage: StorageBase, fileBasePath: string): Promise<Buffer> {
+    return storage.GetFileContents(fileBasePath + ".nal");
 }
 
-export async function writeNALsBulkToDisk(fileBasePath: string, nalsBulk: Buffer, index: NALIndexInfo[], isLive: boolean): Promise<void> {
+export async function writeNALsBulkToDisk(storage: StorageBase, fileBasePath: string, nalsBulk: Buffer, index: NALIndexInfo[], isLive: boolean): Promise<void> {
     let nalFilePath = fileBasePath + ".nal";
     let indexFilePath = fileBasePath + ".index";
 
@@ -332,17 +302,20 @@ export async function writeNALsBulkToDisk(fileBasePath: string, nalsBulk: Buffer
         addSeqNum: x.addSeqNum,
     }))
 
+    
     await Promise.all([
-        writeFilePromise(nalFilePath, nalsBulk),
-        createIndexFile(indexFilePath, index, isLive),
+        storage.SetFileContents(nalFilePath, nalsBulk),
+        writeIndexFile(storage, indexFilePath, index, isLive),
     ]);
 }
 
-async function createIndexFile(indexFilePath: string, index: NALIndexInfo[], isLive: boolean): Promise<void> {
+async function writeIndexFile(storage: StorageBase, indexFilePath: string, index: NALIndexInfo[], isLive: boolean): Promise<void> {
     // Delete the index file if it exists, as it is garbage
     try {
-        await unlinkFilePromise(indexFilePath);
+        await storage.DeleteFile(indexFilePath);
     } catch(e) { }
+
+    let indexFile = "";
 
     // Not sure if this chunking is required here... But it is here, and it works?
     let i = 0;
@@ -350,70 +323,57 @@ async function createIndexFile(indexFilePath: string, index: NALIndexInfo[], isL
     while(i < index.length) {
         let size = Math.min(chunkSize, index.length - i);
         let nals = index.slice(i, i + size);
-
         let nalInfosText = nals.map(x => JSON.stringify(x) + "\n").join("");
-        await appendFilePromise(indexFilePath, nalInfosText);
-        //console.log(`Wrote part at ${i}, length ${size}`);
-
+        indexFile += nalInfosText;
         i += size;
     }
-    //console.log(`Rewrote index file ${indexFilePath}`);
 
     if(!isLive) {
-        await appendFilePromise(indexFilePath, JSON.stringify("finished") + "\n");
+        indexFile += JSON.stringify("finished") + "\n";
     }
+    await storage.SetFileContents(indexFilePath, indexFile);
 }
 
 export async function finalizeNALsOnDisk(
+    storage: StorageBaseAppendable, 
     fileBasePath: string,
 ): Promise<void> {
     let nalFilePath = fileBasePath + ".nal";
     let indexFilePath = fileBasePath + ".index";
 
     await Promise.all([
-        appendFilePromise(nalFilePath, Buffer.from([0])),
-        appendFilePromise(indexFilePath, JSON.stringify("finished") + "\n")
+        storage.AppendData(nalFilePath, Buffer.from([0])),
+        storage.AppendData(indexFilePath, JSON.stringify("finished") + "\n")
     ]);
 }
 
-export async function deleteNALs(fileBasePath: string): Promise<void> {
+export async function deleteNALs(storage: StorageBase, fileBasePath: string): Promise<void> {
     let nalFilePath = fileBasePath + ".nal";
     let indexFilePath = fileBasePath + ".index";
 
-    await unlinkFilePromise(indexFilePath);
-    await unlinkFilePromise(nalFilePath);
+    await storage.DeleteFile(indexFilePath);
+    await storage.DeleteFile(nalFilePath);
 }
 
-export async function readNALs(fileBasePath: string, nalInfos: NALIndexInfo[], onCancel: Promise<void>): Promise<NALHolderMin[] | "CANCELLED"> {
+export async function readNALs(storage: StorageBase, fileBasePath: string, nalInfos: NALIndexInfo[], onCancel: Promise<void>): Promise<NALHolderMin[] | "CANCELLED"> {
     let nalFilePath = fileBasePath + ".nal";
 
-    // Figure out the lock here with TransitionStorage
-    let fd = await Promise.race([openReadPromise(nalFilePath), onCancel]);
-    if(fd === undefined) {
+    // Eh... remote reads don't allow partial chunk reading anyway, so this should be fine.
+    let contents = await Promise.race([storage.GetFileContents(nalFilePath), onCancel]);
+    if(contents === undefined) {
         return "CANCELLED";
     }
-    try {
-        let nals: NALHolderMin[] = [];
-        for(let obj of nalInfos) {
-            let data = await Promise.race([readDescPromise(fd, obj.pos, obj.len), onCancel]);
-            if(data === undefined) {
-                return "CANCELLED";
-            }
-            let nal;
-            try {
-                nal = readNal(data);
-            } catch(e) {
-                throw new Error(`Error at pos ${obj.pos} in file ${nalFilePath}, ${e.stack}`);
-            }
-            nals.push(nal);
-        }
-
-        return nals;
-    } finally {
+    let nals: NALHolderMin[] = [];
+    for(let obj of nalInfos) {
+        let data = contents.slice(obj.pos, obj.pos + obj.len);
+        let nal;
         try {
-            await closeDescPromise(fd);
+            nal = readNal(data);
         } catch(e) {
-            console.log(`Error on closing file ${nalFilePath}, ignoring error. ${e}`);
+            throw new Error(`Error at pos ${obj.pos} in file ${nalFilePath}, ${e.stack}`);
         }
+        nals.push(nal);
     }
+
+    return nals;
 }

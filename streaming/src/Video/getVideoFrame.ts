@@ -1,5 +1,5 @@
 import { RealTimeToVideoTime } from "../NALStorage/TimeMap";
-import { Deferred, SetTimeoutAsync, PChan } from "pchannel";
+import { Deferred, PChan } from "pchannel";
 import { SizedCache } from "./SizedCache";
 import { CreateTempFolderPath } from "temp-folder";
 import { randomUID } from "../util/rand";

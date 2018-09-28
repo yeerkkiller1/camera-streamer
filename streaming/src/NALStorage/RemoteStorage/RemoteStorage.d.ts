@@ -1,3 +1,19 @@
+interface StorageBaseBase {
+    GetDirectoryListing(path: string): Promise<string[]>;
+    GetFileSize(filePath: string): Promise<number>;
+    GetFileContents(filePath: string): Promise<Buffer>;
+    SetFileContents(filePath: string, data: string|Buffer): Promise<void>;
+    DeleteFile(filePath: string): Promise<void>;
+    Exists(filePath: string): Promise<boolean>;
+    CreateDirectory(path: string): Promise<void>;
+}
+interface StorageBaseAppendableBase {
+    AppendData(filePath: string, data: string|Buffer): Promise<void>;
+}
+type StorageBaseAppendable = StorageBaseBase & StorageBaseAppendableBase;
+type StorageBase = StorageBaseBase | StorageBaseAppendable;
+
+
 type ChunkMetadata = {
     ChunkUID: string;
     Ranges: NALRange[];
@@ -9,6 +25,7 @@ type ChunkMetadata = {
      *      However, if this is true no new pending reads should be attempted.
      */
     IsMoved: boolean;
+    FirstAddSeqNum: number;
     LastAddSeqNum: number;
 };
 type Chunk = ChunkMetadata & {
@@ -86,12 +103,14 @@ interface RemoteStorageBase {
 
 
 
+
     // A promise value may exist at the end of the array, and signifies that the index is live. When the promise is resolved
     //  the array will be updated (either to have another NALInfoTime, or to no longer be live). If it isn't live it means
     //  the NAL after the last nal is a keyframe.
     GetIndex(cancelId: string, chunkUID: string): Promise<{index: (NALInfoTime | { Promise(): Promise<void> })[]}>;
     // Must be called synchronously after calling GetIndex.
-    ReadNALs(cancelId: string, chunkUID: string, times: NALInfoTime[]): Promise<NALHolderMin[] | "CANCELLED">;
+    //  And { Promise()... } objects will be ignored.
+    ReadNALs(cancelId: string, chunkUID: string, times: (NALInfoTime | { Promise(): Promise<void> })[]): Promise<NALHolderMin[] | "CANCELLED">;
 
     CancelCall(cancelId: string, chunkUID: string): void;
 

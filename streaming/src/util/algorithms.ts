@@ -29,7 +29,6 @@ export function findAtOrAfterIndex<T>(list: T[], value: number, map: (t: T) => n
     if(index < 0) {
         index = ~index;
     }
-    // Eh... idk
     if(index < 0) {
         index = 0;
     }
