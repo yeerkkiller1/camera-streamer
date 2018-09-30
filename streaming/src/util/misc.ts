@@ -38,7 +38,7 @@ export function firstKey<T>(obj: {[key: string]: T}): string|undefined {
 let UID = Math.random();
 let nextId = 0;
 export function randomUID(prefix = "UID") {
-    return prefix + (+new Date()).toString() + "." + (nextId++);
+    return prefix + UID + "." + (+new Date()).toString() + "." + (nextId++);
 }
 
 export function cloneDeep<T>(obj: T): T {

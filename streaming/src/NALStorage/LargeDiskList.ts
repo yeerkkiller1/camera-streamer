@@ -11,7 +11,6 @@ export interface LargeDiskListSummary<ReducedObject> {
     // Inclusive
     last: number;
 
-
     reduced: ReducedObject;
     // The total number of values in all summaries, not just this summary
     totalCountAtWrite: number;
@@ -23,9 +22,6 @@ export interface LargeDiskListSummary<ReducedObject> {
 
     shouldRemoteStore: boolean;
 }
-
-todonext
-// Write lots of tests for this whole thing.
 
 // REMEMBER! If we are storing a summary we need to account for the summary or the actual data not storing,
 //  making them out of sync. We either need correction for this, or to write in a way that this doesn't happen,
@@ -67,16 +63,6 @@ export class LargeDiskList<T, ReducedObject> {
     } = {};
     private nextRemoteStorePosition!: SmallDiskList<number>;
 
-    private getTotalCount() {
-        var totalCount = 0;
-        let summary = this.summaryLookup.GetValues();
-        if(summary.length > 0) {
-            totalCount += summary.last().totalCountAtWrite;
-        }
-        return totalCount;
-    }
-
-
     public async Init() {
         this.summaryLookup = new SmallDiskList(
             this.localStorage,
@@ -92,7 +78,7 @@ export class LargeDiskList<T, ReducedObject> {
         );
         await this.nextRemoteStorePosition.Init();
 
-        let liveSummary = this.getLiveSummary();
+        let liveSummary = this.getLiveSummary("doNotInit");
         if(liveSummary) {
             await liveSummary.Init();
         }
@@ -103,17 +89,28 @@ export class LargeDiskList<T, ReducedObject> {
         );
     }
 
-    private getLiveSummary(): SmallDiskList<T> | undefined {
+    private getLiveSummary(newState?: "new"|"doNotInit"): SmallDiskList<T> | undefined {
         let summaryValues = this.summaryLookup.GetValues();
         if(summaryValues.length > 0) {
             let last = summaryValues.last();
             if(!last.shouldRemoteStore) {
-                let diskList = new SmallDiskList<T>(
-                    this.localStorage,
-                    last.localFileName,
-                    last.mutableLocalFileName,
-                );
-                this.pendingFinishedSummaries[last.start] = diskList;
+                let diskList = this.pendingFinishedSummaries[last.start];
+                if(!diskList) {
+                    diskList = new SmallDiskList<T>(
+                        this.localStorage,
+                        last.localFileName,
+                        last.mutableLocalFileName,
+                    );
+                    this.pendingFinishedSummaries[last.start] = diskList;
+
+                    if(newState === "new") {
+                        diskList.IsAlreadyInited();
+                    } else if(newState === "doNotInit") {
+                        
+                    } else {
+                        throw new Error(`LiveSummary should have already been initialized in the constructor Init. This will cause problems.`);
+                    }
+                }
                 return diskList;
             }
         }
@@ -202,20 +199,21 @@ export class LargeDiskList<T, ReducedObject> {
     }
 
     public AddNewValue(value: T): Promise<unknown> {
-        let promises: Promise<void>[] = [];
+        let promises: Promise<unknown>[] = [];
 
         let summaries = this.summaryLookup.GetValues();
         if(summaries.length > 0) {
             let pendingSummary = summaries.last();
             let curThreshold = Math.ceil(Math.sqrt(pendingSummary.totalCountAtWrite));
             if(pendingSummary.countInSummary > curThreshold) {
-                this.summaryLookup.MutateLastValue(summaryValue => {
+                let mutatePromise = this.summaryLookup.MutateLastValue(summaryValue => {
                     if(!summaryValue) {
                         throw new Error(`Impossible`);
                     }
                     summaryValue.shouldRemoteStore = true;
                     return summaryValue;
                 });
+                promises.push(mutatePromise);
             }
         }
 
@@ -235,14 +233,14 @@ export class LargeDiskList<T, ReducedObject> {
                 totalCountAtWrite: totalCountAtWrite,
                 shouldRemoteStore: false,
                 reduced: this.initReducedObject(),
-                localFileName: this.remotePath + `summary${startKey}.index`,
-                mutableLocalFileName: this.remotePath + `summary${startKey}_mutable.index`,
+                localFileName: this.folderPath + `summary${startKey}.index`,
+                mutableLocalFileName: this.folderPath + `summary${startKey}_mutable.index`,
                 remoteFileName: this.remotePath + `summary${startKey}.index`,
             };
 
             promises.push(this.summaryLookup.AddNewValue(newRange));
 
-            liveSummary = this.getLiveSummary();
+            liveSummary = this.getLiveSummary("new");
             if(!liveSummary) {
                 throw new Error(`Impossible, we just added the summary`);
             }
@@ -271,7 +269,7 @@ export class LargeDiskList<T, ReducedObject> {
     }
 
 
-    public MutateLastValue(code: (value: T|undefined) => T): Promise<unknown> {
+    public async MutateLastValue(code: (value: T|undefined) => T): Promise<void> {
         // Oh yeah. We need to only finish a summary if we already have a new value. So I have to go change AddNewValue to do this properly.
         let liveSummary = this.getLiveSummary();
         let summaries = this.summaryLookup.GetValues();
@@ -279,11 +277,20 @@ export class LargeDiskList<T, ReducedObject> {
             if(summaries.length > 0) {
                 throw new Error(`Impossible, we should always have a live summary if we have any summaries, as we should only finish a summary in the same call as we add a new live summary.`);
             }
-
-            return this.AddNewValue(code(undefined));
+            await this.AddNewValue(code(undefined));
+            return;
         }
 
-        return liveSummary.MutateLastValue(code);
+        let newLast = code(liveSummary.GetValues().last());
+        this.summaryLookup.MutateLastValue(x => {
+            if(!x) {
+                throw new Error(`We definitely have a summary, this is impossible.`);
+            }
+            x.last = this.getSearchKey(newLast);
+            return x;
+        });
+
+        await liveSummary.MutateLastValue(() => newLast);
     }
 
     public async FindAtOrBeforeOrAfter(searchKey: number): Promise<T | undefined> {
@@ -292,11 +299,19 @@ export class LargeDiskList<T, ReducedObject> {
         // use summaryLookup to find where it is, and then get that remote file, and find the exact T.
         let summaryIndex = findAtOrBeforeOrAfterIndex(values, searchKey, x => x.start);
 
+        let checkDirection = +1;
+
         while(true) {
             let summary = UnionUndefined(values[summaryIndex]);
 
             if(!summary) {
-                return undefined;
+                if(checkDirection === -1) {
+                    console.log(values.length, summaryIndex);
+                    return undefined;
+                }
+                checkDirection = -1;
+                summaryIndex += checkDirection;
+                continue;
             }
 
             let tValues: T[] | undefined;
@@ -368,7 +383,7 @@ export class LargeDiskList<T, ReducedObject> {
                         // Eh... newer video is probably better. They play from old to new, so if we gave them older video they would
                         //  just iterate back to this chunk and infinitely loop. Unless they are playing backwards, in which case this will
                         //  infinitely loop (over the same chunk, that we send back, they play, and then they request the invalid chunk again).
-                        summaryIndex++;
+                        summaryIndex += checkDirection;
                         continue;
                     }
                 }
@@ -376,7 +391,8 @@ export class LargeDiskList<T, ReducedObject> {
 
             // Probably a crash occurred while writing and we had to just leave summaryLookup as it was.
             if(tValues.length === 0) {
-                summaryIndex++;
+                console.error(`No values at summary ${summary.start} to ${summary.last} (inclusive)`);
+                summaryIndex += checkDirection;
                 continue;
             }
 

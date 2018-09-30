@@ -52,9 +52,50 @@ export async function runAllStorageSystemCrashes(
 
         let startedCode = new Deferred<void>();
         let finished = new Deferred<void>();
+
+        (async () => {
+            await startedCode.Promise();
+            let curIterationCount = 0;
+            while(!finished.Value()) {
+                await exhaustPendingCalls();
+                if(allPendingPromises.length === 0) {
+                    continue;
+                }
+
+                let choice = choose(allPendingPromises.length + 1);           
+                if(choice === allPendingPromises.length) {
+                    console.log(`Choose cancel`);
+                    // Kill the storage system.
+                    //  There won't be any more side effects, we are only running this loops to make sure we don't leak memory.
+                    let killLoopCount = 0;
+                    while(allPendingPromises.length > 0) {
+                        for(let i = 0; i < allPendingPromises.length; i++) {
+                            allPendingPromises[i].deferred.Resolve("cancel");
+                        }
+                        allPendingPromises = [];
+                        await exhaustPendingCalls();
+                        killLoopCount++;
+                        if(killLoopCount >= 100) {
+                            throw new Error(`Max kill iterations reached. ${killLoopCount}`);
+                        }
+                    }
+                    break;
+                }
+
+                let pendingPromise = allPendingPromises.splice(choice, 1)[0];
+                pendingPromise.deferred.Resolve();
+                await pendingPromise.onFinish.Promise();
+
+                curIterationCount++;
+                if(curIterationCount >= 100) {
+                    throw new Error(`Max iterations reached. ${curIterationCount}`);
+                }
+            }
+        })();
+
         // Eh... not really any reason to keep using this promise. When there are no more storage system requests we
         //  will just stop fulfilling storage requests, and presumably the returned promise to this will have finished.
-        runCodeWithFolder(async folder => {
+        await runCodeWithFolder(async folder => {
             startedCode.Resolve();
             try {
                 await code(folder, storage);
@@ -64,45 +105,6 @@ export async function runAllStorageSystemCrashes(
             }
             finished.Resolve();
         });
-
-        await startedCode.Promise();
-
-        let curIterationCount = 0;
-        while(!finished.Value()) {
-            await exhaustPendingCalls();
-            if(allPendingPromises.length === 0) {
-                continue;
-            }
-
-            let choice = choose(allPendingPromises.length + 1);           
-            if(choice === allPendingPromises.length) {
-                console.log(`Choose cancel`);
-                // Kill the storage system.
-                //  There won't be any more side effects, we are only running this loops to make sure we don't leak memory.
-                let killLoopCount = 0;
-                while(allPendingPromises.length > 0) {
-                    for(let i = 0; i < allPendingPromises.length; i++) {
-                        allPendingPromises[i].deferred.Resolve("cancel");
-                    }
-                    allPendingPromises = [];
-                    await exhaustPendingCalls();
-                    killLoopCount++;
-                    if(killLoopCount >= 100) {
-                        throw new Error(`Max kill iterations reached. ${killLoopCount}`);
-                    }
-                }
-                break;
-            }
-
-            let pendingPromise = allPendingPromises.splice(choice, 1)[0];
-            pendingPromise.deferred.Resolve();
-            await pendingPromise.onFinish.Promise();
-
-            curIterationCount++;
-            if(curIterationCount >= 100) {
-                throw new Error(`Max iterations reached. ${curIterationCount}`);
-            }
-        }
     });
 }
 
@@ -144,7 +146,7 @@ export async function runAllPossibilities(
         let choiceObj = choiceIndexes[choiceIndex];
 
         if(choiceObj.count !== count) {
-            throw new Error(`Unexpected values count. ${count}`);
+            throw new Error(`Unexpected values count. Count: ${count}, at index: ${choiceIndex}`);
         }
 
         return choiceObj.index;

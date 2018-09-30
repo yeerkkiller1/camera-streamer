@@ -40,6 +40,7 @@ describe("SmallDiskList", () => {
 
     it("works with cancellations", async () => {
         await runAllStorageSystemCrashes(async (folder, storage) => {
+            console.log(folder);
             async function getList(storage = new DiskStorageBase()) {
                 let list = new SmallDiskList<number>(
                     storage,
@@ -97,11 +98,11 @@ describe("SmallDiskList", () => {
         });
     });
 
-    it("reloads data perfectly when there are no cancellations", async () => {
-        await runCodeWithFolder(async (folder) => {
-            async function getList() {
-                let storage = new DiskStorageBase();
-                let list = new SmallDiskList<string>(
+    it("cancellation don't corrupt confirmed data", async () => {
+        await runAllStorageSystemCrashes(async (folder, cancelStorage) => {
+            console.log(folder);
+            async function getList(storage = new DiskStorageBase()) {
+                let list = new SmallDiskList<number>(
                     storage,
                     folder + "main",
                     folder + "mutate",
@@ -110,23 +111,33 @@ describe("SmallDiskList", () => {
                 return list;
             }
 
-            let count = 2;
-            for(let i = 0; i < count; i++) {
+            // Definitely add
+            {
                 let list = await getList();
-                await list.AddNewValue(range(0, i + 1).join(""));
-                await list.AddNewValue(range(0, i + 1).join(""));
+                await list.AddNewValue(0);
             }
+
+            // Maybe add
+            try {
+                let list = await getList(cancelStorage);
+                list.MutateLastValue(x => 0);
+                await list.AddNewValue(1);
+            } catch(e) { }
 
             {
                 let list = await getList();
                 let values = list.GetValues();
-                ThrowIfNotImplementsData(values, 
-                    flatten(
-                        range(0, count)
-                            .map(i => [range(0, i + 1).join(""), range(0, i + 1).join("")])
-                    )
-                );
+                console.log(values);
+                if(values[0] !== 0) {
+                    throw new Error(`Storage cancellation resulted in previous confirmed data being lost. Should start with 0, values were ${JSON.stringify(values)}`);
+                }
             }
+        });
+    });
+
+    it("cancellation doesn't remote previous written data", async () => {
+        await runCodeWithFolder(async folder => {
+
         });
     });
 });

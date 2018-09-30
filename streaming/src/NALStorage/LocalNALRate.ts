@@ -292,7 +292,7 @@ export class LocalRemoteStorage implements RemoteStorageLocal {
         let { chunks, chunksList, chunkThresholdBytes, maxBytes } = this;
 
         let storage = this.storage;
-        if(storage.AppendData === undefined) {
+        if(!("AppendData" in storage)) {
             throw new Error(`Can not AddSingleNAL when underlying storage is not appendable`);
         }
         let appendableStorage = storage as StorageBaseAppendable;

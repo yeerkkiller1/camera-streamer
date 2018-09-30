@@ -15,7 +15,7 @@ let fncId = 0;
  */
 export function createIgnoreDuplicateCalls<F extends (...args: any[]) => Promise<any>=any>(
     fnc: F
-): F {
+) {
     let nextCall = new Deferred<void>();
     let waitingCall: { args: any[]; result: Deferred<{ result: any } | "cancelled"> } | undefined;
     (async () => {
