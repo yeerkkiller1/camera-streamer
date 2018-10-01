@@ -27,7 +27,8 @@ export class SmallDiskList<T> {
     private async readFile<U>(path: string): Promise<{ values: U[]; fileLength: number }> {
         let contents = "";
         try {
-            contents = (await this.localStorage.GetFileContents(path)).toString();
+            let contentsBuffer = await this.localStorage.GetFileContents(path);
+            contents = contentsBuffer.toString();
         } catch(e) { }
 
         let lines = contents
@@ -50,6 +51,7 @@ export class SmallDiskList<T> {
 
     /** If there are definitely no mainFilePath or mutateFilePath then this shouldn't need to be called. */
     public async Init(): Promise<void> {
+        console.log(this.mainFilePath);
         let { values, fileLength } = await this.readFile<T>(this.mainFilePath);
         this.values = values;
         
@@ -155,7 +157,7 @@ export class SmallDiskList<T> {
         await this.localStorage.SetFileContents(this.mutateFilePath, JSON.stringify({value, mainFilePathLength}) + "\n");
     });
 
-    public MutateLastValue(code: (value: T|undefined) => T): Promise<unknown> {
+    public async MutateLastValue(code: (value: T|undefined) => T): Promise<unknown> {
         // There is a race here though, with the writes to the mutable file inside addNewValueInternal.
         //  We don't want a channel, as intermediate writes aren't needed, but a loop with a single buffer
         //  should work. Actually... createIgnoreDuplicateCalls should just do that anyway, and we could
@@ -177,8 +179,21 @@ export class SmallDiskList<T> {
 
         let value = code(this.values.last());
 
-        this.values[this.values.length - 1] = value;
-        this.valuesBufferLengths[this.values.length - 1] = JSON.stringify(value).length + 1;
+        let pos = this.values.length - 1;
+        this.values[pos] = value;
+        this.valuesBufferLengths[pos] = JSON.stringify(value).length + 1;
+
+        // If the value in the current mutate file is waiting to be written to the mainFile we have to
+        //  wait. As if we clobber it now, it will only be stored in memory, and we should never go from
+        //  something being stored on disk to only stored in memory (because that allows data loss).
+        if(this.confirmedCount < this.values.length) {
+            await this.BlockUntilIndexSaved(pos);
+            if(!(this.values[pos] === value && this.values.length - 1 === pos)) {
+                // If values have been added, or our value has been changed, just return,
+                //  we are out of order for setting the mutate file.
+                return;
+            }
+        }
 
         return this.setMutateFile(value, this.mainFilePathLength);
     }

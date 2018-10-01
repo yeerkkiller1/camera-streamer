@@ -120,8 +120,9 @@ describe("SmallDiskList", () => {
             // Maybe add
             try {
                 let list = await getList(cancelStorage);
-                list.MutateLastValue(x => 0);
-                await list.AddNewValue(1);
+                list.AddNewValue(1);
+                //list.MutateLastValue(x => 0);
+                //await list.AddNewValue(2);
             } catch(e) { }
 
             {
@@ -132,12 +133,6 @@ describe("SmallDiskList", () => {
                     throw new Error(`Storage cancellation resulted in previous confirmed data being lost. Should start with 0, values were ${JSON.stringify(values)}`);
                 }
             }
-        });
-    });
-
-    it("cancellation doesn't remote previous written data", async () => {
-        await runCodeWithFolder(async folder => {
-
         });
     });
 });

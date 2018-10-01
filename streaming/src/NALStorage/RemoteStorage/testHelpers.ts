@@ -27,20 +27,32 @@ export async function runCodeWithFolder(code: (folder: string) => Promise<void>)
 
 // Runs the code through all possibly storage system crash timings.
 export async function runAllStorageSystemCrashes(
-    code: (folder: string, storageSystem: StorageBaseAppendable) => Promise<void>
+    code: (folder: string, getStorageSystem: () => StorageBaseAppendable) => Promise<void>
 ) {
     await runAllPossibilities(async (choose) => {
         let allPendingPromises: CancellableCallObject[] = [];
         async function exhaustPendingCalls(): Promise<void> {
             await SetTimeoutAsync(0);
             if(!storage.HasCalls()) {
+                todonext
+                // Await a dummy promise a few times to get to handle nested promises.
+                //  Otherwise our SetTimeoutAsync may result some storage calls coming back
+                //  sometimes, but not other times (because of timing).
+
+                // And actually... we should only start the cancelStorage loop when the inner code requests
+                //  it, and not do any SetTimeouts, forcing the caller to only make cancelStorage calls.
+                //  Because if any other calls are made it allows timing to change runs, which makes calls vary
+                //  and full call coverage impossible.
+
+                // And then we can throw immediately if we have no pending calls, but the underlying function hasn't finished.
+
                 // This means that the underlyings function is not finished and needs more time to generate writes/reads
                 //  (likely because it is doing something else that is asynchronous).
                 await SetTimeoutAsync(0);
             }
             let waitCount = 0;
             while(storage.HasCalls()) {
-                allPendingPromises.push(await storage.GetNextCall());
+                allPendingPromises.push(storage.GetNextCall());
                 waitCount++;
                 if(waitCount >= 1000) {
                     throw new Error(`Max exhaust wait count reached. ${waitCount}`);
@@ -56,7 +68,7 @@ export async function runAllStorageSystemCrashes(
         (async () => {
             await startedCode.Promise();
             let curIterationCount = 0;
-            while(!finished.Value()) {
+            while(!finished.Value() || allPendingPromises.length > 0) {
                 await exhaustPendingCalls();
                 if(allPendingPromises.length === 0) {
                     continue;
@@ -69,10 +81,11 @@ export async function runAllStorageSystemCrashes(
                     //  There won't be any more side effects, we are only running this loops to make sure we don't leak memory.
                     let killLoopCount = 0;
                     while(allPendingPromises.length > 0) {
-                        for(let i = 0; i < allPendingPromises.length; i++) {
-                            allPendingPromises[i].deferred.Resolve("cancel");
+                        while(true) {
+                            let value = allPendingPromises.pop();
+                            if(!value) break;
+                            value.deferred.Resolve("cancel");
                         }
-                        allPendingPromises = [];
                         await exhaustPendingCalls();
                         killLoopCount++;
                         if(killLoopCount >= 100) {
@@ -101,7 +114,7 @@ export async function runAllStorageSystemCrashes(
                 await code(folder, storage);
             } catch(e) {
                 finished.Reject(e);
-                return;
+                throw e;
             }
             finished.Resolve();
         });

@@ -8,6 +8,7 @@ import { mkdirSync } from "fs";
 import { mkdirFilePromise } from "../util/fs";
 import { findAtOrBeforeOrAfter } from "../util/algorithms";
 import { basename } from "path";
+import { DiskStorageCancellable } from "./RemoteStorage/DiskStorageCancellable";
 
 describe("LargeDiskList", () => {
     it("works with simple data", async () => {
@@ -23,9 +24,7 @@ describe("LargeDiskList", () => {
                     storage,
                     localFolder,
                     remoteFolder,
-                    x => x,
-                    () => 0,
-                    (reduced, value) => reduced + 1,
+                    x => x
                 );
 
                 await list.Init();
@@ -74,9 +73,7 @@ describe("LargeDiskList", () => {
                     storage,
                     localFolder,
                     remoteFolder,
-                    x => x,
-                    () => 0,
-                    (reduced, value) => reduced + 1,
+                    x => x
                 );
 
                 await list.Init();
@@ -109,7 +106,7 @@ describe("LargeDiskList", () => {
 
     // We need to test for leaking promises
 
-    /*
+    ///*
     it("works with cancellation", async () => {
         await runAllStorageSystemCrashes(async (folder, cancelStorage) => {
             let localFolder = folder + "local/";
@@ -123,9 +120,7 @@ describe("LargeDiskList", () => {
                     storage,
                     localFolder,
                     remoteFolder,
-                    x => x,
-                    () => 0,
-                    (reduced, value) => reduced + 1,
+                    x => x
                 );
 
                 await list.Init();
@@ -142,19 +137,25 @@ describe("LargeDiskList", () => {
 
             let dir: any;
 
+            let prevMessages: string[] = [];
             {
                 let list = await getList();
                 await list.AddNewValue(0);
 
-                dir = await new DiskStorageBase().GetDirectoryListing(localFolder);
+                //dir = await new DiskStorageBase().GetDirectoryListing(localFolder);
 
                 let ranges = list.GetRangeSummary();
                 if(ranges.length === 0) {
                     throw new Error(`No ranges? How?`);
                 }
             }
+            
+            
+            /*
             {
                 let list = await getList();
+
+                prevMessages = list.messages;
                 
                 let ranges = list.GetRangeSummary();
                 if(ranges.length === 0) {
@@ -162,32 +163,45 @@ describe("LargeDiskList", () => {
                     throw new Error(`No ranges? How?`);
                 }
             }
+            */
             try
             {
                 let list = await getList(cancelStorage);
 
                 list.AddNewValue(1);
-                //list.AddNewValue(2);
+                list.AddNewValue(2);
+                //*
                 await list.MutateLastValue(value => {
                     return 3;
                 });
-                //list.AddNewValue(4);
+                //*/
+                list.AddNewValue(4);
             } catch(e) { }
 
             {
                 let list = await getList();
+                function printMessages() {
+                    console.log("Previous messages start");
+                    for(let message of prevMessages) {
+                        console.log(message);
+                    }
+                    console.log("Messages start");
+                    for(let message of list.messages) {
+                        console.log(message);
+                    }
+                }
 
                 let ranges = list.GetRangeSummary();
                 if(ranges.length === 0) {
+                    printMessages();
                     throw new Error(`Ranges were deleted after data cancellation. Data corruption like this shouldn't happen.`);
                 }
-
-                console.log(list.GetRangeSummary());
 
                 let inferredList: number[] = [];
                 for(let i = 0; i < 5; i++) {
                     let listValue = await list.FindAtOrBeforeOrAfter(i);
                     if(typeof listValue !== "number") {
+                        printMessages();
                         throw new Error(`Invalid FindAtOrBeforeOrAfter result for ${i}. Should have been a number, was ${listValue}`);
                     }
                     if(inferredList.length > 0 && inferredList.last() === listValue) continue;
@@ -200,7 +214,7 @@ describe("LargeDiskList", () => {
             }
         });
     });
-    */
+    //*/
     // Cancellations don't lose data
     // That data is still valid even with cancellations
 });

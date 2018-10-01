@@ -1,6 +1,6 @@
 import { CreateTempFolderPath } from "temp-folder";
 import { execFile } from "child_process";
-import { ThrowIfNotImplementsData, ThrowsAsync, Deferred, PChan } from "pchannel";
+import { ThrowIfNotImplementsData, ThrowsAsync, Deferred, PChan, SetTimeoutAsync } from "pchannel";
 import { DiskStorageBase } from "./DiskStorageBase";
 import { DiskStorageCancellable } from "./DiskStorageCancellable";
 import { randomUID } from "../../util/rand";
@@ -14,6 +14,10 @@ describe("DiskStorageCancellable", () => {
             let done = false;
             (async () => {
                 while(!done) {
+                    if(!storage.HasCalls()) {
+                        await SetTimeoutAsync(0);
+                        continue;
+                    }
                     (await storage.GetNextCall()).deferred.Resolve("call");
                 }
             })();

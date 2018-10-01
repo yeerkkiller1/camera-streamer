@@ -13,19 +13,23 @@ export class DiskStorageCancellable implements StorageBaseAppendable {
 
     baseStorage = new DiskStorageBase();
 
-    deferredChan = new PChan<CancellableCallObject>();
+    callObjects: CancellableCallObject[] = [];
 
     public HasCalls() {
-        return this.deferredChan.HasValues();
+        return this.callObjects.length > 0;
     }
     public GetNextCall() {
-        return this.deferredChan.GetPromise();
+        let call = this.callObjects.pop();
+        if(!call) {
+            throw new Error(`GetNextCall called with no calls`);
+        }
+        return call;
     }
 
     private async doFunctionCall<T>(fncName: string, code: () => T): Promise<T | "cancelled"> {
         let deferred = new Deferred<"call"|"cancel">();
         let onFinish = new Deferred<void>();
-        this.deferredChan.SendValue({ name: fncName, deferred, onFinish });
+        this.callObjects.push({ name: fncName, deferred, onFinish });
         let action = await deferred.Promise();
         if(action === "cancel") {
             onFinish.Resolve();
