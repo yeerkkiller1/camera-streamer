@@ -39,7 +39,7 @@ describe("SmallDiskList", () => {
     });
 
     it("works with cancellations", async () => {
-        await runAllStorageSystemCrashes(async (folder, storage) => {
+        await runAllStorageSystemCrashes(async (folder, innerCancelCode) => {
             console.log(folder);
             async function getList(storage = new DiskStorageBase()) {
                 let list = new SmallDiskList<number>(
@@ -52,24 +52,28 @@ describe("SmallDiskList", () => {
             }
             let count = 3;
             {
-                let expectedList: number[] = [];
-                let list = await getList(storage);
+                await innerCancelCode(
+                    async storage => {
+                        let expectedList: number[] = [];
+                        let list = await getList(storage);
 
-                for(let i = 0; i < count; i++) {
-                    list.AddNewValue(i);
-                    expectedList.push(i);
-                }
-                list.MutateLastValue(value => {
-                    if(value === undefined) {
-                        throw new Error(`Impossible`);
+                        for(let i = 0; i < count; i++) {
+                            list.AddNewValue(i);
+                            expectedList.push(i);
+                        }
+                        list.MutateLastValue(value => {
+                            if(value === undefined) {
+                                throw new Error(`Impossible`);
+                            }
+                            ThrowIfNotImplementsData(value, count - 1);
+                            return value * 2;
+                        });
+                        expectedList[count - 1] *= 2;
+                        await list.AddNewValue(count);
+                        expectedList.push(count);
+                        ThrowIfNotImplementsData(list.GetValues(), expectedList);
                     }
-                    ThrowIfNotImplementsData(value, count - 1);
-                    return value * 2;
-                });
-                expectedList[count - 1] *= 2;
-                await list.AddNewValue(count);
-                expectedList.push(count);
-                ThrowIfNotImplementsData(list.GetValues(), expectedList);
+                );
             }
 
             await assertDataCorrect(false);
@@ -99,7 +103,7 @@ describe("SmallDiskList", () => {
     });
 
     it("cancellation don't corrupt confirmed data", async () => {
-        await runAllStorageSystemCrashes(async (folder, cancelStorage) => {
+        await runAllStorageSystemCrashes(async (folder, innerCancelCode) => {
             console.log(folder);
             async function getList(storage = new DiskStorageBase()) {
                 let list = new SmallDiskList<number>(
@@ -118,12 +122,16 @@ describe("SmallDiskList", () => {
             }
 
             // Maybe add
-            try {
-                let list = await getList(cancelStorage);
-                list.AddNewValue(1);
-                //list.MutateLastValue(x => 0);
-                //await list.AddNewValue(2);
-            } catch(e) { }
+            await innerCancelCode(
+                async cancelStorage => {
+                    try {
+                        let list = await getList(cancelStorage);
+                        list.AddNewValue(1);
+                        list.MutateLastValue(x => 0);
+                        await list.AddNewValue(2);
+                    } catch(e) { }
+                }
+            );
 
             {
                 let list = await getList();

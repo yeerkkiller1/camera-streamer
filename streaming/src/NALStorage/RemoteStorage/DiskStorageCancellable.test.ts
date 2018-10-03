@@ -4,7 +4,7 @@ import { ThrowIfNotImplementsData, ThrowsAsync, Deferred, PChan, SetTimeoutAsync
 import { DiskStorageBase } from "./DiskStorageBase";
 import { DiskStorageCancellable } from "./DiskStorageCancellable";
 import { randomUID } from "../../util/rand";
-import { mkdirFilePromise } from "../../util/fs";
+import { mkdirPromise } from "../../util/fs";
 import { runCodeWithFolder } from "./testHelpers";
 
 describe("DiskStorageCancellable", () => {

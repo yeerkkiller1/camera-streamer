@@ -1,10 +1,11 @@
 import * as Jimp from "jimp";
+import { newPromise } from "./promise";
 
 export async function createSimulatedFrame(time: number, width: number, height: number): Promise<Buffer> {
     let jimpAny = Jimp as any;
 
     async function loadFont(type: string): Promise<any> {
-        return new Promise((resolve, reject) => {
+        return newPromise((resolve, reject) => {
             jimpAny.loadFont(type, (err: any, font: any) => {
                 err ? reject(err) : resolve(font);
             });

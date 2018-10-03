@@ -238,10 +238,14 @@ export class LocalRemoteStorage implements RemoteStorageLocal {
     private createWriteLoop() {
         let writeLoopBase = TransformChannel<() => Promise<void>, { e: any } | undefined>(async input => {
             try {
+                console.log("a");
+                console.log(input.toString());
                 await input();
             } catch(e) {
+                console.log("b");
                 return { e };
             }
+            console.log("b");
         });
         return async (code: () => Promise<void>) => {
             this.checkWriteError();
@@ -596,7 +600,6 @@ export class LocalRemoteStorage implements RemoteStorageLocal {
     private async lockChunk<T>(cancelId: string, chunkObj: ChunkObj, fnc: (onCancelled: Promise<void>) => Promise<T>): Promise<T | void> {
         let onRead = new Deferred<void>();
         let { pendingReads } = chunkObj.metadata;
-        let chunkUID = chunkObj.metadata.ChunkUID;
         if(cancelId in pendingReads) {
             throw new Error(`cancelId already used on other ReadNALs. ${cancelId}`);
         }
@@ -646,7 +649,7 @@ export class LocalRemoteStorage implements RemoteStorageLocal {
             if(times.length === 0) {
                 return [];
             }
-
+            
             if(times.some(x => !x.finishedWrite)) {
                 if(chunkObjChecked.writeLoop === "exporting") {
                     throw new Error(`Some writes are not finished but we are exporting data?`);
@@ -654,15 +657,19 @@ export class LocalRemoteStorage implements RemoteStorageLocal {
                 // Eh... excessive waiting, but this shouldn't happen that often.
                 let writesFinished = new Deferred<void>();
                 chunkObjChecked.writeLoop(async () => { writesFinished.Resolve() });
+                console.log("a");
                 await writesFinished.Promise();
+                console.log("b");
                 this.checkWriteError();
                 if(times.some(x => !x.finishedWrite)) {
                     throw new Error(`Waited for writes to finish, but they didn't. This should be impossible.`);
                 }
             }
-
-            return await readNALs(this.storage, chunkObjChecked.fileBasePath, times, onCancelled);
+            
+            let result = await readNALs(this.storage, chunkObjChecked.fileBasePath, times, onCancelled);
+            return result;
         });
+
 
         if(!result) {
             return "CANCELLED";

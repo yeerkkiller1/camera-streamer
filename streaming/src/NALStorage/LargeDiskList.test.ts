@@ -5,7 +5,7 @@ import { ThrowIfNotImplementsData, SetTimeoutAsync } from "pchannel";
 import { range, flatten } from "../util/misc";
 import { LargeDiskList } from "./LargeDiskList";
 import { mkdirSync } from "fs";
-import { mkdirFilePromise } from "../util/fs";
+import { mkdirPromise } from "../util/fs";
 import { findAtOrBeforeOrAfter } from "../util/algorithms";
 import { basename } from "path";
 import { DiskStorageCancellable } from "./RemoteStorage/DiskStorageCancellable";
@@ -15,8 +15,8 @@ describe("LargeDiskList", () => {
         await runCodeWithFolder(async (folder) => {
             let localFolder = folder + "local/";
             let remoteFolder = folder + "remote/";
-            await mkdirFilePromise(localFolder);
-            await mkdirFilePromise(remoteFolder);
+            await mkdirPromise(localFolder);
+            await mkdirPromise(remoteFolder);
 
             async function getList(storage = new DiskStorageBase()) {
                 let list = new LargeDiskList<number, number>(
@@ -64,8 +64,8 @@ describe("LargeDiskList", () => {
         await runCodeWithFolder(async (folder) => {
             let localFolder = folder + "local/";
             let remoteFolder = folder + "remote/";
-            await mkdirFilePromise(localFolder);
-            await mkdirFilePromise(remoteFolder);
+            await mkdirPromise(localFolder);
+            await mkdirPromise(remoteFolder);
 
             async function getList(storage = new DiskStorageBase()) {
                 let list = new LargeDiskList<number, number>(
@@ -90,7 +90,7 @@ describe("LargeDiskList", () => {
                 let ranges = list.GetRangeSummary();
                 if(ranges.length === 0) {
                     throw new Error(`No ranges? How?`);
-                }                
+                }
             }
             {
                 let list = await getList();
@@ -106,13 +106,13 @@ describe("LargeDiskList", () => {
 
     // We need to test for leaking promises
 
-    ///*
+    //*
     it("works with cancellation", async () => {
-        await runAllStorageSystemCrashes(async (folder, cancelStorage) => {
+        await runAllStorageSystemCrashes(async (folder, innerCancelCode) => {
             let localFolder = folder + "local/";
             let remoteFolder = folder + "remote/";
-            await mkdirFilePromise(localFolder);
-            await mkdirFilePromise(remoteFolder);
+            await mkdirPromise(localFolder);
+            await mkdirPromise(remoteFolder);
 
             async function getList(storage = new DiskStorageBase()) {
                 let list = new LargeDiskList<number, number>(
@@ -150,33 +150,26 @@ describe("LargeDiskList", () => {
                 }
             }
             
-            
-            /*
-            {
-                let list = await getList();
 
-                prevMessages = list.messages;
-                
-                let ranges = list.GetRangeSummary();
-                if(ranges.length === 0) {
-                    console.log("dir", dir);
-                    throw new Error(`No ranges? How?`);
+            await innerCancelCode(
+                async cancelStorage => {
+                    try
+                    {
+                        let list = await getList(cancelStorage);
+                        let p1: Promise<unknown>|undefined;
+                        let p2: Promise<unknown>|undefined;
+                        let p3: Promise<unknown>|undefined;
+                        let p4: Promise<unknown>|undefined;
+
+                        p1 = list.AddNewValue(1);
+                        p2 = list.AddNewValue(2);
+                        p3 = list.MutateLastValue(value => 3);
+                        //p4 = list.AddNewValue(4);
+
+                        await Promise.all([p1, p2, p3, p4]);
+                    } catch(e) { }
                 }
-            }
-            */
-            try
-            {
-                let list = await getList(cancelStorage);
-
-                list.AddNewValue(1);
-                list.AddNewValue(2);
-                //*
-                await list.MutateLastValue(value => {
-                    return 3;
-                });
-                //*/
-                list.AddNewValue(4);
-            } catch(e) { }
+            );
 
             {
                 let list = await getList();
@@ -189,6 +182,7 @@ describe("LargeDiskList", () => {
                     for(let message of list.messages) {
                         console.log(message);
                     }
+                    console.log("Messages finished");
                 }
 
                 let ranges = list.GetRangeSummary();

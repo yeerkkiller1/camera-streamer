@@ -2,6 +2,7 @@
 import { max } from "./math";
 import { isArray } from "./type";
 import { clock } from "./time";
+import { newPromise } from "./promise";
 
 export async function profile<T>(name: string, fnc: () => Promise<T>): Promise<T> {
     let time = clock();
@@ -171,7 +172,7 @@ export function setPathRaw(object: any, value: any, path: string[]) {
 }
 
 export function asyncTimeout(delay: number): Promise<void> {
-    return new Promise<void>(resolve => {
+    return newPromise<void>(resolve => {
         setTimeout(resolve, delay);
     });
 }

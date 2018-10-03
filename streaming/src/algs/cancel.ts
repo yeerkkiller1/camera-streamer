@@ -1,13 +1,10 @@
 import { PChan, Deferred, SetTimeoutAsync } from "pchannel";
 import { UnionUndefined } from "../util/misc";
+import { fixErrorStack } from "../util/stack";
 
 const cancelError = Symbol("cancelled");
 
 let fncId = 0;
-
-//todonext
-// We need a createThrottledFunction or whatever, that calls the first call, and the last call,
-//  but doesn't buffer and run functions in between. 
 
 /** Creates a function that calls the underlying fnc. If there are no current calls, it calls the function.
  *      Otherwise it waits for the pending function to finish. If there is a previous call waiting, it cancels
@@ -15,7 +12,7 @@ let fncId = 0;
  */
 export function createIgnoreDuplicateCalls<F extends (...args: any[]) => Promise<any>=any>(
     fnc: F
-) {
+): ReplaceReturnType<F, ReturnType<F>|Promise<"CANCELLED">> & F {
     let nextCall = new Deferred<void>();
     let waitingCall: { args: any[]; result: Deferred<{ result: any } | "cancelled"> } | undefined;
     (async () => {
@@ -32,35 +29,39 @@ export function createIgnoreDuplicateCalls<F extends (...args: any[]) => Promise
             let currentWaitingCall = waitingCall;
             waitingCall = undefined;
 
-            let result = await fnc(...currentWaitingCall.args);
-            currentWaitingCall.result.Resolve({result});
+            // todonext
+            // Preserve stack
+            try {
+                let result = await fnc(...currentWaitingCall.args);
+                currentWaitingCall.result.Resolve({result});
+            } catch(e) {
+                currentWaitingCall.result.Reject(e);
+            }
         }
     })();
     // TODO: This function should return ReturnType<F>, but typescript doesn't think that is a Promise, even though
     //  it has to be because of the F constraints.
-    async function call(...args: any[]) {
+    return fixErrorStack(0, async function call(callFixErrorStack, ...args: any[]) {
         if(waitingCall) {
             // So... this works, because we replace waitingCall with our Deferred, so even if nextCall
             //  is already resolved, by the time the run loop resumes it will find our waitingCall instead
             waitingCall.result.Resolve("cancelled");
         }
         waitingCall = { args, result: new Deferred() };
+        let waitingCallChecked = waitingCall;
 
         // If nextCall is already resolved this is fine, we can resolve it multiple times.
         // If we are waiting on fnc already inside the run loop then nextCall will be for the next
         //  loop, so it will be fine.
         nextCall.Resolve();
 
-        let resultObj = await waitingCall.result.Promise();
+        let resultObj = await callFixErrorStack(1, () => waitingCallChecked.result.Promise());
 
         if(resultObj === "cancelled") {
             return "CANCELLED";
         }
         return resultObj.result;
-    }
-
-    const callId: ReplaceReturnType<F, ReturnType<F>|Promise<"CANCELLED">> & F = call as any;
-    return callId;
+    }) as any;
 }
 
 export function createCancelPending<F extends (...args: any[]) => Promise<any>=any>(

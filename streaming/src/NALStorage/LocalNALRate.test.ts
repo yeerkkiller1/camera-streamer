@@ -54,15 +54,19 @@ describe("DiskStorageBase", () => {
     it("runAllStorageSystemCrashes actuals runs all possibilities", async () => {
         let crashCount = 0;
         let runCount = 0;
-        await runAllStorageSystemCrashes(async (folder, storage) => {
-            runCount++;
-            await storage.SetFileContents(folder + "test.txt", "data");
-            try {
-                let contents = await storage.GetFileContents(folder + "test.txt");
-                ThrowIfNotImplementsData(contents.toString(), "data");
-            } catch(e) {
-                crashCount++;
-            }
+        await runAllStorageSystemCrashes(async (folder, innerCancelCode) => {
+            await innerCancelCode(
+                async storage => {
+                    runCount++;
+                    await storage.SetFileContents(folder + "test.txt", "data");
+                    try {
+                        let contents = await storage.GetFileContents(folder + "test.txt");
+                        ThrowIfNotImplementsData(contents.toString(), "data");
+                    } catch(e) {
+                        crashCount++;
+                    }
+                }
+            );
         });
         // We should run 3 times. Cancel SetFileContents - Run SetFileContents, Cancel GetFileContents - Run SetFileContents, Run GetFileContents
         ThrowIfNotImplementsData(runCount, 3);
@@ -72,7 +76,7 @@ describe("DiskStorageBase", () => {
     });
 
     it("keeps local index in sync with actual data", async () => {
-        await runAllStorageSystemCrashes(async (folder, cancelStorage) => {
+        await runAllStorageSystemCrashes(async (folder, innerCancelCode) => {
 
             // Create a populated nal system with a working storage system.
             // Do a basic set of operations, using storageBase. Try/catch this, so it can run and crash/cancel.
@@ -92,10 +96,10 @@ describe("DiskStorageBase", () => {
                 if(metadatas.length > 0) {
                     nextTime = metadatas[0].Ranges.last().lastTime + 1;
                 }
-
+                
                 let time1 = ++nextTime;
                 let time2 = ++nextTime;
-
+                
                 storage.AddSingleNAL(createFakeNAL(rate, time1, NALType.NALType_keyframe));
                 storage.AddSingleNAL(createFakeNAL(rate, time2, NALType.NALType_interframe));
                 
@@ -115,11 +119,16 @@ describe("DiskStorageBase", () => {
                 await runSimpleOperations(workingStorage);
             }
 
-            try {
-                await runSimpleOperations(await GetStorage(cancelStorage));
-            } catch(e) {
-                console.log(e);
-            }
+            await innerCancelCode(
+                async cancelStorage => {
+                    try {
+                        let storage = await GetStorage(cancelStorage);
+                        await runSimpleOperations(storage);
+                    } catch(e) {
+                        console.log(e);
+                    }
+                }
+            );
 
             // Now verify the data. Read all the nals, and make sure the chunk metadatas line up, and then make sure the indexes line up.
             // And also throw if there is no data. We definitely wrote some data with workingStorage, even if cancelStorage crashed immediately.

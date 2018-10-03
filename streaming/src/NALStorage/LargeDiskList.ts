@@ -121,7 +121,11 @@ export class LargeDiskList<T, ReducedObject> {
         return undefined;
     }
 
-    private onAdd = new PChan();
+    private onAdd = new Deferred<void>();
+    private triggerOnAdd() {
+        this.onAdd.Resolve();
+        this.onAdd = new Deferred<void>();
+    }
     private async storageTransitionLoop() {
         // When we move something to remote storage we have to make sure summaryLookup is saved. Otherwise we move it, crash,
         //  and then add different values to the summaryLookup and try to move a similar but slightly different summary!
@@ -197,11 +201,11 @@ export class LargeDiskList<T, ReducedObject> {
                 await this.nextRemoteStorePosition.MutateLastValue(x => nextSummaryIndex + 1);
             }
 
-            await this.onAdd.GetPromise();
+            await this.onAdd.Promise();
         }
     }
 
-    public AddNewValue(value: T): Promise<unknown> {
+    public async AddNewValue(value: T): Promise<unknown> {
         let promises: Promise<unknown>[] = [];
 
         let summaries = this.summaryLookup.GetValues();
@@ -268,7 +272,13 @@ export class LargeDiskList<T, ReducedObject> {
         let addPromise = liveSummary.AddNewValue(value);
         promises.push(addPromise);
 
-        return Promise.all([promises]);
+        this.triggerOnAdd();
+
+        console.log(`Waiting for ${promises.length} promises`);
+        for(let i = 0; i < promises.length; i++) {
+            await promises[i];
+            console.log(`Finished ${i}`);
+        }
     }
 
 

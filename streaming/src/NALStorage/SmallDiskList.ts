@@ -1,6 +1,7 @@
 import { TransformChannel, Deferred, PChan } from "pchannel";
 import { createIgnoreDuplicateCalls } from "../algs/cancel";
 import { sum } from "../util/math";
+import { fixErrorStack } from "../util/stack";
 
 // Has small amounts of data so everything is stored locally, and read in on boot.
 export class SmallDiskList<T> {
@@ -22,7 +23,12 @@ export class SmallDiskList<T> {
 
     /** The amount of values that are written to the disk, and will not be lost. */
     private confirmedCount = 0;
-    private onConfirmedCountChanged = new PChan<void>();
+    private onConfirmedCountChanged = new Deferred<void>();
+    private setConfirmedCount(count: number) {
+        this.confirmedCount = count;
+        this.onConfirmedCountChanged.Resolve();
+        this.onConfirmedCountChanged = new Deferred<void>();
+    }
 
     private async readFile<U>(path: string): Promise<{ values: U[]; fileLength: number }> {
         let contents = "";
@@ -51,7 +57,6 @@ export class SmallDiskList<T> {
 
     /** If there are definitely no mainFilePath or mutateFilePath then this shouldn't need to be called. */
     public async Init(): Promise<void> {
-        console.log(this.mainFilePath);
         let { values, fileLength } = await this.readFile<T>(this.mainFilePath);
         this.values = values;
         
@@ -86,8 +91,10 @@ export class SmallDiskList<T> {
     }
 
     public async BlockUntilIndexSaved(index: number): Promise<void> {
-        while(index <= this.confirmedCount) {
-            await this.onConfirmedCountChanged.GetPromise();
+        let requireCount = index = 1;
+        while(this.confirmedCount < requireCount) {
+            //console.log(`Waiting until confirmed ${requireCount} (confirmed ${this.confirmedCount})`);
+            await this.onConfirmedCountChanged.Promise();
         }
     }
 
@@ -113,7 +120,7 @@ export class SmallDiskList<T> {
         await this.localStorage.AppendData(this.mainFilePath, JSON.stringify(this.values[this.appendCount - 1]) + "\n");
     }
 
-    public AddNewValue(value: T): Promise<void> {
+    public AddNewValue = fixErrorStack(0, async function AddNewValue(this: SmallDiskList<T>, call, value: T): Promise<void> {
         let valueLength = JSON.stringify(value).length + 1;
 
         let index = this.values.length;
@@ -125,8 +132,11 @@ export class SmallDiskList<T> {
         }
         this.mainFilePathLengthCount = this.values.length - 1;
 
-        return this.addNewValueInternal({ value, index });
-    }
+        await call(0, this.addNewValueInternal, { value, index });
+    });
+
+    // TODO: I think the bug is that the transform channel keeps running after we stop making calls. We need to keep track of all the promises
+    //  returned and block somewhere, so we don't leak promises (and don't have unhandled promise exceptions).
     private addNewValueInternal = TransformChannel<{value: T, index: number}, void>(async (valueObj) => {
         let { value, index } = valueObj;
 
@@ -149,15 +159,17 @@ export class SmallDiskList<T> {
             await this.setMutateFile(value, this.mainFilePathLength);
         }
 
-        this.confirmedCount = index + 1;
-        this.onConfirmedCountChanged.SendValue();
+        this.setConfirmedCount(index + 1);
     });
 
     private setMutateFile = createIgnoreDuplicateCalls<(value: T, mainFilePathLength: number) => Promise<void>>(async (value, mainFilePathLength) => {
+        console.log(`start setMutateFIle ${this.mutateFilePath}`);
         await this.localStorage.SetFileContents(this.mutateFilePath, JSON.stringify({value, mainFilePathLength}) + "\n");
+        console.log(`done setMutateFIle ${this.mutateFilePath}`);
     });
 
     public async MutateLastValue(code: (value: T|undefined) => T): Promise<unknown> {
+        console.log(`Mutate ${this.mutateFilePath}`);
         // There is a race here though, with the writes to the mutable file inside addNewValueInternal.
         //  We don't want a channel, as intermediate writes aren't needed, but a loop with a single buffer
         //  should work. Actually... createIgnoreDuplicateCalls should just do that anyway, and we could
@@ -195,7 +207,7 @@ export class SmallDiskList<T> {
             }
         }
 
-        return this.setMutateFile(value, this.mainFilePathLength);
+        await this.setMutateFile(value, this.mainFilePathLength);
     }
 
     public GetValues(): T[] {

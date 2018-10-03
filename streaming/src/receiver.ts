@@ -16,7 +16,7 @@ import { GetRangeFPSEstimate, RoundRecordTime } from "./NALStorage/TimeMap";
 import { GetMP4NALs, ParseNalInfo } from "mp4-typescript";
 import { Downsampler, DownsampledInstance } from "./NALStorage/Downsampler";
 import { createServer } from "http";
-import { readFilePromise } from "./util/fs";
+import { readFilePromise, mkdirPromise, writeFilePromise } from "./util/fs";
 import { CreateTempFolderPath } from "temp-folder";
 import { exec } from "child_process";
 import { parseParams } from "./util/url";
@@ -24,6 +24,7 @@ import { SizedCache } from "./Video/SizedCache";
 import { NALStorageManagerImpl } from "./NALStorage/RemoteStorage/StorageCombined";
 import { LocalRemoteStorage } from "./NALStorage/LocalNALRate";
 import { DiskStorageBase } from "./NALStorage/RemoteStorage/DiskStorageBase";
+import { newPromise } from "./util/promise";
 
 //makeProcessSingle("receiver");
 
@@ -53,20 +54,7 @@ pi setup code:
 */
 
 
-function mkdirPromise(path: string) {
-    return new Promise<void>((resolve, reject) => {
-        mkdir(path, (err => {
-            err ? reject(err) : resolve();
-        }));
-    });
-}
-function writeFilePromise(path: string, buf: Buffer) {
-    return new Promise<void>((resolve, reject) => {
-        writeFile(path, buf, (err => {
-            err ? reject(err) : resolve();
-        }));
-    });
-}
+
 async function getFinalStorageFolder() {
     let finalStorageFolder = "./dist/videos/";
     try {
@@ -697,7 +685,7 @@ server.listen(7061, (err: any) => {
 
 
 function execPromise(command: string) {
-    return new Promise<string>((resolve, reject) => {
+    return newPromise<string>((resolve, reject) => {
         exec(command, (err, stdout, stderr) => {
             if(err) {
                 reject(err);
@@ -842,7 +830,7 @@ wsServer.on("connection", connRaw => {
         if(curCallback !== null) {
             throw new Error(`Already waiting for data`);
         }
-        return new Promise(x => {
+        return newPromise(x => {
             curCallback = x;
             connRaw.send(JSON.stringify({
                 size: size

@@ -1,4 +1,4 @@
-import { readdirPromise, statFilePromise, readFilePromise, appendFilePromise, writeFilePromise, unlinkFilePromise, existsFilePromise, mkdirFilePromise } from "../../util/fs";
+import { readdirPromise, statFilePromise, readFilePromise, appendFilePromise, writeFilePromise, unlinkFilePromise, existsFilePromise, mkdirPromise } from "../../util/fs";
 
 export class DiskStorageBase implements StorageBaseAppendable {
     public GetDirectoryListing(path: string): Promise<string[]> {
@@ -17,13 +17,16 @@ export class DiskStorageBase implements StorageBaseAppendable {
     public SetFileContents(filePath: string, data: string | Buffer): Promise<void> {
         return writeFilePromise(filePath, data);
     }
-    public DeleteFile(filePath: string): Promise<void> {
-        return unlinkFilePromise(filePath);
+    public async DeleteFile(filePath: string): Promise<void> {
+        // unlink can throw? But why?
+        try {
+            await unlinkFilePromise(filePath);
+        } catch(e) { }
     }
     public Exists(filePath: string): Promise<boolean> {
         return existsFilePromise(filePath);
     }
     public CreateDirectory(path: string): Promise<void> {
-        return mkdirFilePromise(path);
+        return mkdirPromise(path);
     }
 }
