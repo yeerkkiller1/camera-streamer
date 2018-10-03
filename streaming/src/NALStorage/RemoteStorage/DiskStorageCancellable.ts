@@ -32,7 +32,6 @@ export class DiskStorageCancellable implements StorageBaseAppendable {
     private doFunctionCall = fixErrorStack(1, async function (this: DiskStorageCancellable, call, fncName: string, code: () => any): Promise<any | "cancelled"> {
         let deferred = new Deferred<"call"|"cancel">();
         let onFinish = new Deferred<void>();
-        console.log(`Adding call ${fncName}`);
         this.callObjects.push({ name: fncName, deferred, onFinish, debugName: fncName });
         let action = await deferred.Promise();
         if(action === "cancel") {

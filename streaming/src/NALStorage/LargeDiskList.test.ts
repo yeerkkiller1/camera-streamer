@@ -5,7 +5,7 @@ import { ThrowIfNotImplementsData, SetTimeoutAsync } from "pchannel";
 import { range, flatten } from "../util/misc";
 import { LargeDiskList } from "./LargeDiskList";
 import { mkdirSync } from "fs";
-import { mkdirPromise } from "../util/fs";
+import { mkdirPromise, writeFilePromise } from "../util/fs";
 import { findAtOrBeforeOrAfter } from "../util/algorithms";
 import { basename } from "path";
 import { DiskStorageCancellable } from "./RemoteStorage/DiskStorageCancellable";
@@ -194,12 +194,14 @@ describe("LargeDiskList", () => {
                 let inferredList: number[] = [];
                 for(let i = 0; i < 5; i++) {
                     let listValue = await list.FindAtOrBeforeOrAfter(i);
-                    if(typeof listValue !== "number") {
-                        printMessages();
-                        throw new Error(`Invalid FindAtOrBeforeOrAfter result for ${i}. Should have been a number, was ${listValue}`);
+                    let valueType = typeof listValue;
+                    let isInvalid = valueType !== "number";
+                    if(isInvalid) {                       
+                        throw new Error(`${i}, ${list.messages.join(" ")}, ${list.summaryLookup.messages.join(" ")}, ${Object.values(list.pendingFinishedSummaries).map(x => x && `[${x.messages.join(", ")}]`)}, ${folder}`);
+                        //throw new Error(`Invalid FindAtOrBeforeOrAfter result for ${i}. Should have been a number, was ${listValue}, ${JSON.stringify(valueType)}`);
                     }
                     if(inferredList.length > 0 && inferredList.last() === listValue) continue;
-                    inferredList.push(listValue);
+                    inferredList.push(listValue as number);
                 }
                 if(inferredList[0] !== 0) {
                     throw new Error(`Confirmed value was lost, values were [${inferredList.join(", ")}], should have started with 0`);

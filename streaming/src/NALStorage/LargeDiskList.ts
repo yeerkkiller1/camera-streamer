@@ -54,9 +54,9 @@ export class LargeDiskList<T, ReducedObject> {
     //  If needed we could always add a linear scaling factor argument to this.
 
 
-    private summaryLookup!: SmallDiskList<LargeDiskListSummary>;
+    public summaryLookup!: SmallDiskList<LargeDiskListSummary>;
     // When we set shouldRemoteStore to true we should add the SmallDiskList into here.
-    private pendingFinishedSummaries: {
+    public pendingFinishedSummaries: {
         [start: number]: SmallDiskList<T>|undefined
     } = {};
     private nextRemoteStorePosition!: SmallDiskList<number>;
@@ -81,7 +81,7 @@ export class LargeDiskList<T, ReducedObject> {
         let liveSummary = this.getLiveSummary("doNotInit");
         if(liveSummary) {
             await liveSummary.Init();
-            this.messages.push(`Loaded ${liveSummary.GetValues()}`);
+            this.messages.push(`Loaded [${liveSummary.GetValues().join(", ")}]`);
         } else {
             this.messages.push(`Nothing to load ${this.summaryLookup.GetValues().length} summaries`);
         }
@@ -274,10 +274,8 @@ export class LargeDiskList<T, ReducedObject> {
 
         this.triggerOnAdd();
 
-        console.log(`Waiting for ${promises.length} promises`);
         for(let i = 0; i < promises.length; i++) {
             await promises[i];
-            console.log(`Finished ${i}`);
         }
     }
 

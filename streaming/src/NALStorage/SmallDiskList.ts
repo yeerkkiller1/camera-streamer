@@ -21,6 +21,8 @@ export class SmallDiskList<T> {
     private mainFilePathLength = 0;
     private mainFilePathLengthCount = 0;
 
+    public messages: string[] = [];
+
     /** The amount of values that are written to the disk, and will not be lost. */
     private confirmedCount = 0;
     private onConfirmedCountChanged = new Deferred<void>();
@@ -74,7 +76,9 @@ export class SmallDiskList<T> {
         if(mutateValues.length === 1) {
             let mutateValueObj = mutateValues[0];
             if(mutateValueObj.mainFilePathLength !== fileLength) {
-                console.error(`Mutable value has a main file length inconsistent with the actual main file length. Should be ${fileLength}, was ${mutateValueObj.mainFilePathLength}`);
+                let message = `Mutable value has a main file length inconsistent with the actual main file length. Should be ${fileLength}, was ${mutateValueObj.mainFilePathLength}`;
+                console.error(message);
+                this.messages.push(message);
             } else {
                 this.values.push(mutateValueObj.value);
                 this.valuesBufferLengths.push(JSON.stringify(mutateValueObj.value).length + 1);
@@ -84,6 +88,8 @@ export class SmallDiskList<T> {
         this.confirmedCount = this.values.length;
 
         this.initedFinished.Resolve();
+
+        this.messages.push(`Loaded values ${JSON.stringify(this.values)}`);
     }
 
     public async BlockUntilInitFinished(): Promise<void> {
@@ -91,7 +97,7 @@ export class SmallDiskList<T> {
     }
 
     public async BlockUntilIndexSaved(index: number): Promise<void> {
-        let requireCount = index = 1;
+        let requireCount = index + 1;
         while(this.confirmedCount < requireCount) {
             //console.log(`Waiting until confirmed ${requireCount} (confirmed ${this.confirmedCount})`);
             await this.onConfirmedCountChanged.Promise();
@@ -163,13 +169,10 @@ export class SmallDiskList<T> {
     });
 
     private setMutateFile = createIgnoreDuplicateCalls<(value: T, mainFilePathLength: number) => Promise<void>>(async (value, mainFilePathLength) => {
-        console.log(`start setMutateFIle ${this.mutateFilePath}`);
         await this.localStorage.SetFileContents(this.mutateFilePath, JSON.stringify({value, mainFilePathLength}) + "\n");
-        console.log(`done setMutateFIle ${this.mutateFilePath}`);
     });
 
     public async MutateLastValue(code: (value: T|undefined) => T): Promise<unknown> {
-        console.log(`Mutate ${this.mutateFilePath}`);
         // There is a race here though, with the writes to the mutable file inside addNewValueInternal.
         //  We don't want a channel, as intermediate writes aren't needed, but a loop with a single buffer
         //  should work. Actually... createIgnoreDuplicateCalls should just do that anyway, and we could

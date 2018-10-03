@@ -9,12 +9,12 @@ export async function runCodeWithFolder(code: (folder: string) => Promise<void>)
     let folder = await CreateTempFolderPath();
     folder += randomUID("subfolder") + "/";
     await mkdirPromise(folder);
-    console.log(`Made folder ${folder}`);
+    //console.log(`Made folder ${folder}`);
     try {
         await code(folder);
     } finally {
         await execFile("rm", ["-rf", folder]);
-        console.log(`Deleted folder ${folder}`);
+        //console.log(`Deleted folder ${folder}`);
     }
 }
 
@@ -31,7 +31,7 @@ export async function runAllStorageSystemCrashes(
     code: (folder: string, innerCancelCode: (code: (storage: StorageBaseAppendable) => Promise<void>) => Promise<void>) => Promise<void>
 ) {
     await runAllPossibilitiesDebug(async (choose) => {
-        console.log("Start run possibilities");
+        //console.log("Start run possibilities");
         let storage = new DiskStorageCancellable();
         let startedCode = new Deferred<void>();
         let finished = new Deferred<void>();
@@ -83,7 +83,7 @@ export async function runAllStorageSystemCrashes(
                 if(choice === allPendingPromises.length) {
                     // Choose to cancel everything. We don't test for random failures, just the whole system dying and everything failing.
 
-                    console.log(`Choose cancel`);
+                    //console.log(`Choose cancel`);
                     // Kill the storage system.
                     //  There won't be any more side effects, we are only running this loops to make sure we don't leak memory.
                     let killLoopCount = 0;
@@ -220,7 +220,7 @@ export async function runAllPossibilitiesDebug(
             throw new Error(`Unexpected values count. Count: ${count}, at index: ${choiceDepth}`);
         }
 
-        console.log(`Choose ${debugValues[choiceObj.index]} at depth ${choiceDepth} (index ${choiceObj.index} out of [${debugValues.join(", ")}])`);
+        console.log(`Choose ${debugValues[choiceObj.index]} at depth ${choiceDepth} (index ${choiceObj.index} out of ${debugValues.length})`);
 
         return choiceObj.index;
     }
