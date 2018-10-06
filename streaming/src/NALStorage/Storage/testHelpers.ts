@@ -220,7 +220,7 @@ export async function runAllPossibilitiesDebug(
             throw new Error(`Unexpected values count. Count: ${count}, at index: ${choiceDepth}`);
         }
 
-        console.log(`Choose ${debugValues[choiceObj.index]} at depth ${choiceDepth} (index ${choiceObj.index} out of ${debugValues.length})`);
+        //console.log(`Choose ${debugValues[choiceObj.index]} at depth ${choiceDepth} (index ${choiceObj.index} out of ${debugValues.length})`);
 
         return choiceObj.index;
     }

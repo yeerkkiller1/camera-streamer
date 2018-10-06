@@ -21,9 +21,9 @@ import { CreateTempFolderPath } from "temp-folder";
 import { exec } from "child_process";
 import { parseParams } from "./util/url";
 import { SizedCache } from "./Video/SizedCache";
-import { NALStorageManagerImpl } from "./NALStorage/RemoteStorage/StorageCombined";
-import { LocalRemoteStorage } from "./NALStorage/LocalNALRate";
-import { DiskStorageBase } from "./NALStorage/RemoteStorage/DiskStorageBase";
+import { NALStorageManagerImpl } from "./NALStorage/Storage/StorageCombined";
+import { LocalRemoteStorage } from "./NALStorage/LocalRemoteStorage";
+import { DiskStorageBase } from "./NALStorage/Storage/DiskStorageBase";
 import { newPromise } from "./util/promise";
 
 //makeProcessSingle("receiver");
@@ -119,11 +119,11 @@ const baseRate = 4;
 let maxTotalDiskUsage = 1024 * 1024 * 160;
 //maxTotalDiskUsage = 1024 * 1024 * 160;
 
-let localStorage = (rate: number) => new LocalRemoteStorage(new DiskStorageBase(), rate, totalCostPerMonth, maxTotalDiskUsage);
+let localStorage = (rate: number) => new LocalRemoteStorage(new DiskStorageBase(), new DiskStorageBase(), rate, totalCostPerMonth, maxTotalDiskUsage);
 
 const secondsPerMonth = 60 * 60 * 24 * 30;
 
-let s3Standard = (rate: number) => new LocalRemoteStorage(new DiskStorageBase(), rate, 0, 0, "./dist/s3standard/", {
+let s3Standard = (rate: number) => new LocalRemoteStorage(new DiskStorageBase(), new DiskStorageBase(), rate, 0, 0, "./dist/s3standard/", {
     debugName: "s3_standard",
     maxGB(bytesPerSecond: number, secondPerChunk: number, maxCost: number) {
         // No duration restrictions
@@ -146,7 +146,7 @@ let s3Standard = (rate: number) => new LocalRemoteStorage(new DiskStorageBase(),
     },
 });
 
-let s3Infrequent = (rate: number) => new LocalRemoteStorage(new DiskStorageBase(), rate, 0, 0, "./dist/s3infrequent/", {
+let s3Infrequent = (rate: number) => new LocalRemoteStorage(new DiskStorageBase(), new DiskStorageBase(), rate, 0, 0, "./dist/s3infrequent/", {
     debugName: "s3_infrequent",
     maxGB(bytesPerSecond: number, secondPerChunk: number, maxCost: number) {
         // No duration restrictions
@@ -170,7 +170,7 @@ let s3Infrequent = (rate: number) => new LocalRemoteStorage(new DiskStorageBase(
 // Expedited. Anything else takes too long to request the data, which could be worth it for reduces fees, but...
 //  if we can store in backblaze for just a little more with no restrictions and much cheaper fees, or
 //  other S3 alternatives, then anything other than expedited is not worth it.
-let s3Glacier = (rate: number) => new LocalRemoteStorage(new DiskStorageBase(), rate, 0, 0, "./dist/s3glacier/", {
+let s3Glacier = (rate: number) => new LocalRemoteStorage(new DiskStorageBase(), new DiskStorageBase(), rate, 0, 0, "./dist/s3glacier/", {
     debugName: "s3_glacier",
     maxGB(bytesPerSecond: number, secondPerChunk: number, maxCost: number) {
        
@@ -199,7 +199,7 @@ let s3Glacier = (rate: number) => new LocalRemoteStorage(new DiskStorageBase(), 
 });
 
 
-let wasabi = (rate: number) => new LocalRemoteStorage(new DiskStorageBase(), rate, 0, 0, "./dist/wasabi/", {
+let wasabi = (rate: number) => new LocalRemoteStorage(new DiskStorageBase(), new DiskStorageBase(), rate, 0, 0, "./dist/wasabi/", {
     debugName: "wasabi",
     maxGB(bytesPerSecond: number, secondPerChunk: number, maxCost: number) {
         let costPerGBPerMonth = 0.0049;
@@ -212,7 +212,7 @@ let wasabi = (rate: number) => new LocalRemoteStorage(new DiskStorageBase(), rat
     },
 });
 
-let backblaze = (rate: number) => new LocalRemoteStorage(new DiskStorageBase(), rate, 0, 0, "./dist/backblaze/", {
+let backblaze = (rate: number) => new LocalRemoteStorage(new DiskStorageBase(), new DiskStorageBase(), rate, 0, 0, "./dist/backblaze/", {
     debugName: "backblaze",
     maxGB(bytesPerSecond: number, secondPerChunk: number, maxCost: number) {       
         let costPerGBPerMonth = 0.005;

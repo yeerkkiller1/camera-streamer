@@ -4,6 +4,7 @@ import { findAfterIndex, findAtOrBeforeOrAfterIndex, findAtIndex } from "../util
 import { RealTimeToVideoTime, RealDurationToVideoDuration, GetTimescaleSeconds, GetMinGapSize } from "./TimeMap";
 import { MuxVideo } from "mp4-typescript";
 import { UnionUndefined } from "../util/misc";
+import { NALType } from "../srcEnums";
 
 
 export function GetVideoTimes(

@@ -7,7 +7,7 @@ import { PChannelMultiListen } from "../../receiver/PChannelMultiListen";
 import { PChan, TransformChannel, Deferred } from "pchannel";
 import { readNal } from "../NALBuffers";
 import { GetVideoTimes, muxVideo } from "../muxing";
-import { createChunkData } from "../LocalNALRate";
+import { createChunkData } from "../LocalRemoteStorage";
 
 // Eh... we'll use Buffers, so we have a 2GB chunk limit. But... that should be fine.
 // We'll store chunk lists and metadata locally. 

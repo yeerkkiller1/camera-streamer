@@ -33,12 +33,6 @@ interface Array<T> {
     last(): T;
 }
 
-declare const enum NALType {
-    //NALType_sps = 0,
-    //NALType_pps = 1,
-    NALType_keyframe = 2,
-    NALType_interframe = 3,
-}
 
 
 type NALExtraInfo = {
@@ -73,6 +67,12 @@ type NALInfoTime = {
 
     addSeqNum: number;
 };
+
+type NALType = number;
+type NALType_keyframe = 2;
+type NALType_interframe = 3;
+
+
 
 // We want this to be optimized for storing in memory, as it would be nice if we could store
 //  every time of every nal for a very large history. Even at 4 numbers (32 bytes), and assuming a

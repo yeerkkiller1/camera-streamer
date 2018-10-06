@@ -10,7 +10,9 @@ export interface LargeDiskListSummary {
     start: number;
     // Inclusive
     last: number;
+}
 
+interface LargeDiskListSummaryInternal extends LargeDiskListSummary {
     // The total number of values in all summaries, not just this summary
     totalCountAtWrite: number;
     countInSummary: number;
@@ -33,12 +35,14 @@ export interface LargeDiskListSummary {
 //  scaling begins to breakdown after millions of values (on account of GetRangeSummary returning
 //  a summary for all the objects).
 
+// I definitely need to lock down the whole class if something throws, to prevent it from getting in bad states.
+
 // - Then we need to make our storage objects keep track of write/read byte counts, so we can make a test that
 //      ensures LargeDiskList doesn't just keep everything in localStorage forever, AND ALSO to make sure
 //      certain calls (Init), doesn't require remoteStorage (unless there is a data corruption issue).
 // - We need a SmallDiskList.Finish function, so we can move the mutate value into the main file, and ensure everything
 //      is written to disk, before we move the file.
-export class LargeDiskList<T, ReducedObject> {
+export class LargeDiskList<T> {
     constructor(
         private localStorage: StorageBaseAppendable,
         private remoteStorage: StorageBase,
@@ -54,9 +58,9 @@ export class LargeDiskList<T, ReducedObject> {
     //  If needed we could always add a linear scaling factor argument to this.
 
 
-    public summaryLookup!: SmallDiskList<LargeDiskListSummary>;
-    // When we set shouldRemoteStore to true we should add the SmallDiskList into here.
-    public pendingFinishedSummaries: {
+    public summaryLookup!: SmallDiskList<LargeDiskListSummaryInternal>;
+    // Everything in here should already have init called on it.
+    public pendingSummaries: {
         [start: number]: SmallDiskList<T>|undefined
     } = {};
     private nextRemoteStorePosition!: SmallDiskList<number>;
@@ -97,14 +101,14 @@ export class LargeDiskList<T, ReducedObject> {
         if(summaryValues.length > 0) {
             let last = summaryValues.last();
             if(!last.shouldRemoteStore) {
-                let diskList = this.pendingFinishedSummaries[last.start];
+                let diskList = this.pendingSummaries[last.start];
                 if(!diskList) {
                     diskList = new SmallDiskList<T>(
                         this.localStorage,
                         last.localFileName,
                         last.mutableLocalFileName,
                     );
-                    this.pendingFinishedSummaries[last.start] = diskList;
+                    this.pendingSummaries[last.start] = diskList;
 
                     if(newState === "new") {
                         diskList.IsAlreadyInited();
@@ -121,6 +125,23 @@ export class LargeDiskList<T, ReducedObject> {
         return undefined;
     }
 
+    private async getSmallDiskList(summary: LargeDiskListSummaryInternal) {
+        let smallDiskObject = this.pendingSummaries[summary.start];
+        if(!smallDiskObject) {
+            smallDiskObject = new SmallDiskList(
+                this.localStorage,
+                summary.localFileName,
+                summary.mutableLocalFileName,
+            );
+            // Hmm... this is unfortunate, we parse the entire file, when we might be able to just use the raw data. But
+            //  we always need to read the file in, because we are sending it to a remote server... so this isn't the worst...
+            await smallDiskObject.Init();
+        }
+        await smallDiskObject.BlockUntilInitFinished();
+        await smallDiskObject.Finish();
+        return smallDiskObject;
+    }
+
     private onAdd = new Deferred<void>();
     private triggerOnAdd() {
         this.onAdd.Resolve();
@@ -134,7 +155,9 @@ export class LargeDiskList<T, ReducedObject> {
             let nextSummaryIndex = this.nextRemoteStorePosition.GetValues()[0] || 0;
             let storeCandidate = UnionUndefined(this.summaryLookup.GetValues()[nextSummaryIndex]);
             if(storeCandidate && storeCandidate.shouldRemoteStore) {
+                //console.log("Starting transition");
                 await this.summaryLookup.BlockUntilIndexSaved(nextSummaryIndex);
+                //console.log("index saved transition");
 
                 let localFileExists = await existsFilePromise(storeCandidate.localFileName);
                 if(!localFileExists) {
@@ -145,19 +168,7 @@ export class LargeDiskList<T, ReducedObject> {
 
                     // TODO: We need to remember to make sure our searching code handles the summaryLookup have summaries that don't exist.
                 } else {
-                    let smallDiskObject = this.pendingFinishedSummaries[storeCandidate.start];
-                    if(!smallDiskObject) {
-                        smallDiskObject = new SmallDiskList(
-                            this.localStorage,
-                            storeCandidate.localFileName,
-                            storeCandidate.mutableLocalFileName,
-                        );
-                        // Hmm... this is unfortunate, we parse the entire file, when we might be able to just use the raw data. But
-                        //  we always need to read the file in, because we are sending it to a remote server... so this isn't the worst...
-                        await smallDiskObject.Init();
-                    }
-                    await smallDiskObject.BlockUntilInitFinished();
-                    await smallDiskObject.Finish();
+                    let smallDiskObject = await this.getSmallDiskList(storeCandidate);
 
                     // We need to make sure the values don't exceed the summary object (which may happen if values write but the summary mutatation isn't
                     //  written before a crash), because that will completely break search behavior. If the summary object exceeds the values...
@@ -195,7 +206,7 @@ export class LargeDiskList<T, ReducedObject> {
                     //  nextRemoteStorePosition won't be updated, so we will just reupload the contents, no harm done.
                     await unlinkFilePromise(storeCandidate.localFileName);
 
-                    delete this.pendingFinishedSummaries[storeCandidate.start];
+                    delete this.pendingSummaries[storeCandidate.start];
                 }
 
                 await this.nextRemoteStorePosition.MutateLastValue(x => nextSummaryIndex + 1);
@@ -233,7 +244,7 @@ export class LargeDiskList<T, ReducedObject> {
             }
 
             let startKey = this.getSearchKey(value);
-            let newRange: LargeDiskListSummary = {
+            let newRange: LargeDiskListSummaryInternal = {
                 start: startKey,
                 last: startKey,
                 countInSummary: 0,
@@ -306,6 +317,19 @@ export class LargeDiskList<T, ReducedObject> {
         return Promise.all([ lookupPromise, summaryPromise ]);
     }
 
+    // Calls confirm with the oldest chunk, and when the confirm function finishes deletes the chunk.
+    public async ExportOldest(confirm: (
+        oldestChunk: T[]
+    ) => Promise<void>): Promise<void> {
+        let summaries = this.summaryLookup.GetValues();
+        if(summaries.length === 0) {
+            throw new Error(`Cannot export oldest, as there are no values.`);
+        }
+        
+    }
+
+
+
     public async FindAtOrBeforeOrAfter(searchKey: number): Promise<T | undefined> {
         let values = this.summaryLookup.GetValues();
 
@@ -314,12 +338,20 @@ export class LargeDiskList<T, ReducedObject> {
 
         let checkDirection = +1;
 
+        let loops = 0;
+
         while(true) {
+            if(loops > 10) {
+                throw new Error(`Search took too long. LargeDiskList.FindAtOrBeforeOrAfter is broken`);
+            }
+            loops++;
+
+
             let summary = UnionUndefined(values[summaryIndex]);
 
             if(!summary) {
                 if(checkDirection === -1) {
-                    console.log(Object.keys(this.pendingFinishedSummaries));
+                    console.log(Object.keys(this.pendingSummaries));
                     console.log(values.length, summaryIndex);
                     return undefined;
                 }
@@ -328,16 +360,18 @@ export class LargeDiskList<T, ReducedObject> {
                 continue;
             }
 
+            this.messages.push(`Trying summary ${summary.start} to ${summary.last}`)
+
             let tValues: T[] | undefined;
-            if(!summary.shouldRemoteStore || summary.start in this.pendingFinishedSummaries) {
-                let diskList = this.pendingFinishedSummaries[summary.start];
+            if(!summary.shouldRemoteStore || summary.start in this.pendingSummaries) {
+                let diskList = this.pendingSummaries[summary.start];
                 if(!diskList) {
                     diskList = new SmallDiskList(
                         this.localStorage,
                         summary.localFileName,
                         summary.mutableLocalFileName,
                     );
-                    this.pendingFinishedSummaries[summary.start] = diskList;
+                    this.pendingSummaries[summary.start] = diskList;
                     // It doesn't matter if shouldRemoteStore becomes true and this gets moved to remote storage before Init comes back. We have the in memory
                     //  class, which will stay alive as long as we have this reference.
                     await diskList.Init();
@@ -361,15 +395,18 @@ export class LargeDiskList<T, ReducedObject> {
                 try {
                     remoteContents = await this.remoteStorage.GetFileContents(summary.remoteFileName);
                 } catch(e) {
+                    this.messages.push(`Cannot get value from remote location`);
                     errors.push(e);
                 }
 
                 if(!remoteContents) {
                     // Download it from the local
                     try {
-                        let local = new SmallDiskList<T>(this.localStorage, summary.localFileName, summary.mutableLocalFileName);
+                        let local = await this.getSmallDiskList(summary);
                         localContents = local.GetValues();
+                        this.messages.push(`Got local contents, length ${localContents.length}`)
                     } catch(e) {
+                        this.messages.push(`Cannot get value from local location`);
                         errors.push(e);
                     }
                 }
@@ -387,7 +424,6 @@ export class LargeDiskList<T, ReducedObject> {
                 } else {
                     if(localContents) {
                         tValues = localContents;
-                        return;
                     }
                     else {
                         console.error(`Absolutely cannot get the contents at ${summary.start}. Errors: ${errors}.`);

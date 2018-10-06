@@ -20,6 +20,7 @@ import { Fragment } from "react";
 import { setInputValue, getInputValue } from "./util/Input";
 import { Server } from "http";
 import { UnionUndefined } from "./util/misc";
+import { NALType } from "./srcEnums";
 
 // Make sure we kill any previous instances
 console.log("pid", process.pid);

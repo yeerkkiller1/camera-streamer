@@ -1,14 +1,14 @@
 interface StorageBaseBase {
     GetDirectoryListing(path: string): Promise<string[]>;
-    GetFileSize(filePath: string): Promise<number>;
-    GetFileContents(filePath: string): Promise<Buffer>;
-    SetFileContents(filePath: string, data: string|Buffer): Promise<void>;
-    DeleteFile(filePath: string): Promise<void>;
-    Exists(filePath: string): Promise<boolean>;
+    GetFileSize(path: string): Promise<number>;
+    GetFileContents(path: string): Promise<Buffer>;
+    SetFileContents(path: string, data: string|Buffer): Promise<void>;
+    DeleteFile(path: string): Promise<void>;
+    Exists(path: string): Promise<boolean>;
     CreateDirectory(path: string): Promise<void>;
 }
 interface StorageBaseAppendableBase {
-    AppendData(filePath: string, data: string|Buffer): Promise<void>;
+    AppendData(path: string, data: string|Buffer): Promise<void>;
 }
 type StorageBaseAppendable = StorageBaseBase & StorageBaseAppendableBase;
 type StorageBase = StorageBaseBase | StorageBaseAppendable;

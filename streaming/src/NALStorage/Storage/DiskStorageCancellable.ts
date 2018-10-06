@@ -14,12 +14,16 @@ export interface CancellableCallObject {
 export class DiskStorageCancellable implements StorageBaseAppendable {
     constructor() { }
 
-    baseStorage = new DiskStorageBase();
+    private baseStorage = new DiskStorageBase();
 
-    callObjects: CancellableCallObject[] = [];
+    private onNewCall = new Deferred<void>();
+    private callObjects: CancellableCallObject[] = [];
 
     public HasCalls() {
         return this.callObjects.length > 0;
+    }
+    public OnNewCall(): Promise<void> {
+        return this.onNewCall.Promise();
     }
     public GetNextCall() {
         let call = this.callObjects.pop();
@@ -33,6 +37,9 @@ export class DiskStorageCancellable implements StorageBaseAppendable {
         let deferred = new Deferred<"call"|"cancel">();
         let onFinish = new Deferred<void>();
         this.callObjects.push({ name: fncName, deferred, onFinish, debugName: fncName });
+        this.onNewCall.Resolve();
+        this.onNewCall = new Deferred();
+
         let action = await deferred.Promise();
         if(action === "cancel") {
             onFinish.Resolve();

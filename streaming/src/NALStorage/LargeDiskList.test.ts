@@ -1,14 +1,14 @@
-import { runCodeWithFolder, runAllStorageSystemCrashes } from "./RemoteStorage/testHelpers";
-import { DiskStorageBase } from "./RemoteStorage/DiskStorageBase";
+import { runCodeWithFolder, runAllStorageSystemCrashes } from "./Storage/testHelpers";
+import { DiskStorageBase } from "./Storage/DiskStorageBase";
 import { SmallDiskList } from "./SmallDiskList";
 import { ThrowIfNotImplementsData, SetTimeoutAsync } from "pchannel";
 import { range, flatten } from "../util/misc";
 import { LargeDiskList } from "./LargeDiskList";
 import { mkdirSync } from "fs";
-import { mkdirPromise, writeFilePromise } from "../util/fs";
+import { mkdirPromise, writeFilePromise, appendFilePromise } from "../util/fs";
 import { findAtOrBeforeOrAfter } from "../util/algorithms";
 import { basename } from "path";
-import { DiskStorageCancellable } from "./RemoteStorage/DiskStorageCancellable";
+import { DiskStorageCancellable } from "./Storage/DiskStorageCancellable";
 
 describe("LargeDiskList", () => {
     it("works with simple data", async () => {
@@ -19,7 +19,7 @@ describe("LargeDiskList", () => {
             await mkdirPromise(remoteFolder);
 
             async function getList(storage = new DiskStorageBase()) {
-                let list = new LargeDiskList<number, number>(
+                let list = new LargeDiskList<number>(
                     storage,
                     storage,
                     localFolder,
@@ -68,7 +68,7 @@ describe("LargeDiskList", () => {
             await mkdirPromise(remoteFolder);
 
             async function getList(storage = new DiskStorageBase()) {
-                let list = new LargeDiskList<number, number>(
+                let list = new LargeDiskList<number>(
                     storage,
                     storage,
                     localFolder,
@@ -108,21 +108,22 @@ describe("LargeDiskList", () => {
 
     //*
     it("works with cancellation", async () => {
+        let runCount = 0;
         await runAllStorageSystemCrashes(async (folder, innerCancelCode) => {
+            runCount++;
             let localFolder = folder + "local/";
             let remoteFolder = folder + "remote/";
             await mkdirPromise(localFolder);
             await mkdirPromise(remoteFolder);
 
             async function getList(storage = new DiskStorageBase()) {
-                let list = new LargeDiskList<number, number>(
+                let list = new LargeDiskList<number>(
                     storage,
                     storage,
                     localFolder,
                     remoteFolder,
                     x => x
                 );
-
                 await list.Init();
 
                 return list;
@@ -134,10 +135,10 @@ describe("LargeDiskList", () => {
                 [0, 1, 3],
                 [0, 1, 3, 4],
             ];
-
+            
             let dir: any;
 
-            let prevMessages: string[] = [];
+            let prevMessagesObj: { messages: string[] } = { messages: [] };
             {
                 let list = await getList();
                 await list.AddNewValue(0);
@@ -150,32 +151,43 @@ describe("LargeDiskList", () => {
                 }
             }
             
+            
 
             await innerCancelCode(
                 async cancelStorage => {
+                    //console.log(`startcancel ${Date.now()}`);
+
+                    prevMessagesObj.messages = ["NO SUMMARY"];
                     try
                     {
                         let list = await getList(cancelStorage);
+
+                        let summary = Object.values(list.pendingSummaries)[0];
+                        if(summary) {
+                            prevMessagesObj.messages = summary.messages;
+                        }
+                        
                         let p1: Promise<unknown>|undefined;
                         let p2: Promise<unknown>|undefined;
                         let p3: Promise<unknown>|undefined;
                         let p4: Promise<unknown>|undefined;
 
                         p1 = list.AddNewValue(1);
-                        p2 = list.AddNewValue(2);
+                        //p2 = list.AddNewValue(2);
                         p3 = list.MutateLastValue(value => 3);
-                        //p4 = list.AddNewValue(4);
+                        p4 = list.AddNewValue(4);
 
-                        await Promise.all([p1, p2, p3, p4]);
+                        await Promise.all([p1, p2, p3, p4]); /*?.*/
                     } catch(e) { }
+                    //console.log("endcancel");
                 }
-            );
+            ); /*?.*/
 
             {
                 let list = await getList();
                 function printMessages() {
                     console.log("Previous messages start");
-                    for(let message of prevMessages) {
+                    for(let message of prevMessagesObj.messages) {
                         console.log(message);
                     }
                     console.log("Messages start");
@@ -196,8 +208,21 @@ describe("LargeDiskList", () => {
                     let listValue = await list.FindAtOrBeforeOrAfter(i);
                     let valueType = typeof listValue;
                     let isInvalid = valueType !== "number";
-                    if(isInvalid) {                       
-                        throw new Error(`${i}, ${list.messages.join(" ")}, ${list.summaryLookup.messages.join(" ")}, ${Object.values(list.pendingFinishedSummaries).map(x => x && `[${x.messages.join(", ")}]`)}, ${folder}`);
+                    if(isInvalid) {
+                        //  ${list.summaryLookup.messages.join(" ")}
+                        throw new Error(`
+${i}
+
+${list.messages.join("\n")}
+
+${Object.values(list.pendingSummaries).map(x => x && `[${x.messages.join(", ")}]`).join("\n")}
+
+${list.summaryLookup.GetValues().map(x => `${x.start} to ${x.last}`).join("\n")}
+
+${prevMessagesObj.messages.join("\n")}
+
+${folder}`
+                        );
                         //throw new Error(`Invalid FindAtOrBeforeOrAfter result for ${i}. Should have been a number, was ${listValue}, ${JSON.stringify(valueType)}`);
                     }
                     if(inferredList.length > 0 && inferredList.last() === listValue) continue;
@@ -209,8 +234,12 @@ describe("LargeDiskList", () => {
                 console.log(inferredList);
             }
         });
+        runCount;
     });
     //*/
     // Cancellations don't lose data
     // That data is still valid even with cancellations
+
+    //todonext
+    // Make sure we test ExportOldest
 });

@@ -5,6 +5,7 @@ import { GetMinGapSize } from "./TimeMap";
 import { group, sum } from "../util/math";
 import { writeNALToDisk, readNALsBulkFromDisk, loadIndexFromDisk, finalizeNALsOnDisk, deleteNALs, writeNALsBulkToDisk, readNALs } from "./NALBuffers";
 import { createIgnoreDuplicateCalls } from "../algs/cancel";
+import { NALType } from "../srcEnums";
 
 
 type ChunkMetadataExtended = ChunkMetadata & {
@@ -19,93 +20,10 @@ type ChunkObj = {
     index: (NALIndexInfo & { finishedWrite: boolean } | Deferred<void>)[];
     fileBasePath: string;
     writeLoop: ((code: () => Promise<void>) => void)|"exporting";
+    exported: Deferred<void>;
 };
 
-// Uses of chunks:
-//  - We push onto the end when adding a new chunk
-//      - Right now our implementation handles out or order times, but only in some places.
-//          If we make it never handle out of order times then we will strictly only need to push to the end
-//          of chunks.
-//  - We remove the oldest chunk (shift) when too much data is being stored
-//  - We look at the newest chunk to find the LastAddSeqNum
-//  - We search chunk startTimes to find the chunk that contains the video we are looking for.
-//      - That is the chunk with the a startTime before or at the startTime we requested, or the first chunk
-//  - We call reduceRanges with GetMinGapSize(rate), on all Ranges, to get an overarching range list
 
-
-// We need a class that stores a list, with a mutable last entry, that stores everything on disk,
-//  with mutations to the last entry being stored on the local system, and the rest of the values
-
-
-
-
-// There is a purely local DiskList, and one that is local and remote. The purely local one can read everything
-//  off disk, and so have no access restrictions. The local and remote one needs to split things across files,
-//  so accessing is a lot more difficult.
-
-/*
-todonext
-// We need to remove GetChunkMetadatas, in fact all chunk code, move it into ChunkIndex,
-//  and change the call sites that use the functions in LocalRemoteStorage, and then in
-//  StorageCombined.
-
-class ChunkIndex {
-    constructor(
-        private path: string,
-        // We store large amounts of data in here (GB per year possibly)
-        private storage: StorageBase,
-        // We need this for small amounts of data (hopefully just KB), so we can write quickly,
-        //  and append to files.
-        private localStorage: StorageBaseAppendable
-    ) { }
-
-    public Init(): Promise<void> { }
-
-    public LiveChunkCreated(
-        chunkUID: string,
-        firstAddSeqNum: number,
-        firstTime: number,
-    ): Promise<void> { }
-
-    public LiveChunkUpdated(
-        chunkUID: string,
-        addSeqNum: number,
-        time: number,
-    ): void { }
-
-    public LiveChunkFinished(
-        
-    ): Promise<void> { }
-
-
-    // We need to support moving stuff in this order:
-    //  pending add to new storage
-    //  pending delete from old storage
-    //  finish add to new storage
-    //  finish delete to new storage
-    // On pending delete we shouldn't make any new requests.
-    // On pending add we should block until add finishes
-    public ImportChunk(
-        chunk: Chunk
-    ): Promise<void> { }
-
-    public StartRemoveChunk(
-        chunkUID: string
-    ): void { }
-    public FinishRemoveChunk(
-        chunkUID: string
-    ): void { }
-
-
-    public GetLastAddSeqNum(): number { }
-   
-    public GetRangeList(): NALRange[] { }
-
-    public FindChunk(): Promise<string> { }
-
-    public GetChunkInfo(): Promise<ChunkMetadata> { }
-}
-*/
 
 export class LocalRemoteStorage implements RemoteStorageLocal {
     private chunksList: ChunkMetadataExtended[] = [];
@@ -126,7 +44,8 @@ export class LocalRemoteStorage implements RemoteStorageLocal {
     }
 
     constructor(
-        private storage: StorageBase,
+        private localStorage: StorageBaseAppendable,
+        private remoteStorage: StorageBase,
         private rate: number,
         private baseTotalCost: number,
         private baseTotalStorageBytes: number,
@@ -140,9 +59,6 @@ export class LocalRemoteStorage implements RemoteStorageLocal {
 
     private path = this.pathBase + `rate_${this.rate}/`;
 
-    // Data is appended every time a new index file is created, and every time it finishes.
-    private chunkIndex = this.path + "chunk.index";
-
     public async Init(
         nextStorageSystem: RemoteStorage|undefined,
         onChunkDeleted: (deleteTime: number) => void,
@@ -154,12 +70,12 @@ export class LocalRemoteStorage implements RemoteStorageLocal {
         // TODO: Change path to include rate, that way we don't need to do as much filtering of file names,
         //  and getting every rate that exists is much easier.
 
-        if(!await this.storage.Exists(this.pathBase)) {
-            await this.storage.CreateDirectory(this.pathBase);
+        if(!await this.localStorage.Exists(this.pathBase)) {
+            await this.localStorage.CreateDirectory(this.pathBase);
         }
 
-        if(!await this.storage.Exists(this.path)) {
-            await this.storage.CreateDirectory(this.path);
+        if(!await this.localStorage.Exists(this.path)) {
+            await this.localStorage.CreateDirectory(this.path);
         }
 
         // We need to read all of the data from the file system (well not the nals I guess, but at least the index files)
@@ -173,7 +89,7 @@ export class LocalRemoteStorage implements RemoteStorageLocal {
         
         //todonext
         // Make an index file for chunks, so we don't need to load all the index files (or all the files names)
-        let fileNames = await this.storage.GetDirectoryListing(this.path);
+        let fileNames = await this.localStorage.GetDirectoryListing(this.path);
         let nalFileNames = fileNames.filter(x => x.endsWith(".nal"));
 
         console.log(`Init ${this.DebugName()}, max bytes: ${maxBytes}, next storage system: ${nextStorageSystem && nextStorageSystem.DebugName()}`);
@@ -189,7 +105,7 @@ export class LocalRemoteStorage implements RemoteStorageLocal {
             let nalFilePath = this.path + nalFileName;
             let indexFilePath = this.path + indexFileName;
 
-            let nalInfosObj = await loadIndexFromDisk(this.storage, nalFilePath, indexFilePath);
+            let nalInfosObj = await loadIndexFromDisk(this.localStorage, nalFilePath, indexFilePath);
             if(!nalInfosObj) {
                 console.error(`Could not read index or nals. Ignoring file. ${nalFileName}`);
                 continue;
@@ -229,6 +145,7 @@ export class LocalRemoteStorage implements RemoteStorageLocal {
                 index: index,
                 fileBasePath: this.path + chunkUID,
                 writeLoop: this.createWriteLoop(),
+                exported: new Deferred()
             };
             insertIntoListMap(this.chunksList, chunkMetadata, x => x.Ranges[0].firstTime);
         }
@@ -238,14 +155,10 @@ export class LocalRemoteStorage implements RemoteStorageLocal {
     private createWriteLoop() {
         let writeLoopBase = TransformChannel<() => Promise<void>, { e: any } | undefined>(async input => {
             try {
-                console.log("a");
-                console.log(input.toString());
                 await input();
             } catch(e) {
-                console.log("b");
                 return { e };
             }
-            console.log("b");
         });
         return async (code: () => Promise<void>) => {
             this.checkWriteError();
@@ -284,7 +197,8 @@ export class LocalRemoteStorage implements RemoteStorageLocal {
             metadata: chunkMetadata,
             index: [new Deferred<void>()],
             fileBasePath: this.path + chunkUID,
-            writeLoop: this.createWriteLoop()
+            writeLoop: this.createWriteLoop(),
+            exported: new Deferred()
         };
 
         return chunkUID;
@@ -295,7 +209,7 @@ export class LocalRemoteStorage implements RemoteStorageLocal {
 
         let { chunks, chunksList, chunkThresholdBytes, maxBytes } = this;
 
-        let storage = this.storage;
+        let storage = this.localStorage;
         if(!("AppendData" in storage)) {
             throw new Error(`Can not AddSingleNAL when underlying storage is not appendable`);
         }
@@ -509,7 +423,7 @@ export class LocalRemoteStorage implements RemoteStorageLocal {
                 }
                 index.push(info);
             }
-            let nalData = await readNALsBulkFromDisk(this.storage, chunkObj.fileBasePath);
+            let nalData = await readNALsBulkFromDisk(this.localStorage, chunkObj.fileBasePath);
             let chunkBuffer = createChunkData(index, nalData);
 
             if(chunkBuffer.length < nalData.length) {
@@ -527,9 +441,10 @@ export class LocalRemoteStorage implements RemoteStorageLocal {
 
             await exportFnc(chunk);
             await this.removeChunk(chunkUID);
+            chunkObj.exported.Resolve();
         });
         chunkObj.writeLoop = "exporting";
-    }
+    }    
     private async removeChunk(chunkUID: string): Promise<void> {
         let { chunks, chunksList } = this;
 
@@ -554,7 +469,7 @@ export class LocalRemoteStorage implements RemoteStorageLocal {
         } else {
             chunksList.splice(chunksListIndex, 1);
         }
-        await deleteNALs(this.storage, chunkObj.fileBasePath);
+        await deleteNALs(this.localStorage, chunkObj.fileBasePath);
     }
 
     public async AddChunk(chunk: Chunk): Promise<void> {
@@ -578,7 +493,7 @@ export class LocalRemoteStorage implements RemoteStorageLocal {
         let fileBasePath = this.path + chunkUID;
         // Wait until we write to disk before we add it to memory, as all in memory reads
         //  read from disk presently (if they didn't then we could make writing non-blocking).
-        await writeNALsBulkToDisk(this.storage, fileBasePath, chunkData.nalsBulk, chunkData.index, chunkMetadata.IsLive);
+        await writeNALsBulkToDisk(this.localStorage, fileBasePath, chunkData.nalsBulk, chunkData.index, chunkMetadata.IsLive);
 
         let index: (NALIndexInfo & { finishedWrite: boolean })[] = [];
         for(let indexInfo of chunkData.index) {
@@ -590,6 +505,7 @@ export class LocalRemoteStorage implements RemoteStorageLocal {
             index: index,
             fileBasePath: this.path + chunkUID,
             writeLoop: this.createWriteLoop(),
+            exported: new Deferred()
         };
     }
 
@@ -666,7 +582,7 @@ export class LocalRemoteStorage implements RemoteStorageLocal {
                 }
             }
             
-            let result = await readNALs(this.storage, chunkObjChecked.fileBasePath, times, onCancelled);
+            let result = await readNALs(this.localStorage, chunkObjChecked.fileBasePath, times, onCancelled);
             return result;
         });
 
@@ -740,6 +656,21 @@ export class LocalRemoteStorage implements RemoteStorageLocal {
         this.checkWriteError();
 
         return !this.fakeOverrides;
+    }
+
+
+    /** Blocks until current writes are finished */
+    public async Block() {
+        let chunks = Object.values(this.chunks);
+        for(let chunk of chunks) {
+            if(chunk.writeLoop === "exporting") {
+                await chunk.exported.Promise();
+            } else {
+                let writeBlock = new Deferred<void>();
+                chunk.writeLoop(async () => { writeBlock.Resolve() });
+                await writeBlock.Promise();
+            }
+        }
     }
 }
 

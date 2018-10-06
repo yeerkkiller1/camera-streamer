@@ -4,17 +4,58 @@ import { fixErrorStack } from "../util/stack";
 
 const cancelError = Symbol("cancelled");
 
-let fncId = 0;
+export function createIgnoreDuplicateCalls<F extends (...args: any[]) => Promise<any>=any>(
+    fnc: F
+): F {
+    let nextCall: Deferred<"run"|"cancel">|undefined;
+    let inCall = false;
+
+    const callId: ReplaceReturnType<F, ReturnType<F>|Promise<"CANCELLED">> & F = call as any;
+    return callId;
+
+    async function call(...args: any[]) {
+        if(inCall) {
+            if(nextCall) {
+                nextCall.Resolve("cancel");
+            }
+            nextCall = new Deferred<"run"|"cancel">();
+            let status = await nextCall.Promise();
+            if(status === "cancel") {
+                //console.log(`Skipping call`);
+                //console.log(fnc);
+                return "CANCELLED";
+            }
+        } else {
+            inCall = true;
+        }
+
+        try {
+            return await fnc(...args);
+        } finally {
+            if(nextCall) {
+                nextCall.Resolve("run");
+                nextCall = undefined;
+            } else {
+                inCall = false;
+            }
+        }
+    }
+}
+
 
 /** Creates a function that calls the underlying fnc. If there are no current calls, it calls the function.
  *      Otherwise it waits for the pending function to finish. If there is a previous call waiting, it cancels
  *      that calls, and replaces its spot as the function that is waiting to be called.
  */
+/*
 export function createIgnoreDuplicateCalls<F extends (...args: any[]) => Promise<any>=any>(
     fnc: F
 ): ReplaceReturnType<F, ReturnType<F>|Promise<"CANCELLED">> & F {
     let nextCall = new Deferred<void>();
     let waitingCall: { args: any[]; result: Deferred<{ result: any } | "cancelled"> } | undefined;
+
+    // This management loop is great! Except it screws up callstacks. So... we probably need to go back to in place management...
+
     (async () => {
         while(true) {
             await nextCall.Promise();
@@ -63,7 +104,9 @@ export function createIgnoreDuplicateCalls<F extends (...args: any[]) => Promise
         return resultObj.result;
     }) as any;
 }
+*/
 
+let fncId = 0;
 export function createCancelPending<F extends (...args: any[]) => Promise<any>=any>(
     cancelPendingPromises: () => void,
     createFnc: (

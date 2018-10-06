@@ -1,3 +1,5 @@
+import { getTimeSynced } from "./time";
+
 // Unfortunately I can't figure out how to get this working with generic functions without chaining function calls.
 
 export function fixErrorStack<
@@ -22,6 +24,7 @@ export function fixErrorStack<
             let callFncStack = getStack();
             let parentCallEntry = callFncStack[1];
 
+            //console.log(`Call start ${Date.now()}`);
             try {
                 return await f.call(this, ...args);
             } catch(e) {

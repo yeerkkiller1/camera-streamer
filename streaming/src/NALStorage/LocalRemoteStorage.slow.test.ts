@@ -1,13 +1,9 @@
-import { CreateTempFolderPath } from "temp-folder";
-import { unlinkFilePromise } from "../util/fs";
-import { execFile } from "child_process";
-import { ThrowIfNotImplementsData, SetTimeoutAsync } from "pchannel";
-import { LocalRemoteStorage, SmallDiskList } from "./LocalNALRate";
-import { LocalStorage } from "node-localstorage";
-import { DiskStorageBase } from "./RemoteStorage/DiskStorageBase";
-import { DiskStorageCancellable, CancellableCallObject } from "./RemoteStorage/DiskStorageCancellable";
-import { runCodeWithFolder, runAllStorageSystemCrashes } from "./RemoteStorage/testHelpers";
-import { range, flatten } from "../util/misc";
+import { runAllStorageSystemCrashes, runCodeWithFolder } from "./Storage/testHelpers";
+import { LocalRemoteStorage } from "./LocalRemoteStorage";
+import { ThrowIfNotImplementsData } from "pchannel";
+import { DiskStorageBase } from "./Storage/DiskStorageBase";
+import { StorageSizeInstrumentAppendable, StorageSizeInstrument } from "./Storage/StorageSizeInstrument";
+import { randomUID } from "../util/misc";
 
 enum NALType {
     //NALType_sps = 0,
@@ -17,7 +13,7 @@ enum NALType {
 }
 
 let nextAddSeqNum = 0;
-function createFakeNAL(rate: number, time: number, type: NALType): NALHolderMin {
+function createFakeNAL(rate: number, time: number, type: NALType, nalData = Buffer.from([])): NALHolderMin {
     return {
         rate,
         time,
@@ -26,55 +22,13 @@ function createFakeNAL(rate: number, time: number, type: NALType): NALHolderMin 
         height: 500,
         addSeqNum: nextAddSeqNum++,
 
-        nal: Buffer.from([]),
+        nal: nalData,
         sps: Buffer.from([]),
         pps: Buffer.from([]),
     };
 }
 
 describe("DiskStorageBase", () => {
-    it("writes and reads", async () => {
-        await runCodeWithFolder(async folder => {
-            let rate = 1;
-            let storage = new LocalRemoteStorage(new DiskStorageBase(), rate, 10, 1024 * 1024 * 10, folder);
-            await storage.Init(undefined, () => {}, 1024, 1024 * 1024 * 10);
-            storage.AddSingleNAL(createFakeNAL(rate, 0, NALType.NALType_keyframe));
-            storage.AddSingleNAL(createFakeNAL(rate, 1, NALType.NALType_interframe));
-
-            let metadata = storage.GetChunkMetadatas()[0];
-
-            let { index } = await storage.GetIndex("cancel", metadata.ChunkUID);
-
-            ThrowIfNotImplementsData(index[0], { type: NALType.NALType_keyframe });
-            ThrowIfNotImplementsData(index[1], { type: NALType.NALType_interframe });
-            ThrowIfNotImplementsData("Promise" in index[2], true);
-        });
-    });
-
-    it("runAllStorageSystemCrashes actuals runs all possibilities", async () => {
-        let crashCount = 0;
-        let runCount = 0;
-        await runAllStorageSystemCrashes(async (folder, innerCancelCode) => {
-            await innerCancelCode(
-                async storage => {
-                    runCount++;
-                    await storage.SetFileContents(folder + "test.txt", "data");
-                    try {
-                        let contents = await storage.GetFileContents(folder + "test.txt");
-                        ThrowIfNotImplementsData(contents.toString(), "data");
-                    } catch(e) {
-                        crashCount++;
-                    }
-                }
-            );
-        });
-        // We should run 3 times. Cancel SetFileContents - Run SetFileContents, Cancel GetFileContents - Run SetFileContents, Run GetFileContents
-        ThrowIfNotImplementsData(runCount, 3);
-
-        // We should crash when the SetFileContents is cancelled, or the GetFileContents is cancelled, two cases.
-        ThrowIfNotImplementsData(crashCount, 2);
-    });
-
     it("keeps local index in sync with actual data", async () => {
         await runAllStorageSystemCrashes(async (folder, innerCancelCode) => {
 
@@ -84,8 +38,8 @@ describe("DiskStorageBase", () => {
             //  it is consistent.
 
             let rate = 1;
-            async function GetStorage(base: StorageBase) {
-                let storage = new LocalRemoteStorage(base, rate, 10, 1024 * 1024 * 10, folder);
+            async function GetStorage(base: StorageBaseAppendable) {
+                let storage = new LocalRemoteStorage(base, base, rate, 10, 1024 * 1024 * 10, folder);
                 await storage.Init(undefined, () => {}, 1024, 1024 * 1024 * 10);
                 return storage;
             }
@@ -188,6 +142,49 @@ describe("DiskStorageBase", () => {
             ThrowIfNotImplementsData(index[1], { type: NALType.NALType_interframe });
             ThrowIfNotImplementsData("Promise" in index[2], true);
             */
+        });
+    });
+
+    it("doesn't store entire indexes locally", async () => {
+        await runCodeWithFolder(async folder => {
+            let rate = 1;
+
+            let count = 500;
+
+            // Write
+            {
+                let localStorage = new StorageSizeInstrumentAppendable(new DiskStorageBase());
+                let remoteStorage = new StorageSizeInstrument(new DiskStorageBase());
+
+                let storage = new LocalRemoteStorage(localStorage, remoteStorage, rate, 10, 1024 * 1024 * 10, folder);/*?.*/
+                await storage.Init(undefined, () => {}, 1, 1024 * 1024 * 10);/*?.*/
+
+                for(let i = 0; i < count; i++) {
+                    storage.AddSingleNAL(createFakeNAL(rate, i, NALType.NALType_keyframe));/*?.*/
+                }
+                await storage.Block();/*?.*/
+            }
+
+            let localStorage = new StorageSizeInstrumentAppendable(new DiskStorageBase());
+            let remoteStorage = new StorageSizeInstrument(new DiskStorageBase());
+            // Read
+            {
+                let storage = new LocalRemoteStorage(localStorage, remoteStorage, rate, 10, 1024 * 1024 * 10, folder);/*?.*/
+                await storage.Init(undefined, () => {}, 1024, 1024 * 1024 * 10);/*?.*/
+
+                storage.AddSingleNAL(createFakeNAL(rate, count, NALType.NALType_keyframe)); /*?.*/
+
+                storage.GetChunkMetadatas();
+
+                await storage.Block();/*?.*/
+            }/*?.*/
+            
+            if(localStorage.BytesRead > 1024 * 10) {
+                // Writing is so slow that count has to be low. 10KB isn't really too much, but to really test this count would have to be around 1 million, and then
+                //  we could make the max read limit more like 10MB. But that test would take an hour to run. If this becomes a problem and we the alorithmn
+                //  for calculating the threshold of local storage size, then removing this error would probably be fine...
+                throw new Error(`Getting the NAL overview and adding a single nal shouldn't require reading more than 10KB. We are only reading indexes, and the NALs in this test are 0 bytes long. This failure likely means we are storing the index locally inefficently.`);
+            }
         });
     });
 });
