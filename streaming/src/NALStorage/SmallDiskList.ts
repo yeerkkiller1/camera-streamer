@@ -204,7 +204,7 @@ export class SmallDiskList<T> {
             let index = this.values.length;
             this.values.push(value);
             this.valuesBufferLengths.push(valueLength);
-
+            
             for(let i = this.mainFilePathLengthCount; i < this.values.length - 1; i++) {
                 this.mainFilePathLength += this.valuesBufferLengths[i];
             }
@@ -217,7 +217,7 @@ export class SmallDiskList<T> {
         });
     });
 
-    todonext
+    //todonext
     // We should just have one serialized function that performs all IO. add, mutate and remove.
     //  And actually... we should start actually overwriting files
     //  fs.write and stuff

@@ -28,7 +28,7 @@ function createFakeNAL(rate: number, time: number, type: NALType, nalData = Buff
     };
 }
 
-describe("DiskStorageBase", () => {
+xdescribe("DiskStorageBase", () => {
     it("keeps local index in sync with actual data", async () => {
         await runAllStorageSystemCrashes(async (folder, innerCancelCode) => {
 

@@ -2,7 +2,6 @@ import { runCodeWithFolder, runAllStorageSystemCrashes } from "./Storage/testHel
 import { DiskStorageBase } from "./Storage/DiskStorageBase";
 import { SmallDiskList } from "./SmallDiskList";
 import { ThrowIfNotImplementsData, ThrowsAsync, Throws, Deferred } from "pchannel";
-import { range, flatten } from "../util/misc";
 import { DiskStorageCancellable, CancellableCallObject } from "./Storage/DiskStorageCancellable";
 
 class BrokenStorage implements StorageBaseAppendable {
@@ -215,7 +214,7 @@ describe("SmallDiskList", () => {
         });
     });
 
-    it("cancellation don't corrupt confirmed data", async () => {
+    it("cancellation doesn't corrupt confirmed data", async () => {
         await runAllStorageSystemCrashes(async (folder, innerCancelCode) => {
             console.log(folder);
             async function getList(storage = new DiskStorageBase()) {
@@ -237,10 +236,12 @@ describe("SmallDiskList", () => {
             // Maybe add
             await innerCancelCode(
                 async cancelStorage => {
+                    console.log("start cancel")
                     try {
                         let list = await getList(cancelStorage);
                         list.AddNewValue(1);
                         list.MutateLastValue(x => 0);
+                        console.log("k");
                         await list.AddNewValue(2);
                     } catch(e) { }
                 }

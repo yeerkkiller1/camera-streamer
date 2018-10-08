@@ -1,7 +1,7 @@
 import { ThrowIfNotImplementsData, ThrowsAsync, PChanFromArray, PChanFromGenerator } from "pchannel";
 import { IndexLookup } from "./IndexLookup";
 
-describe("IndexLookup", () => {
+xdescribe("IndexLookup", () => {
     describe("basic", () => {
         it("speedTest", async () => {
             let time = Date.now();

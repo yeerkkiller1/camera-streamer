@@ -31,7 +31,7 @@ function createFakeNAL(rate: number, time: number, type: NALType, nalData = Buff
     };
 }
 
-describe("DiskStorageBase", () => {
+xdescribe("DiskStorageBase", () => {
     it("writes and reads", async () => {
         await runCodeWithFolder(async folder => {
             let rate = 1;

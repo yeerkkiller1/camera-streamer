@@ -10,7 +10,7 @@ import { findAtOrBeforeOrAfter } from "../util/algorithms";
 import { basename } from "path";
 import { DiskStorageCancellable } from "./Storage/DiskStorageCancellable";
 
-describe("LargeDiskList", () => {
+xdescribe("LargeDiskList", () => {
     it("works with simple data", async () => {
         await runCodeWithFolder(async (folder) => {
             let localFolder = folder + "local/";

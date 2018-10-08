@@ -80,6 +80,8 @@ export async function runAllStorageSystemCrashes(
                 }
 
                 let choice = choose(allPendingPromises.map(x => x.debugName).concat("CANCEL"));
+                console.log(`Choose ${choice}`);
+
                 if(choice === allPendingPromises.length) {
                     // Choose to cancel everything. We don't test for random failures, just the whole system dying and everything failing.
 
@@ -126,7 +128,6 @@ export async function runAllStorageSystemCrashes(
 
                     masterLoopDeferred.Resolve((async () => {
                         // Wait a promise to let code(storage) actually be called
-                        await Promise.resolve(0);
                         let masterLoop = masterLoopFnc();
                         masterLoopFncDeferred.Resolve(masterLoop);
                     })());
