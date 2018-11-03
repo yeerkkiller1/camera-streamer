@@ -11,15 +11,6 @@ import { writeFile, write } from "fs";
 
 // Has small amounts of data so everything is stored locally, and read in on boot.
 export class SmallDiskList<T> {
-    constructor(
-        private localStorage: StorageBaseAppendable,
-        // Should contain a single *, which indicates the location a unique identifer can be set.
-        private mainFilePath: string,
-        private mutateFilePath: string,
-    ) {
-
-    }
-
     private values: T[] = [];
     private valuesBufferLengths: number[] = [];
 
@@ -35,6 +26,14 @@ export class SmallDiskList<T> {
     /** The amount of values that are written to the disk, and will not be lost. */
     private confirmedCount = 0;
     private onConfirmedCountChanged = new Deferred<void>();
+
+    constructor(
+        private localStorage: StorageBaseAppendable,
+        // Should contain a single *, which indicates the location a unique identifer can be set.
+        private mainFilePath: string,
+        private mutateFilePath: string,
+    ) { }
+
     private setConfirmedCount(count: number) {
         if(count <= this.confirmedCount) return;
         let confirmObj = this.onConfirmedCountChanged.Value();
@@ -127,8 +126,7 @@ export class SmallDiskList<T> {
             return;
         }
         this.currentFatalError = { e };
-        this.onConfirmedCountChanged.Reject(e);
-
+        //this.onConfirmedCountChanged.Reject(e);
     }
     private async requireAsyncBlock<T>(code: () => Promise<T>): Promise<T> {
         if(this.currentFatalError !== undefined) {
@@ -227,7 +225,6 @@ export class SmallDiskList<T> {
     //      we can do it without a management loop, to preserve callstacks, which will in the end be better.
 
     
-
 
 
     private addNewValueInternal = TransformChannel<{value: T, index: number}, void>(async (valueObj) => {

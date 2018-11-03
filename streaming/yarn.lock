@@ -3632,9 +3632,9 @@ pbkdf2@^3.0.3:
     safe-buffer "^5.0.1"
     sha.js "^2.4.8"
 
-pchannel@0.4.12:
-  version "0.4.12"
-  resolved "https://registry.yarnpkg.com/pchannel/-/pchannel-0.4.12.tgz#b97651acf3f1494411ba800d02e3ca31a7762eb7"
+pchannel@0.4.15:
+  version "0.4.15"
+  resolved "https://registry.yarnpkg.com/pchannel/-/pchannel-0.4.15.tgz#23f3876cadbc9a9e797b97730abd9a4644de36c3"
 
 pchannel@0.4.6:
   version "0.4.6"
@@ -4750,6 +4750,10 @@ sshpk@^1.7.0:
     jsbn "~0.1.0"
     tweetnacl "~0.14.0"
 
+stack-chain@^2.0.0:
+  version "2.0.0"
+  resolved "https://registry.yarnpkg.com/stack-chain/-/stack-chain-2.0.0.tgz#d73d1172af89565f07438b5bcc086831b6689b2d"
+
 static-extend@^0.1.1:
   version "0.1.2"
   resolved "https://registry.yarnpkg.com/static-extend/-/static-extend-0.1.2.tgz#60809c39cbff55337226fd5e0b520f341f1fb5c6"
@@ -5012,6 +5016,12 @@ tough-cookie@~2.3.0, tough-cookie@~2.3.3:
   resolved "https://registry.yarnpkg.com/tough-cookie/-/tough-cookie-2.3.4.tgz#ec60cee38ac675063ffc97a5c18970578ee83655"
   dependencies:
     punycode "^1.4.1"
+
+trace@^3.1.0:
+  version "3.1.0"
+  resolved "https://registry.yarnpkg.com/trace/-/trace-3.1.0.tgz#32709b7f2324be68e99547b12dacd17ab900b1e2"
+  dependencies:
+    stack-chain "^2.0.0"
 
 trim-newlines@^1.0.0:
   version "1.0.0"

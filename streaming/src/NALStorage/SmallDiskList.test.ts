@@ -3,6 +3,7 @@ import { DiskStorageBase } from "./Storage/DiskStorageBase";
 import { SmallDiskList } from "./SmallDiskList";
 import { ThrowIfNotImplementsData, ThrowsAsync, Throws, Deferred } from "pchannel";
 import { DiskStorageCancellable, CancellableCallObject } from "./Storage/DiskStorageCancellable";
+import { itThrowOnPendingAwaits } from "../util/promiseAssert";
 
 class BrokenStorage implements StorageBaseAppendable {
     GetDirectoryListing(path: string): Promise<string[]> { throw new Error("Method not implemented."); }
@@ -51,9 +52,10 @@ async function getCalls(storage: DiskStorageCancellable): Promise<CancellableCal
     return calls;
 }
 
-describe("SmallDiskList", () => {
-    describe("throws", () => {
-        it("throws when the underlying storage breaks, and rethrow on other calls", async () => {
+// file.only
+fdescribe("SmallDiskList", () => {
+    fdescribe("throws", () => {
+        itThrowOnPendingAwaits("throws when the underlying storage breaks, and rethrow on other calls", async () => {
             let list = new SmallDiskList(new BrokenStorage(), "", "");
             await ThrowsAsync(async () => {
                 await list.Init();
@@ -103,7 +105,7 @@ describe("SmallDiskList", () => {
     });
 
     
-
+    /*
     it("works with simple data", async () => {
         await runCodeWithFolder(async (folder) => {
             async function getList() {
@@ -257,4 +259,5 @@ describe("SmallDiskList", () => {
             }
         });
     });
+    */
 });
